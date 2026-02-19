@@ -180,8 +180,13 @@ async function dbQuery(sql, params = []) {
   try {
     if (engine === 'mysql') {
       const pool = _ensureMysqlPool();
-      const [rows] = await pool.execute(sql, params);
-      // MySQL returns RowDataPacket[] for SELECT; OkPacket for INSERT/UPDATE.
+
+      // mysql2 note:
+      // - pool.execute() is for prepared statements and expects a single statement.
+      // - pool.query() is appropriate for raw SQL (incl DDL) and is what we want for migrations.
+      const [rows] = await pool.query(sql, params);
+
+      // MySQL returns RowDataPacket[] for SELECT; OkPacket for INSERT/UPDATE/DDL.
       // We normalize to { rows } for SELECT-like queries.
       return { rows: Array.isArray(rows) ? rows : [rows] };
     }
@@ -225,11 +230,22 @@ async function dbClose() {
   }
 }
 
+async function dbExecRaw(sql) {
+  /**
+   * Execute raw SQL without parameters for the configured engine.
+   *
+   * This is primarily intended for migration execution where statements are
+   * already constructed and split safely.
+   */
+  return dbQuery(sql);
+}
+
 module.exports = {
   getDbEngine,
   isMysqlConfigured,
   isPostgresConfigured,
   isDbConfigured,
   dbQuery,
+  dbExecRaw,
   dbClose
 };

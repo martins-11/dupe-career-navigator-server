@@ -20,9 +20,33 @@ const dotenv = require('dotenv');
  */
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const { getDbEngine, isDbConfigured, dbQuery, dbClose } = require('./connection');
+const { getDbEngine, isDbConfigured, dbExecRaw, dbQuery, dbClose } = require('./connection');
 const { getMigrationSql: getPgInitSql } = require('./migrations/001_init.sql');
 const { getMigrationSql: getMysqlInitSql } = require('./migrations/001_init.mysql.sql');
+
+function _splitSqlStatements(sql) {
+  /**
+   * Splits a SQL migration string into individual statements.
+   *
+   * This is intentionally simple for our migration style:
+   * - Statements are separated by semicolons.
+   * - We strip out full-line and inline `-- ...` comments.
+   * - We do not attempt to parse semicolons inside quoted strings (not used in our DDL).
+   */
+  const noLineComments = sql
+    .split('\n')
+    .map((line) => {
+      const idx = line.indexOf('--');
+      if (idx === -1) return line;
+      return line.slice(0, idx);
+    })
+    .join('\n');
+
+  return noLineComments
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
 // PUBLIC_INTERFACE
 async function runMigrations() {
@@ -46,12 +70,20 @@ async function runMigrations() {
   const sql = engine === 'mysql' ? getMysqlInitSql() : getPgInitSql();
 
   try {
-    // NOTE: For this scaffold, we apply the exported SQL as a single statement.
-    // MySQL driver supports multi-statement only when enabled; our init SQL is
-    // written to be safe as a single multi-line command for mysql2.
-    //
-    // If this becomes an issue, we can split statements and execute sequentially.
-    await dbQuery(sql);
+    if (engine === 'mysql') {
+      // MySQL migrations may contain multiple CREATE TABLE statements. mysql2 will
+      // reject multi-statements unless multipleStatements=true is enabled.
+      //
+      // To keep connection defaults safe, we split and run sequentially.
+      const statements = _splitSqlStatements(sql);
+
+      for (const stmt of statements) {
+        await dbExecRaw(stmt);
+      }
+    } else {
+      // Postgres driver can execute our init SQL as a single payload.
+      await dbQuery(sql);
+    }
 
     // eslint-disable-next-line no-console
     console.log(`[db:migrate] Migration applied: 001_init (${engine})`);
