@@ -1,33 +1,33 @@
 'use strict';
 
 const pgRepo = require('./personasRepo');
+const mysqlRepo = require('./mysql/personasRepo.mysql');
 const memRepo = require('./memory/personasMemoryRepo');
+const { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } = require('../db/connection');
 
 /**
  * Personas repository adapter:
  * - Uses in-memory persistence by default
- * - Uses Postgres implementation when env vars are configured
+ * - Uses MySQL implementation when env vars are configured (default engine)
+ * - Can use Postgres implementation when DB_ENGINE=postgres and env vars are configured
  *
  * Keeps API routes stable and avoids requiring DB credentials to run.
  */
 
-function _isDbConfigured() {
-  return Boolean(
-    (process.env.PG_CONNECTION_STRING && process.env.PG_CONNECTION_STRING.trim()) ||
-      (process.env.PGHOST && process.env.PGHOST.trim()) ||
-      (process.env.PGDATABASE && process.env.PGDATABASE.trim()) ||
-      (process.env.PGUSER && process.env.PGUSER.trim())
-  );
-}
-
 function _repo() {
-  return _isDbConfigured() ? pgRepo : memRepo;
+  const engine = getDbEngine();
+
+  if (engine === 'mysql') {
+    return isDbConfigured() && isMysqlConfigured() ? mysqlRepo : memRepo;
+  }
+
+  return isDbConfigured() && isPostgresConfigured() ? pgRepo : memRepo;
 }
 
 // PUBLIC_INTERFACE
-function isDbConfigured() {
-  /** Returns true if PostgreSQL appears configured. */
-  return _isDbConfigured();
+function isDbConfiguredPublic() {
+  /** Returns true if configured DB engine appears configured. */
+  return isDbConfigured();
 }
 
 // PUBLIC_INTERFACE
@@ -69,29 +69,33 @@ async function getLatestPersonaVersion(personaId) {
 // PUBLIC_INTERFACE
 async function saveDraft(personaId, draftJson) {
   /** Save a draft blob (in-memory; DB support can be added later). */
-  return (_repo().saveDraft || memRepo.saveDraft)(personaId, draftJson);
+  const repo = _repo();
+  return (repo.saveDraft || memRepo.saveDraft)(personaId, draftJson);
 }
 
 // PUBLIC_INTERFACE
 async function getDraft(personaId) {
   /** Get a draft blob (in-memory; DB support can be added later). */
-  return (_repo().getDraft || memRepo.getDraft)(personaId);
+  const repo = _repo();
+  return (repo.getDraft || memRepo.getDraft)(personaId);
 }
 
 // PUBLIC_INTERFACE
 async function saveFinal(personaId, finalJson) {
   /** Save a final blob (in-memory; DB support can be added later). */
-  return (_repo().saveFinal || memRepo.saveFinal)(personaId, finalJson);
+  const repo = _repo();
+  return (repo.saveFinal || memRepo.saveFinal)(personaId, finalJson);
 }
 
 // PUBLIC_INTERFACE
 async function getFinal(personaId) {
   /** Get a final blob (in-memory; DB support can be added later). */
-  return (_repo().getFinal || memRepo.getFinal)(personaId);
+  const repo = _repo();
+  return (repo.getFinal || memRepo.getFinal)(personaId);
 }
 
 module.exports = {
-  isDbConfigured,
+  isDbConfigured: isDbConfiguredPublic,
   createPersona,
   getPersonaById,
   updatePersona,

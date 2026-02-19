@@ -1,33 +1,33 @@
 'use strict';
 
 const pgRepo = require('./buildsRepo');
+const mysqlRepo = require('./mysql/buildsRepo.mysql');
 const memRepo = require('./memory/buildsMemoryRepo');
+const { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } = require('../db/connection');
 
 /**
  * Builds repository adapter:
  * - Uses in-memory persistence by default
- * - Uses Postgres implementation when env vars are configured
+ * - Uses MySQL implementation when configured (default engine)
+ * - Can use Postgres implementation when DB_ENGINE=postgres and configured
  *
- * Keeps services runnable without DB credentials while preserving Postgres scaffolding for RDS.
+ * Keeps services runnable without DB credentials while preserving DB scaffolding.
  */
 
-function _isDbConfigured() {
-  return Boolean(
-    (process.env.PG_CONNECTION_STRING && process.env.PG_CONNECTION_STRING.trim()) ||
-      (process.env.PGHOST && process.env.PGHOST.trim()) ||
-      (process.env.PGDATABASE && process.env.PGDATABASE.trim()) ||
-      (process.env.PGUSER && process.env.PGUSER.trim())
-  );
-}
-
 function _repo() {
-  return _isDbConfigured() ? pgRepo : memRepo;
+  const engine = getDbEngine();
+
+  if (engine === 'mysql') {
+    return isDbConfigured() && isMysqlConfigured() ? mysqlRepo : memRepo;
+  }
+
+  return isDbConfigured() && isPostgresConfigured() ? pgRepo : memRepo;
 }
 
 // PUBLIC_INTERFACE
-function isDbConfigured() {
-  /** Returns true if PostgreSQL appears configured. */
-  return _isDbConfigured();
+function isDbConfiguredPublic() {
+  /** Returns true if configured DB engine appears configured. */
+  return isDbConfigured();
 }
 
 // PUBLIC_INTERFACE
@@ -49,7 +49,7 @@ async function updateBuild(buildId, patch) {
 }
 
 module.exports = {
-  isDbConfigured,
+  isDbConfigured: isDbConfiguredPublic,
   createBuild,
   getBuildById,
   updateBuild
