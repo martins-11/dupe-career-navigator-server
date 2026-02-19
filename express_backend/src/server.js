@@ -27,6 +27,7 @@ const uploadsRouter = require('./routes/uploads');
 const extractionRouter = require('./routes/extraction');
 const buildsRouter = require('./routes/builds');
 const aiRouter = require('./routes/ai');
+const orchestrationRouter = require('./routes/orchestration');
 const docsRouter = require('./routes/docs');
 
 const app = express();
@@ -51,6 +52,7 @@ app.use('/uploads', uploadsRouter);
 app.use('/extraction', extractionRouter);
 app.use('/builds', buildsRouter);
 app.use('/ai', aiRouter);
+app.use('/orchestration', orchestrationRouter);
 app.use('/documents', documentsRouter);
 app.use('/personas', personasRouter);
 
