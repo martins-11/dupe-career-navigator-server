@@ -12,7 +12,11 @@ const { uuidV4 } = require('../../utils/uuid');
 // PUBLIC_INTERFACE
 async function createBuild(input) {
   /** Create a build row in MySQL and return it. */
-  const id = uuidV4();
+  // IMPORTANT:
+  // The workflow layer (workflowService) generates the canonical build/workflow id.
+  // Downstream tables (e.g., ai_runs.build_id) reference that id via FK, so this repo
+  // must honor a caller-provided input.id to prevent FK failures.
+  const id = input?.id || uuidV4();
   const now = new Date();
 
   await dbQuery(
