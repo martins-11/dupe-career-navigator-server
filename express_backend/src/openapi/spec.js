@@ -951,7 +951,15 @@ const openapiDefinition = {
             }
           },
           400: {
-            description: 'Validation error',
+            description: 'Bad request / validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          422: {
+            description: 'Unprocessable entity (domain/semantic validation failed)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           500: {
@@ -974,8 +982,16 @@ const openapiDefinition = {
               'application/json': { schema: { $ref: '#/components/schemas/OrchestrationRecord' } }
             }
           },
+          400: {
+            description: 'Bad request / validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
           404: {
             description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          422: {
+            description: 'Unprocessable entity (domain/semantic validation failed)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           500: {
@@ -1009,7 +1025,15 @@ const openapiDefinition = {
             }
           },
           400: {
-            description: 'Validation error',
+            description: 'Bad request / validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          422: {
+            description: 'Unprocessable entity (domain/semantic validation failed)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           500: {
@@ -1043,7 +1067,15 @@ const openapiDefinition = {
             }
           },
           400: {
-            description: 'Validation error (e.g., no documents or no extracted text)',
+            description: 'Bad request / validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          422: {
+            description: 'Unprocessable entity (domain/semantic validation failed)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           500: {
@@ -1079,7 +1111,15 @@ const openapiDefinition = {
             }
           },
           400: {
-            description: 'Validation error (e.g., missing source text)',
+            description: 'Bad request / validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          422: {
+            description: 'Unprocessable entity (domain/semantic validation failed)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           500: {
@@ -1113,7 +1153,15 @@ const openapiDefinition = {
             }
           },
           400: {
-            description: 'Validation error (e.g., no draft available)',
+            description: 'Bad request / validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          422: {
+            description: 'Unprocessable entity (domain/semantic validation failed)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           500: {
