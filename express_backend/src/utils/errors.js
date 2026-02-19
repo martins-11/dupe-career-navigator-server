@@ -71,7 +71,13 @@ function _statusForError(err) {
   if (code === 'NOT_FOUND') return 404;
 
   // Domain/semantic validation errors (unprocessable entity)
-  if (code === 'NO_DOCUMENTS' || code === 'NO_EXTRACTED_TEXT' || code === 'NO_SOURCE_TEXT' || code === 'NO_DRAFT') {
+  if (
+    code === 'NO_DOCUMENTS' ||
+    code === 'NO_EXTRACTED_TEXT' ||
+    code === 'NO_SOURCE_TEXT' ||
+    code === 'NO_DRAFT' ||
+    code === 'INVALID_WORKFLOW_TRANSITION'
+  ) {
     return 422;
   }
 
