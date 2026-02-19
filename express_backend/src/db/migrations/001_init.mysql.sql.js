@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS documents (
   storage_path TEXT NULL,
   file_size_bytes BIGINT NULL,
   sha256 TEXT NULL,
-  created_at DATETIME(3) NOT NULL,
-  updated_at DATETIME(3) NOT NULL
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS document_extracted_text (
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS document_extracted_text (
   language TEXT NULL,
   text_content LONGTEXT NOT NULL,
   metadata_json JSON NOT NULL,
-  created_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   INDEX idx_document_extracted_text_document_id (document_id),
   CONSTRAINT fk_document_extracted_text_document_id
     FOREIGN KEY (document_id) REFERENCES documents(id)
@@ -50,8 +50,8 @@ CREATE TABLE IF NOT EXISTS personas (
   id CHAR(36) PRIMARY KEY,
   user_id CHAR(36) NULL,
   title TEXT NULL,
-  created_at DATETIME(3) NOT NULL,
-  updated_at DATETIME(3) NOT NULL
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS persona_versions (
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS persona_versions (
   persona_id CHAR(36) NOT NULL,
   version INT NOT NULL,
   persona_json JSON NOT NULL,
-  created_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE KEY uq_persona_versions_persona_id_version (persona_id, version),
   CONSTRAINT fk_persona_versions_persona_id
     FOREIGN KEY (persona_id) REFERENCES personas(id)
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS ai_runs (
   persona_id CHAR(36) NULL,
   status VARCHAR(50) NOT NULL,
   provider VARCHAR(100) NOT NULL,
-  model TEXT NULL,
+  model VARCHAR(255) NULL,
   request_json JSON NOT NULL,
   response_json JSON NULL,
   error_json JSON NULL,
