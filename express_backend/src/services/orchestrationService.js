@@ -642,7 +642,13 @@ async function runAllOrchestration(input) {
     _updateWorkflowProgress(build.id, { status: 'succeeded', progress: 100, message: 'Build complete.' });
 
     return {
+      // Keep the existing contract: build object is returned and includes build.id.
       build,
+
+      // Add a stable top-level buildId for clients/scripts that only want the identifier.
+      // This keeps contracts consistent across endpoints and helps smoke scripts poll status.
+      buildId: build.id,
+
       orchestration: orch,
       results: {
         extract: {
