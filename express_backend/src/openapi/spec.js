@@ -29,6 +29,7 @@ const openapiDefinition = {
     { name: 'Documents', description: 'Document metadata and extracted text persistence.' },
     { name: 'Uploads', description: 'Multi-file upload endpoints (placeholder; no persistence yet).' },
     { name: 'Extraction', description: 'PDF/TXT text extraction and text normalization (placeholders).' },
+    { name: 'AI', description: 'AI persona generation (placeholder endpoints; safe without DB credentials).' },
     { name: 'Personas', description: 'Persona CRUD and version history.' }
   ],
   servers: [
@@ -286,6 +287,57 @@ const openapiDefinition = {
           }
         },
         required: ['requestId', 'text', 'stats']
+      },
+
+      PersonaGenerateRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          userId: { type: 'string', format: 'uuid', nullable: true },
+          documentId: {
+            type: 'string',
+            format: 'uuid',
+            nullable: true,
+            description:
+              'Optional document id. Reserved for future DB-backed behavior; placeholder does not read from DB.'
+          },
+          sourceText: {
+            type: 'string',
+            nullable: true,
+            description:
+              'Extracted/normalized text used as input. Recommended for placeholder behavior to remain DB-independent.'
+          },
+          context: {
+            type: 'object',
+            nullable: true,
+            additionalProperties: false,
+            properties: {
+              targetRole: { type: 'string', nullable: true },
+              seniority: { type: 'string', nullable: true },
+              industry: { type: 'string', nullable: true }
+            }
+          },
+          outputFormat: { type: 'string', enum: ['json'], nullable: true }
+        },
+        description:
+          'Request to generate a persona. Must include at least one of sourceText or documentId.'
+      },
+      PersonaDraft: {
+        type: 'object',
+        additionalProperties: true,
+        description:
+          'Generated persona JSON draft. This is intentionally flexible and will evolve as the product matures.'
+      },
+      PersonaGenerateResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          requestId: { type: 'string', format: 'uuid' },
+          mode: { type: 'string', example: 'placeholder' },
+          warnings: { type: 'array', items: { type: 'string' } },
+          persona: { $ref: '#/components/schemas/PersonaDraft' }
+        },
+        required: ['requestId', 'mode', 'warnings', 'persona']
       },
 
       BuildCreateRequest: {
@@ -601,6 +653,33 @@ const openapiDefinition = {
             description: 'Normalized text',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/NormalizeTextResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/ai/personas/generate': {
+      post: {
+        tags: ['AI'],
+        summary: 'Generate a professional persona JSON (placeholder)',
+        description:
+          'Safe placeholder for AI persona generation. Does not call external AI services and does not read/write the database. Provide sourceText for DB-independent usage. documentId is reserved for future DB-backed behavior.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/PersonaGenerateRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Generated persona draft (placeholder)',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/PersonaGenerateResponse' } }
             }
           },
           400: {
