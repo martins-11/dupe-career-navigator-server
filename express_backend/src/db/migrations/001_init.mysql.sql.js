@@ -65,6 +65,41 @@ CREATE TABLE IF NOT EXISTS persona_versions (
     FOREIGN KEY (persona_id) REFERENCES personas(id)
     ON DELETE CASCADE
 );
+
+-- Builds: orchestration progress tracker (aligned with repositories/mysql/buildsRepo.mysql.js)
+CREATE TABLE IF NOT EXISTS builds (
+  id CHAR(36) PRIMARY KEY,
+  persona_id CHAR(36) NULL,
+  document_id CHAR(36) NULL,
+  status TEXT NOT NULL,
+  progress INT NOT NULL DEFAULT 0,
+  message TEXT NULL,
+  current_step TEXT NULL,
+  steps_json JSON NOT NULL,
+  created_at DATETIME(3) NOT NULL,
+  updated_at DATETIME(3) NOT NULL,
+  INDEX idx_builds_persona_id (persona_id),
+  INDEX idx_builds_document_id (document_id),
+  INDEX idx_builds_status (status(64))
+);
+
+-- AI runs: per-step/request tracking (aligned with repositories/mysql/aiRunsRepo.mysql.js)
+CREATE TABLE IF NOT EXISTS ai_runs (
+  id CHAR(36) PRIMARY KEY,
+  build_id CHAR(36) NULL,
+  persona_id CHAR(36) NULL,
+  status TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NULL,
+  request_json JSON NOT NULL,
+  response_json JSON NULL,
+  error_json JSON NULL,
+  created_at DATETIME(3) NOT NULL,
+  updated_at DATETIME(3) NOT NULL,
+  INDEX idx_ai_runs_build_id (build_id),
+  INDEX idx_ai_runs_persona_id (persona_id),
+  INDEX idx_ai_runs_status (status(64))
+);
 `;
 }
 
