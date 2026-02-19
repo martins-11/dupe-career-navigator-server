@@ -94,12 +94,15 @@ echo "$health"
 echo
 
 echo "-- 2) Create a document (memory repo by default)"
+# POST /documents must match DocumentCreateRequest (see src/models/documents.js)
 doc_body='{
-  "title": "Smoke Test Resume",
-  "sourceType": "text",
-  "sourceName": "smoke.txt",
-  "contentType": "text/plain",
-  "notes": "Created by scripts/smoke-orchestration-run-all.sh"
+  "originalFilename": "smoke.txt",
+  "mimeType": "text/plain",
+  "source": "smoke-orchestration-run-all.sh",
+  "storageProvider": null,
+  "storagePath": null,
+  "fileSizeBytes": null,
+  "sha256": null
 }'
 doc_resp="$(c -X POST "$BASE_URL/documents" -d "$doc_body")"
 echo "$doc_resp" | (have_jq && jq . || cat)
