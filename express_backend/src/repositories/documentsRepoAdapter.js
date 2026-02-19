@@ -3,28 +3,19 @@
 const pgRepo = require('./documentsRepo');
 const mysqlRepo = require('./mysql/documentsRepo.mysql');
 const memRepo = require('./memory/documentsMemoryRepo');
-const { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } = require('../db/connection');
+const { selectRepo } = require('./_repoSelector');
 
 /**
- * Repository adapter that chooses memory by default and a real DB only when configured.
+ * Documents repository adapter:
+ * - Uses in-memory persistence by default
+ * - Uses MySQL implementation when DB_ENGINE=mysql AND MySQL env vars are configured
+ * - Can use Postgres implementation when DB_ENGINE=postgres AND Postgres env vars are configured
  *
- * Priority:
- * - If DB_ENGINE=mysql (default): use MySQL repo only when MYSQL_* env vars are present.
- * - If DB_ENGINE=postgres: use Postgres repo only when PG_* env vars are present.
- *
- * IMPORTANT:
- * - Ensures service can run without DB credentials.
- * - Keeps existing Postgres scaffolding intact (do NOT remove).
+ * Keeps API routes stable and avoids requiring DB credentials to run.
  */
 
 function _repo() {
-  const engine = getDbEngine();
-
-  if (engine === 'mysql') {
-    return isDbConfigured() && isMysqlConfigured() ? mysqlRepo : memRepo;
-  }
-
-  return isDbConfigured() && isPostgresConfigured() ? pgRepo : memRepo;
+  return selectRepo({ pgRepo, mysqlRepo, memRepo });
 }
 
 // PUBLIC_INTERFACE

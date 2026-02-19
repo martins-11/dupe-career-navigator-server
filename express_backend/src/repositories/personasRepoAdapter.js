@@ -3,25 +3,19 @@
 const pgRepo = require('./personasRepo');
 const mysqlRepo = require('./mysql/personasRepo.mysql');
 const memRepo = require('./memory/personasMemoryRepo');
-const { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } = require('../db/connection');
+const { selectRepo } = require('./_repoSelector');
 
 /**
  * Personas repository adapter:
  * - Uses in-memory persistence by default
- * - Uses MySQL implementation when env vars are configured (default engine)
- * - Can use Postgres implementation when DB_ENGINE=postgres and env vars are configured
+ * - Uses MySQL implementation when DB_ENGINE=mysql AND MySQL env vars are configured
+ * - Can use Postgres implementation when DB_ENGINE=postgres AND Postgres env vars are configured
  *
  * Keeps API routes stable and avoids requiring DB credentials to run.
  */
 
 function _repo() {
-  const engine = getDbEngine();
-
-  if (engine === 'mysql') {
-    return isDbConfigured() && isMysqlConfigured() ? mysqlRepo : memRepo;
-  }
-
-  return isDbConfigured() && isPostgresConfigured() ? pgRepo : memRepo;
+  return selectRepo({ pgRepo, mysqlRepo, memRepo });
 }
 
 // PUBLIC_INTERFACE
