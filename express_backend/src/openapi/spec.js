@@ -26,6 +26,11 @@ const openapiDefinition = {
   tags: [
     { name: 'Health', description: 'Service health and readiness endpoints.' },
     { name: 'Builds', description: 'Build/workflow orchestration (create + status/progress polling).' },
+    {
+      name: 'Orchestration',
+      description:
+        'Convenience APIs that compose uploads, extraction/normalization, and persona draft/finalization into a single workflow. Safe without DB or external AI credentials.'
+    },
     { name: 'Documents', description: 'Document metadata and extracted text persistence.' },
     { name: 'Uploads', description: 'Multi-file upload endpoints (placeholder; no persistence yet).' },
     { name: 'Extraction', description: 'PDF/TXT text extraction and text normalization (placeholders).' },
@@ -394,6 +399,157 @@ const openapiDefinition = {
           updatedAt: { type: 'string', format: 'date-time' }
         },
         required: ['id', 'status', 'progress', 'updatedAt']
+      },
+
+      OrchestrationStartRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          mode: { type: 'string', enum: ['persona_build', 'workflow'], nullable: true },
+          userId: { type: 'string', format: 'uuid', nullable: true },
+          personaId: { type: 'string', format: 'uuid', nullable: true },
+          documentIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
+          context: {
+            type: 'object',
+            nullable: true,
+            additionalProperties: false,
+            properties: {
+              targetRole: { type: 'string', nullable: true },
+              seniority: { type: 'string', nullable: true },
+              industry: { type: 'string', nullable: true }
+            }
+          },
+          autoCreatePersona: { type: 'boolean', nullable: true }
+        }
+      },
+      OrchestrationStartResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          build: { $ref: '#/components/schemas/BuildCreateResponse' },
+          orchestration: { $ref: '#/components/schemas/OrchestrationRecord' }
+        },
+        required: ['build', 'orchestration']
+      },
+
+      OrchestrationUploadLinkRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          uploadId: { type: 'string', format: 'uuid' },
+          documentIds: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1 }
+        },
+        required: ['uploadId', 'documentIds']
+      },
+
+      OrchestrationExtractRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          documentIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
+          normalize: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              removeExtraWhitespace: { type: 'boolean', nullable: true },
+              normalizeLineBreaks: { type: 'boolean', nullable: true },
+              maxLength: { type: 'integer', minimum: 1, nullable: true }
+            }
+          },
+          persistToDocuments: { type: 'boolean', nullable: true }
+        }
+      },
+      OrchestrationExtractResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          buildId: { type: 'string', format: 'uuid' },
+          documentIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
+          normalizedText: { type: 'string' },
+          stats: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              originalLength: { type: 'integer', minimum: 0 },
+              normalizedLength: { type: 'integer', minimum: 0 }
+            },
+            required: ['originalLength', 'normalizedLength']
+          },
+          orchestration: { $ref: '#/components/schemas/OrchestrationRecord' }
+        },
+        required: ['buildId', 'documentIds', 'normalizedText', 'stats', 'orchestration']
+      },
+
+      OrchestrationGenerateDraftRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sourceTextOverride: { type: 'string', minLength: 1 },
+          context: {
+            type: 'object',
+            nullable: true,
+            additionalProperties: false,
+            properties: {
+              targetRole: { type: 'string', nullable: true },
+              seniority: { type: 'string', nullable: true },
+              industry: { type: 'string', nullable: true }
+            }
+          },
+          personaId: { type: 'string', format: 'uuid' },
+          saveDraft: { type: 'boolean', nullable: true },
+          createVersion: { type: 'boolean', nullable: true }
+        }
+      },
+      OrchestrationGenerateDraftResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          requestId: { type: 'string', format: 'uuid' },
+          mode: { type: 'string', example: 'placeholder' },
+          warnings: { type: 'array', items: { type: 'string' } },
+          buildId: { type: 'string', format: 'uuid' },
+          personaId: { type: 'string', format: 'uuid', nullable: true },
+          persona: { $ref: '#/components/schemas/PersonaDraft' },
+          savedDraft: { type: 'object', nullable: true, additionalProperties: true },
+          createdVersion: { $ref: '#/components/schemas/PersonaVersion', nullable: true },
+          orchestration: { $ref: '#/components/schemas/OrchestrationRecord' }
+        },
+        required: ['requestId', 'mode', 'warnings', 'buildId', 'personaId', 'persona', 'savedDraft', 'createdVersion', 'orchestration']
+      },
+
+      OrchestrationFinalizeRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          finalOverride: {
+            type: 'object',
+            additionalProperties: true,
+            description: 'If provided, overrides the draft as the final persona JSON.'
+          },
+          personaId: { type: 'string', format: 'uuid' },
+          saveFinal: { type: 'boolean', nullable: true },
+          createVersion: { type: 'boolean', nullable: true }
+        }
+      },
+      OrchestrationFinalizeResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          buildId: { type: 'string', format: 'uuid' },
+          personaId: { type: 'string', format: 'uuid', nullable: true },
+          final: { type: 'object', additionalProperties: true },
+          savedFinal: { type: 'object', nullable: true, additionalProperties: true },
+          createdVersion: { $ref: '#/components/schemas/PersonaVersion', nullable: true },
+          orchestration: { $ref: '#/components/schemas/OrchestrationRecord' }
+        },
+        required: ['buildId', 'personaId', 'final', 'savedFinal', 'createdVersion', 'orchestration']
+      },
+
+      OrchestrationRecord: {
+        type: 'object',
+        additionalProperties: true,
+        description:
+          'In-memory orchestration record that links build/workflow IDs to uploads, document IDs, normalized text, and persona draft/final JSON. Shape may evolve; this contract provides a stable envelope.'
       }
     },
     parameters: {
@@ -417,6 +573,13 @@ const openapiDefinition = {
         required: true,
         schema: { type: 'string', format: 'uuid' },
         description: 'Build/workflow identifier.'
+      },
+      OrchestrationBuildIdParam: {
+        name: 'id',
+        in: 'path',
+        required: true,
+        schema: { type: 'string', format: 'uuid' },
+        description: 'Build/workflow identifier (used for orchestration endpoints).'
       }
     }
   },
@@ -762,6 +925,199 @@ const openapiDefinition = {
           },
           404: {
             description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/orchestration/start': {
+      post: {
+        tags: ['Orchestration'],
+        summary: 'Start an orchestration session (creates a build/workflow)',
+        description:
+          'Creates a build/workflow and an in-memory orchestration record that can be used to link uploads/documents, derive normalized text, generate a draft persona, and finalize.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/OrchestrationStartRequest' } }
+          }
+        },
+        responses: {
+          201: {
+            description: 'Created build + orchestration record',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/OrchestrationStartResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/orchestration/builds/{id}': {
+      get: {
+        tags: ['Orchestration'],
+        summary: 'Get orchestration record for a build id',
+        parameters: [{ $ref: '#/components/parameters/OrchestrationBuildIdParam' }],
+        responses: {
+          200: {
+            description: 'Orchestration record',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/OrchestrationRecord' } }
+            }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/orchestration/builds/{id}/link-upload': {
+      post: {
+        tags: ['Orchestration'],
+        summary: 'Link an uploadId + documentIds to an existing build id',
+        description:
+          'Links an existing upload batch (uploadId) and corresponding documentIds to the build orchestration, enabling extract/normalize and draft generation steps.',
+        parameters: [{ $ref: '#/components/parameters/OrchestrationBuildIdParam' }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/OrchestrationUploadLinkRequest' }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Updated orchestration record',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/OrchestrationRecord' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/orchestration/builds/{id}/extract-normalize': {
+      post: {
+        tags: ['Orchestration'],
+        summary: 'Derive combined normalized text for the build from linked documents',
+        description:
+          'Requires extracted text to already exist for the linked documents (e.g., via /uploads/* side effects or /documents/:id/extracted-text). Produces a normalized combined text blob.',
+        parameters: [{ $ref: '#/components/parameters/OrchestrationBuildIdParam' }],
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/OrchestrationExtractRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Normalized text + updated orchestration',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/OrchestrationExtractResponse' }
+              }
+            }
+          },
+          400: {
+            description: 'Validation error (e.g., no documents or no extracted text)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/orchestration/builds/{id}/generate-draft': {
+      post: {
+        tags: ['Orchestration'],
+        summary: 'Generate persona draft from normalized text (placeholder AI)',
+        description:
+          'Generates a schema-validated persona JSON draft. Does not call external AI services. Uses normalized text from prior steps or accepts a sourceTextOverride.',
+        parameters: [{ $ref: '#/components/parameters/OrchestrationBuildIdParam' }],
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/OrchestrationGenerateDraftRequest' }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Draft persona + updated orchestration',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/OrchestrationGenerateDraftResponse' }
+              }
+            }
+          },
+          400: {
+            description: 'Validation error (e.g., missing source text)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/orchestration/builds/{id}/finalize': {
+      post: {
+        tags: ['Orchestration'],
+        summary: 'Finalize persona for a build (optionally save final + create version)',
+        description:
+          'Finalizes the persona JSON using the generated draft by default (or finalOverride). Optionally saves final persona and/or creates a persona version if personaId exists/was created.',
+        parameters: [{ $ref: '#/components/parameters/OrchestrationBuildIdParam' }],
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/OrchestrationFinalizeRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Final persona + updated orchestration',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/OrchestrationFinalizeResponse' }
+              }
+            }
+          },
+          400: {
+            description: 'Validation error (e.g., no draft available)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
