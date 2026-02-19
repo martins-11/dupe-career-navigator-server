@@ -8,7 +8,8 @@
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "db:migrate": "node src/db/migrate.js",
-    "db:check": "node src/db/check.js"
+    "db:check": "node src/db/check.js",
+    "db:verify": "node src/db/verifyTables.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
