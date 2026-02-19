@@ -5,7 +5,7 @@
  *
  * This repo already has a MySQL init migration that creates:
  * - documents
- * - document_extracted_text
+ * - document_extracted_text (historically as a TABLE in some installations)
  *
  * The user request asks for:
  * - documents
@@ -16,11 +16,14 @@
  * - Create `extracted_text` as the canonical table going forward
  * - Create a VIEW `document_extracted_text` that maps to `extracted_text`
  *
- * Notes:
- * - This is safe for new DBs and for DBs created with older init migrations:
- *   - If `document_extracted_text` already exists as a TABLE, we do nothing to it.
- *   - If it does not exist, we create it as a VIEW pointing to `extracted_text`.
- * - The migration runner splits SQL on semicolons and runs statements sequentially.
+ * IMPORTANT:
+ * - We MUST NOT clobber an existing TABLE named `document_extracted_text`.
+ * - MySQL does NOT support: CREATE VIEW IF NOT EXISTS ...
+ * - The migration runner splits SQL on semicolons and executes sequentially.
+ *
+ * Therefore we:
+ * - Only drop/recreate the VIEW if (and only if) there is NOT a TABLE with that name.
+ * - Use INFORMATION_SCHEMA + prepared statements to conditionally execute DDL.
  */
 
 // PUBLIC_INTERFACE
@@ -63,30 +66,63 @@ CREATE TABLE IF NOT EXISTS extracted_text (
 
 -- Backward-compat view for existing code expecting document_extracted_text.
 --
--- MySQL does NOT support: CREATE VIEW IF NOT EXISTS ...
--- Additionally, the migration runner executes statements sequentially, so we can
--- safely do a drop-then-create for the VIEW.
+-- Requirements:
+-- 1) If a TABLE exists named document_extracted_text: do nothing (do not clobber).
+-- 2) Else: ensure the VIEW exists and points to extracted_text.
 --
--- Important behavior notes:
--- - DROP VIEW IF EXISTS is safe if the view doesn't exist.
--- - If a TABLE already exists named `document_extracted_text`, this migration
---   would fail when trying to create a VIEW with the same name. This is OK and
---   intentional: we must not replace an existing TABLE (could contain real data).
-DROP VIEW IF EXISTS document_extracted_text;
+-- We implement this using INFORMATION_SCHEMA and prepared statements so each
+-- statement is standalone for the semicolon-splitting migration runner.
 
-CREATE VIEW document_extracted_text AS
-  SELECT
-    id,
-    document_id,
-    extractor,
-    extractor_version,
-    language,
-    text_content,
-    metadata_json,
-    created_at
-  FROM extracted_text;
+SET @kavia_db_name := DATABASE();
+
+-- If there is NO TABLE named document_extracted_text, drop the VIEW (if any) to allow recreation.
+SET @kavia_sql_drop_view := (
+  SELECT IF(
+    EXISTS(
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = @kavia_db_name
+        AND table_name = 'document_extracted_text'
+        AND table_type = 'BASE TABLE'
+    ),
+    'SELECT 1',
+    'DROP VIEW IF EXISTS document_extracted_text'
+  )
+);
+
+PREPARE kavia_stmt_drop_view FROM @kavia_sql_drop_view;
+EXECUTE kavia_stmt_drop_view;
+DEALLOCATE PREPARE kavia_stmt_drop_view;
+
+-- If there is NO TABLE named document_extracted_text, create the VIEW.
+SET @kavia_sql_create_view := (
+  SELECT IF(
+    EXISTS(
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = @kavia_db_name
+        AND table_name = 'document_extracted_text'
+        AND table_type = 'BASE TABLE'
+    ),
+    'SELECT 1',
+    'CREATE VIEW document_extracted_text AS
+      SELECT
+        id,
+        document_id,
+        extractor,
+        extractor_version,
+        language,
+        text_content,
+        metadata_json,
+        created_at
+      FROM extracted_text'
+  )
+);
+
+PREPARE kavia_stmt_create_view FROM @kavia_sql_create_view;
+EXECUTE kavia_stmt_create_view;
+DEALLOCATE PREPARE kavia_stmt_create_view;
 `;
 }
 
 module.exports = { getMigrationSql };
-
