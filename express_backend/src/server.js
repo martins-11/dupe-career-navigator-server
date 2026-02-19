@@ -10,7 +10,10 @@
  * Note: PostgreSQL credentials are intentionally env-based and optional for now.
  */
 
-require('dotenv').config();
+const path = require('path');
+
+// Always load env vars from express_backend/.env, regardless of process CWD.
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 const express = require('express');
 const cors = require('cors');
