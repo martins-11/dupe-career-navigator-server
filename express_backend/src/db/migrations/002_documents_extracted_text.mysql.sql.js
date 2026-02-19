@@ -62,8 +62,19 @@ CREATE TABLE IF NOT EXISTS extracted_text (
 ) ENGINE=InnoDB;
 
 -- Backward-compat view for existing code expecting document_extracted_text.
--- Only create if a base TABLE doesn't already exist with that name.
-CREATE VIEW IF NOT EXISTS document_extracted_text AS
+--
+-- MySQL does NOT support: CREATE VIEW IF NOT EXISTS ...
+-- Additionally, the migration runner executes statements sequentially, so we can
+-- safely do a drop-then-create for the VIEW.
+--
+-- Important behavior notes:
+-- - DROP VIEW IF EXISTS is safe if the view doesn't exist.
+-- - If a TABLE already exists named `document_extracted_text`, this migration
+--   would fail when trying to create a VIEW with the same name. This is OK and
+--   intentional: we must not replace an existing TABLE (could contain real data).
+DROP VIEW IF EXISTS document_extracted_text;
+
+CREATE VIEW document_extracted_text AS
   SELECT
     id,
     document_id,
