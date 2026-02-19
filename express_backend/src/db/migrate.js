@@ -23,6 +23,9 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 const { getDbEngine, isDbConfigured, dbExecRaw, dbQuery, dbClose } = require('./connection');
 const { getMigrationSql: getPgInitSql } = require('./migrations/001_init.sql');
 const { getMigrationSql: getMysqlInitSql } = require('./migrations/001_init.mysql.sql');
+const {
+  getMigrationSql: getMysqlDocumentsExtractedTextSql
+} = require('./migrations/002_documents_extracted_text.mysql.sql');
 
 function _splitSqlStatements(sql) {
   /**
@@ -67,26 +70,31 @@ async function runMigrations() {
     return;
   }
 
-  const sql = engine === 'mysql' ? getMysqlInitSql() : getPgInitSql();
-
   try {
     if (engine === 'mysql') {
-      // MySQL migrations may contain multiple CREATE TABLE statements. mysql2 will
-      // reject multi-statements unless multipleStatements=true is enabled.
-      //
-      // To keep connection defaults safe, we split and run sequentially.
-      const statements = _splitSqlStatements(sql);
+      // Apply MySQL migrations in order. Keep them as separate payloads because
+      // mysql2 rejects multi-statements unless explicitly enabled.
+      const migrations = [
+        { name: '001_init', sql: getMysqlInitSql() },
+        { name: '002_documents_extracted_text', sql: getMysqlDocumentsExtractedTextSql() }
+      ];
 
-      for (const stmt of statements) {
-        await dbExecRaw(stmt);
+      for (const m of migrations) {
+        const statements = _splitSqlStatements(m.sql);
+        for (const stmt of statements) {
+          await dbExecRaw(stmt);
+        }
+        // eslint-disable-next-line no-console
+        console.log(`[db:migrate] Migration applied: ${m.name} (${engine})`);
       }
     } else {
       // Postgres driver can execute our init SQL as a single payload.
+      const sql = getPgInitSql();
       await dbQuery(sql);
-    }
 
-    // eslint-disable-next-line no-console
-    console.log(`[db:migrate] Migration applied: 001_init (${engine})`);
+      // eslint-disable-next-line no-console
+      console.log(`[db:migrate] Migration applied: 001_init (${engine})`);
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error('[db:migrate] Migration failed:', err && err.message ? err.message : err);
