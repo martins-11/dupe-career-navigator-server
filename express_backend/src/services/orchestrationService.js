@@ -7,6 +7,7 @@ const { extractTextFromUploadedFile } = require('./extractionService');
 const { normalizeText } = require('./normalizationService');
 const buildsService = require('./buildsService');
 const workflowService = require('./workflowService');
+const aiRunsRepo = require('../repositories/aiRunsRepoAdapter');
 const { uuidV4 } = require('../utils/uuid');
 
 /**
@@ -410,37 +411,67 @@ async function generatePersonaDraftForBuild(buildId, input) {
   }
 
   const context = parsed.context ?? orch.context ?? null;
-  const personaDraft = _makePlaceholderPersona({ sourceText, context });
 
-  // Persist draft (in-memory; adapter supports saveDraft)
-  const shouldSaveDraft = parsed.saveDraft ?? Boolean(personaId);
-  let savedDraft = null;
-  let createdVersion = null;
-
-  if (personaId && shouldSaveDraft) {
-    savedDraft = await personasRepo.saveDraft(personaId, personaDraft);
-
-    if (parsed.createVersion) {
-      createdVersion = await personasRepo.createPersonaVersion(personaId, { personaJson: personaDraft });
-    }
-  }
-
-  const next = _touch(orch, {
-    personaId: personaId ?? orch.personaId,
-    personaDraft
-  });
-
-  return {
-    requestId: uuidV4(),
-    mode: 'placeholder',
-    warnings: ['Placeholder implementation: no AI model invoked.'],
+  // Track AI run in persistence adapter (memory by default).
+  const aiRun = await aiRunsRepo.createAiRun({
     buildId,
     personaId: personaId ?? null,
-    persona: personaDraft,
-    savedDraft,
-    createdVersion,
-    orchestration: next
-  };
+    status: 'running',
+    provider: 'placeholder',
+    model: null,
+    request: {
+      type: 'persona_draft_generation',
+      context,
+      sourceTextLength: String(sourceText).length
+    }
+  });
+
+  try {
+    const personaDraft = _makePlaceholderPersona({ sourceText, context });
+
+    // Persist draft (in-memory; adapter supports saveDraft)
+    const shouldSaveDraft = parsed.saveDraft ?? Boolean(personaId);
+    let savedDraft = null;
+    let createdVersion = null;
+
+    if (personaId && shouldSaveDraft) {
+      savedDraft = await personasRepo.saveDraft(personaId, personaDraft);
+
+      if (parsed.createVersion) {
+        createdVersion = await personasRepo.createPersonaVersion(personaId, { personaJson: personaDraft });
+      }
+    }
+
+    await aiRunsRepo.updateAiRun(aiRun.id, {
+      status: 'succeeded',
+      response: { persona: personaDraft }
+    });
+
+    const next = _touch(orch, {
+      personaId: personaId ?? orch.personaId,
+      personaDraft,
+      lastAiRunId: aiRun.id
+    });
+
+    return {
+      requestId: uuidV4(),
+      aiRunId: aiRun.id,
+      mode: 'placeholder',
+      warnings: ['Placeholder implementation: no AI model invoked.'],
+      buildId,
+      personaId: personaId ?? null,
+      persona: personaDraft,
+      savedDraft,
+      createdVersion,
+      orchestration: next
+    };
+  } catch (err) {
+    await aiRunsRepo.updateAiRun(aiRun.id, {
+      status: 'failed',
+      error: { code: err?.code || 'AI_RUN_FAILED', message: err?.message || String(err) }
+    });
+    throw err;
+  }
 }
 
 // PUBLIC_INTERFACE

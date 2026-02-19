@@ -34,33 +34,32 @@ router.post('/', async (req, res) => {
   const parsed = BuildCreateRequest.safeParse(req.body || {});
   if (!parsed.success) return validationError(res, parsed);
 
-  // Even if DB is configured, this scaffold is in-memory; expose capability info for operators.
   const dbConfigured = buildsService.isDbConfiguredForBuilds();
 
-  const build = buildsService.createBuild(parsed.data);
+  const build = await buildsService.createBuild(parsed.data);
   return res.status(201).json({
     ...build,
     persistence: {
-      type: 'memory',
+      type: dbConfigured ? 'postgres' : 'memory',
       dbConfigured
     }
   });
 });
 
 router.get('/:id', async (req, res) => {
-  const build = buildsService.getBuild(req.params.id);
+  const build = await buildsService.getBuild(req.params.id);
   if (!build) return res.status(404).json({ error: 'not_found' });
   return res.json(build);
 });
 
 router.get('/:id/status', async (req, res) => {
-  const status = buildsService.getBuildStatus(req.params.id);
+  const status = await buildsService.getBuildStatus(req.params.id);
   if (!status) return res.status(404).json({ error: 'not_found' });
   return res.json(status);
 });
 
 router.post('/:id/cancel', async (req, res) => {
-  const status = buildsService.cancelBuild(req.params.id);
+  const status = await buildsService.cancelBuild(req.params.id);
   if (!status) return res.status(404).json({ error: 'not_found' });
   return res.json(status);
 });
