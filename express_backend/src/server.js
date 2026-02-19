@@ -22,6 +22,7 @@ const { requestTimeout } = require('./middleware/requestTimeout');
 
 const healthRouter = require('./routes/health');
 const documentsRouter = require('./routes/documents');
+const personasRouter = require('./routes/personas');
 
 const app = express();
 
@@ -42,6 +43,7 @@ app.get('/', (req, res) => {
 
 app.use('/health', healthRouter);
 app.use('/documents', documentsRouter);
+app.use('/personas', personasRouter);
 
 // Generic error handler (keeps responses safe)
 app.use((err, req, res, next) => {
