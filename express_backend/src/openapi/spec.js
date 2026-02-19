@@ -25,6 +25,7 @@ const openapiDefinition = {
   },
   tags: [
     { name: 'Health', description: 'Service health and readiness endpoints.' },
+    { name: 'Builds', description: 'Build/workflow orchestration (create + status/progress polling).' },
     { name: 'Documents', description: 'Document metadata and extracted text persistence.' },
     { name: 'Uploads', description: 'Multi-file upload endpoints (placeholder; no persistence yet).' },
     { name: 'Extraction', description: 'PDF/TXT text extraction and text normalization (placeholders).' },
@@ -285,6 +286,62 @@ const openapiDefinition = {
           }
         },
         required: ['requestId', 'text', 'stats']
+      },
+
+      BuildCreateRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          personaId: { type: 'string', format: 'uuid', nullable: true, description: 'Optional persona id to build/update.' },
+          documentId: { type: 'string', format: 'uuid', nullable: true, description: 'Optional source document id for extraction.' },
+          mode: { type: 'string', enum: ['persona_build', 'workflow'], nullable: true, description: 'Scaffold hint for future orchestration.' }
+        }
+      },
+      BuildRecord: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          personaId: { type: 'string', format: 'uuid', nullable: true },
+          documentId: { type: 'string', format: 'uuid', nullable: true },
+          status: { type: 'string', enum: ['queued', 'running', 'succeeded', 'failed', 'cancelled'] },
+          progress: { type: 'integer', minimum: 0, maximum: 100 },
+          message: { type: 'string', nullable: true },
+          steps: { type: 'array', items: { type: 'string' } },
+          currentStep: { type: 'string', nullable: true },
+          createdAt: { type: 'string', format: 'date-time' },
+          updatedAt: { type: 'string', format: 'date-time' }
+        },
+        required: ['id', 'status', 'progress', 'steps', 'createdAt', 'updatedAt']
+      },
+      BuildCreateResponse: {
+        type: 'object',
+        additionalProperties: false,
+        allOf: [{ $ref: '#/components/schemas/BuildRecord' }],
+        properties: {
+          persistence: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              type: { type: 'string', example: 'memory' },
+              dbConfigured: { type: 'boolean', description: 'Whether DB env vars appear set (scaffold informational flag).' }
+            },
+            required: ['type', 'dbConfigured']
+          }
+        }
+      },
+      BuildStatus: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          status: { type: 'string', enum: ['queued', 'running', 'succeeded', 'failed', 'cancelled'] },
+          progress: { type: 'integer', minimum: 0, maximum: 100 },
+          message: { type: 'string', nullable: true },
+          currentStep: { type: 'string', nullable: true },
+          updatedAt: { type: 'string', format: 'date-time' }
+        },
+        required: ['id', 'status', 'progress', 'updatedAt']
       }
     },
     parameters: {
@@ -301,6 +358,13 @@ const openapiDefinition = {
         required: true,
         schema: { type: 'string', format: 'uuid' },
         description: 'Persona identifier.'
+      },
+      BuildIdParam: {
+        name: 'id',
+        in: 'path',
+        required: true,
+        schema: { type: 'string', format: 'uuid' },
+        description: 'Build/workflow identifier.'
       }
     }
   },
@@ -541,6 +605,84 @@ const openapiDefinition = {
           },
           400: {
             description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/builds': {
+      post: {
+        tags: ['Builds'],
+        summary: 'Create a build/workflow (scaffold)',
+        description:
+          'Creates a build/workflow and starts a placeholder progress simulation suitable for status polling. This scaffold stores state in memory only.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/BuildCreateRequest' } }
+          }
+        },
+        responses: {
+          201: {
+            description: 'Build created',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/BuildCreateResponse' } } }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+    '/builds/{id}': {
+      get: {
+        tags: ['Builds'],
+        summary: 'Get build/workflow details',
+        parameters: [{ $ref: '#/components/parameters/BuildIdParam' }],
+        responses: {
+          200: {
+            description: 'Build record',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/BuildRecord' } } }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+    '/builds/{id}/status': {
+      get: {
+        tags: ['Builds'],
+        summary: 'Poll build/workflow status/progress',
+        description: 'Polling-friendly status projection for a build/workflow.',
+        parameters: [{ $ref: '#/components/parameters/BuildIdParam' }],
+        responses: {
+          200: {
+            description: 'Status',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/BuildStatus' } } }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+    '/builds/{id}/cancel': {
+      post: {
+        tags: ['Builds'],
+        summary: 'Cancel a build/workflow (scaffold)',
+        description: 'Cancels a queued/running build. If already completed, returns current status.',
+        parameters: [{ $ref: '#/components/parameters/BuildIdParam' }],
+        responses: {
+          200: {
+            description: 'Status',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/BuildStatus' } } }
+          },
+          404: {
+            description: 'Not found',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }

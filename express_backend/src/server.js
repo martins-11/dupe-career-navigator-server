@@ -25,6 +25,7 @@ const documentsRouter = require('./routes/documents');
 const personasRouter = require('./routes/personas');
 const uploadsRouter = require('./routes/uploads');
 const extractionRouter = require('./routes/extraction');
+const buildsRouter = require('./routes/builds');
 const docsRouter = require('./routes/docs');
 
 const app = express();
@@ -47,6 +48,7 @@ app.get('/', (req, res) => {
 app.use('/health', healthRouter);
 app.use('/uploads', uploadsRouter);
 app.use('/extraction', extractionRouter);
+app.use('/builds', buildsRouter);
 app.use('/documents', documentsRouter);
 app.use('/personas', personasRouter);
 
