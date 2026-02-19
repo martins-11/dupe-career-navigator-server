@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS documents (
   sha256 TEXT NULL,
   created_at DATETIME(3) NOT NULL,
   updated_at DATETIME(3) NOT NULL
-);
+) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS document_extracted_text (
   id CHAR(36) PRIMARY KEY,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS document_extracted_text (
   CONSTRAINT fk_document_extracted_text_document_id
     FOREIGN KEY (document_id) REFERENCES documents(id)
     ON DELETE CASCADE
-);
+) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS personas (
   id CHAR(36) PRIMARY KEY,
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS personas (
   title TEXT NULL,
   created_at DATETIME(3) NOT NULL,
   updated_at DATETIME(3) NOT NULL
-);
+) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS persona_versions (
   id CHAR(36) PRIMARY KEY,
@@ -64,42 +64,45 @@ CREATE TABLE IF NOT EXISTS persona_versions (
   CONSTRAINT fk_persona_versions_persona_id
     FOREIGN KEY (persona_id) REFERENCES personas(id)
     ON DELETE CASCADE
-);
+) ENGINE=InnoDB;
 
 -- Builds: orchestration progress tracker (aligned with repositories/mysql/buildsRepo.mysql.js)
 CREATE TABLE IF NOT EXISTS builds (
   id CHAR(36) PRIMARY KEY,
   persona_id CHAR(36) NULL,
   document_id CHAR(36) NULL,
-  status TEXT NOT NULL,
+  status VARCHAR(50) NOT NULL,
   progress INT NOT NULL DEFAULT 0,
   message TEXT NULL,
   current_step TEXT NULL,
   steps_json JSON NOT NULL,
-  created_at DATETIME(3) NOT NULL,
-  updated_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   INDEX idx_builds_persona_id (persona_id),
   INDEX idx_builds_document_id (document_id),
-  INDEX idx_builds_status (status(64))
-);
+  INDEX idx_builds_status (status)
+) ENGINE=InnoDB;
 
 -- AI runs: per-step/request tracking (aligned with repositories/mysql/aiRunsRepo.mysql.js)
 CREATE TABLE IF NOT EXISTS ai_runs (
   id CHAR(36) PRIMARY KEY,
   build_id CHAR(36) NULL,
   persona_id CHAR(36) NULL,
-  status TEXT NOT NULL,
-  provider TEXT NOT NULL,
+  status VARCHAR(50) NOT NULL,
+  provider VARCHAR(100) NOT NULL,
   model TEXT NULL,
   request_json JSON NOT NULL,
   response_json JSON NULL,
   error_json JSON NULL,
-  created_at DATETIME(3) NOT NULL,
-  updated_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   INDEX idx_ai_runs_build_id (build_id),
   INDEX idx_ai_runs_persona_id (persona_id),
-  INDEX idx_ai_runs_status (status(64))
-);
+  INDEX idx_ai_runs_status (status),
+  CONSTRAINT fk_ai_runs_build_id
+    FOREIGN KEY (build_id) REFERENCES builds(id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
 `;
 }
 
