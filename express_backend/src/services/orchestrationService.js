@@ -252,15 +252,18 @@ function getOrchestration(buildId) {
 }
 
 // PUBLIC_INTERFACE
-function startOrchestration(input) {
+async function startOrchestration(input) {
   /**
    * Create a build/workflow and initialize an orchestration record.
    *
    * @param {unknown} input - validated by OrchestrationStartRequest
-   * @returns {{build: object, orchestration: object}}
+   * @returns {Promise<{build: object, orchestration: object}>}
    */
   const parsed = OrchestrationStartRequest.parse(input || {});
-  const build = buildsService.createBuild({
+
+  // buildsService.createBuild is async (it persists build record), so we must await it
+  // to ensure we return a populated build object (with id) to callers like /orchestration/run-all.
+  const build = await buildsService.createBuild({
     personaId: parsed.personaId ?? null,
     documentId: parsed.documentIds?.[0] ?? null,
     mode: parsed.mode ?? 'workflow'
@@ -562,7 +565,7 @@ async function runAllOrchestration(input) {
   const parsed = OrchestrationRunAllRequest.parse(input || {});
 
   // 1) Start build + orchestration record.
-  const { build, orchestration: initialOrch } = startOrchestration({
+  const { build, orchestration: initialOrch } = await startOrchestration({
     mode: parsed.mode ?? 'workflow',
     userId: parsed.userId ?? null,
     personaId: parsed.personaId ?? null,
