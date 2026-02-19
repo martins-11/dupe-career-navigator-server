@@ -11,7 +11,14 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const { getDbEngine, isDbConfigured, dbQuery, dbClose } = require('./connection');
 
-const REQUIRED_TABLES = ['builds', 'ai_runs', 'personas', 'persona_versions'];
+const REQUIRED_TABLES = [
+  'builds',
+  'ai_runs',
+  'documents',
+  'extracted_text',
+  'personas',
+  'persona_versions',
+];
 
 function _formatList(arr) {
   return arr.map((s) => `'${s}'`).join(', ');
@@ -66,7 +73,9 @@ async function verifyRequiredTables() {
   const engine = getDbEngine();
 
   // eslint-disable-next-line no-console
-  console.log(`[db:verify] engine=${engine} requiredTables=${REQUIRED_TABLES.join(',')}`);
+  console.log(
+    `[db:verify] engine=${engine} requiredTables=${REQUIRED_TABLES.join(',')}`
+  );
 
   if (!isDbConfigured()) {
     // eslint-disable-next-line no-console
