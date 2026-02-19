@@ -44,7 +44,10 @@ function isMysqlConfigured() {
     (process.env.MYSQL_CONNECTION_STRING && process.env.MYSQL_CONNECTION_STRING.trim()) ||
       (process.env.MYSQL_HOST && process.env.MYSQL_HOST.trim()) ||
       (process.env.MYSQL_DATABASE && process.env.MYSQL_DATABASE.trim()) ||
-      (process.env.MYSQL_USER && process.env.MYSQL_USER.trim())
+      (process.env.MYSQL_USER && process.env.MYSQL_USER.trim()) ||
+      (process.env.DB_HOST && process.env.DB_HOST.trim()) ||
+      (process.env.DB_NAME && process.env.DB_NAME.trim()) ||
+      (process.env.DB_USERNAME && process.env.DB_USERNAME.trim())
   );
 }
 
@@ -75,6 +78,27 @@ function _mysqlSslOptions() {
   return undefined;
 }
 
+function _firstNonEmpty(...vals) {
+  for (const v of vals) {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return undefined;
+}
+
+function _mysqlConfigFromEnv() {
+  // Support both MYSQL_* (preferred) and DB_* (used by some deployment setups).
+  const host = _firstNonEmpty(process.env.MYSQL_HOST, process.env.DB_HOST);
+  const portRaw = _firstNonEmpty(process.env.MYSQL_PORT, process.env.DB_PORT);
+  const port = portRaw ? Number(portRaw) : undefined;
+
+  const user = _firstNonEmpty(process.env.MYSQL_USER, process.env.DB_USERNAME);
+  const password = _firstNonEmpty(process.env.MYSQL_PASSWORD, process.env.DB_PASSWORD);
+  const database = _firstNonEmpty(process.env.MYSQL_DATABASE, process.env.DB_NAME);
+
+  return { host, port, user, password, database };
+}
+
 function _ensureMysqlPool() {
   if (_mysqlPool) return _mysqlPool;
 
@@ -89,12 +113,14 @@ function _ensureMysqlPool() {
     return _mysqlPool;
   }
 
+  const cfg = _mysqlConfigFromEnv();
+
   _mysqlPool = mysql.createPool({
-    host: process.env.MYSQL_HOST,
-    port: process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : undefined,
-    user: process.env.MYSQL_USER,
-    password: process.env.MYSQL_PASSWORD,
-    database: process.env.MYSQL_DATABASE,
+    host: cfg.host,
+    port: cfg.port,
+    user: cfg.user,
+    password: cfg.password,
+    database: cfg.database,
     waitForConnections: true,
     connectionLimit: 10,
     ssl: _mysqlSslOptions()
