@@ -16,6 +16,29 @@ const router = express.Router();
  * Uploading raw file bytes (PDF parsing, etc.) is out of scope for this step.
  */
 
+router.get('/', async (req, res) => {
+  /**
+   * List documents.
+   *
+   * Query params:
+   * - limit (optional, default 100, max 1000)
+   * - offset (optional, default 0)
+   */
+  try {
+    const limit = req.query.limit != null ? Number(req.query.limit) : undefined;
+    const offset = req.query.offset != null ? Number(req.query.offset) : undefined;
+
+    if ((limit != null && Number.isNaN(limit)) || (offset != null && Number.isNaN(offset))) {
+      return res.status(400).json({ error: 'validation_error', message: 'limit/offset must be numbers' });
+    }
+
+    const docs = await documentsRepo.listDocuments({ limit, offset });
+    return res.json(docs);
+  } catch (err) {
+    return res.status(503).json({ error: 'db_unavailable', message: err.message });
+  }
+});
+
 router.post('/', async (req, res) => {
   const parsed = DocumentCreateRequest.safeParse(req.body);
   if (!parsed.success) {

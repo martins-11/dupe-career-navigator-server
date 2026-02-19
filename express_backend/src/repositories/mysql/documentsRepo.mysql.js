@@ -69,6 +69,47 @@ async function createDocument(input) {
   return res.rows[0] || null;
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Lists documents from MySQL.
+ *
+ * @param {object} [options]
+ * @param {number} [options.limit] Maximum number of documents to return (default: 100, max: 1000).
+ * @param {number} [options.offset] Offset for pagination (default: 0).
+ * @returns {Promise<Array<object>>} Documents list ordered by created_at desc.
+ */
+async function listDocuments(options = {}) {
+  const limitRaw = options.limit ?? 100;
+  const offsetRaw = options.offset ?? 0;
+
+  const limit = Math.min(Math.max(Number(limitRaw) || 0, 0), 1000);
+  const offset = Math.max(Number(offsetRaw) || 0, 0);
+
+  const res = await dbQuery(
+    `
+    SELECT
+      id,
+      user_id as userId,
+      original_filename as originalFilename,
+      mime_type as mimeType,
+      source,
+      storage_provider as storageProvider,
+      storage_path as storagePath,
+      file_size_bytes as fileSizeBytes,
+      sha256,
+      created_at as createdAt,
+      updated_at as updatedAt
+    FROM documents
+    ORDER BY created_at DESC
+    LIMIT ?
+    OFFSET ?
+    `,
+    [limit, offset]
+  );
+
+  return res.rows;
+}
+
 // PUBLIC_INTERFACE
 async function getDocumentById(documentId) {
   /** Fetch a document by id. Returns null if not found. */
@@ -170,6 +211,7 @@ async function getLatestExtractedText(documentId) {
 
 module.exports = {
   createDocument,
+  listDocuments,
   getDocumentById,
   upsertExtractedText,
   getLatestExtractedText

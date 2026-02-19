@@ -1349,6 +1349,46 @@ const openapiDefinition = {
     },
 
     '/documents': {
+      get: {
+        tags: ['Documents'],
+        summary: 'List documents',
+        description:
+          'Lists document metadata records. Supports simple limit/offset pagination. Returns an array of Document.',
+        parameters: [
+          {
+            name: 'limit',
+            in: 'query',
+            required: false,
+            schema: { type: 'integer', minimum: 0, maximum: 1000, default: 100 },
+            description: 'Maximum number of documents to return (default 100, max 1000).'
+          },
+          {
+            name: 'offset',
+            in: 'query',
+            required: false,
+            schema: { type: 'integer', minimum: 0, default: 0 },
+            description: 'Offset for pagination (default 0).'
+          }
+        ],
+        responses: {
+          200: {
+            description: 'Documents list',
+            content: {
+              'application/json': {
+                schema: { type: 'array', items: { $ref: '#/components/schemas/Document' } }
+              }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      },
       post: {
         tags: ['Documents'],
         summary: 'Create a document (metadata only)',

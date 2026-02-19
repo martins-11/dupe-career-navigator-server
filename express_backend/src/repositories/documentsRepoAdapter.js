@@ -24,6 +24,19 @@ async function createDocument(input) {
   return _repo().createDocument(input);
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Lists documents using configured persistence (memory by default).
+ *
+ * @param {object} [options]
+ * @param {number} [options.limit] Maximum number of documents to return.
+ * @param {number} [options.offset] Offset for pagination.
+ * @returns {Promise<Array<object>>} Documents list.
+ */
+async function listDocuments(options = {}) {
+  return _repo().listDocuments(options);
+}
+
 // PUBLIC_INTERFACE
 async function getDocumentById(documentId) {
   /** Get a document using configured persistence (memory by default). */
@@ -44,6 +57,7 @@ async function getLatestExtractedText(documentId) {
 
 module.exports = {
   createDocument,
+  listDocuments,
   getDocumentById,
   upsertExtractedText,
   getLatestExtractedText

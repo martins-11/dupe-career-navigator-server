@@ -38,6 +38,30 @@ async function createDocument(input) {
   return doc;
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Lists documents in memory.
+ *
+ * @param {object} [options]
+ * @param {number} [options.limit] Maximum number of documents to return (default: 100, max: 1000).
+ * @param {number} [options.offset] Offset for pagination (default: 0).
+ * @returns {Promise<Array<object>>} Documents list ordered by createdAt desc.
+ */
+async function listDocuments(options = {}) {
+  const limitRaw = options.limit ?? 100;
+  const offsetRaw = options.offset ?? 0;
+
+  const limit = Math.min(Math.max(Number(limitRaw) || 0, 0), 1000);
+  const offset = Math.max(Number(offsetRaw) || 0, 0);
+
+  const all = Array.from(_documents.values());
+
+  // Newest first, deterministic for UI.
+  all.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+
+  return all.slice(offset, offset + limit);
+}
+
 // PUBLIC_INTERFACE
 async function getDocumentById(documentId) {
   /** Fetch a document by id. Returns null if not found. */
@@ -81,6 +105,7 @@ async function getLatestExtractedText(documentId) {
 
 module.exports = {
   createDocument,
+  listDocuments,
   getDocumentById,
   upsertExtractedText,
   getLatestExtractedText
