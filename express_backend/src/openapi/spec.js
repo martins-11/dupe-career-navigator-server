@@ -609,6 +609,84 @@ const openapiDefinition = {
         additionalProperties: true,
         description:
           'In-memory orchestration record that links build/workflow IDs to uploads, document IDs, normalized text, and persona draft/final JSON. Shape may evolve; this contract provides a stable envelope.'
+      },
+
+      OrchestrationRunAllRequest: {
+        type: 'object',
+        additionalProperties: false,
+        description:
+          'Single-call orchestration that starts a build, links documents, extracts+normalizes, generates a draft persona, and optionally finalizes. Progress can be polled via /builds/{id}/status and /orchestration/builds/{id}.',
+        properties: {
+          mode: { type: 'string', enum: ['persona_build', 'workflow'], nullable: true },
+          userId: { type: 'string', format: 'uuid', nullable: true },
+          personaId: { type: 'string', format: 'uuid', nullable: true },
+          context: {
+            type: 'object',
+            nullable: true,
+            additionalProperties: false,
+            properties: {
+              targetRole: { type: 'string', nullable: true },
+              seniority: { type: 'string', nullable: true },
+              industry: { type: 'string', nullable: true }
+            }
+          },
+          uploadLink: { $ref: '#/components/schemas/OrchestrationUploadLinkRequest' },
+          documentIds: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1 },
+          extract: { $ref: '#/components/schemas/OrchestrationExtractRequest' },
+          generate: { $ref: '#/components/schemas/OrchestrationGenerateDraftRequest' },
+          finalize: { $ref: '#/components/schemas/OrchestrationFinalizeRequest' },
+          autoCreatePersona: { type: 'boolean', nullable: true }
+        }
+      },
+      OrchestrationRunAllResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          build: { $ref: '#/components/schemas/BuildCreateResponse' },
+          orchestration: { $ref: '#/components/schemas/OrchestrationRecord' },
+          results: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              extract: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  documentIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
+                  stats: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      originalLength: { type: 'integer', minimum: 0 },
+                      normalizedLength: { type: 'integer', minimum: 0 }
+                    },
+                    required: ['originalLength', 'normalizedLength']
+                  }
+                },
+                required: ['documentIds', 'stats']
+              },
+              generate: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  personaId: { type: 'string', format: 'uuid', nullable: true }
+                },
+                required: ['personaId']
+              },
+              finalize: {
+                type: 'object',
+                nullable: true,
+                additionalProperties: false,
+                properties: {
+                  personaId: { type: 'string', format: 'uuid', nullable: true }
+                },
+                required: ['personaId']
+              }
+            },
+            required: ['extract', 'generate', 'finalize']
+          }
+        },
+        required: ['build', 'orchestration', 'results']
       }
     },
     parameters: {
@@ -1007,6 +1085,45 @@ const openapiDefinition = {
             description: 'Created build + orchestration record',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/OrchestrationStartResponse' } }
+            }
+          },
+          400: {
+            description: 'Bad request / validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          422: {
+            description: 'Unprocessable entity (domain/semantic validation failed)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/orchestration/run-all': {
+      post: {
+        tags: ['Orchestration'],
+        summary: 'Run all orchestration steps end-to-end (one call)',
+        description:
+          'Starts a build/workflow and runs linking → extract/normalize → generate draft (→ optional finalize). Poll /builds/{id}/status for progress and /orchestration/builds/{id} for artifacts/step trace.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/OrchestrationRunAllRequest' } }
+          }
+        },
+        responses: {
+          201: {
+            description: 'Build started and orchestration completed (or started if downstream prerequisites missing)',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/OrchestrationRunAllResponse' } }
             }
           },
           400: {

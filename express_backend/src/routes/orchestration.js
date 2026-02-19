@@ -37,6 +37,30 @@ router.post('/start', async (req, res) => {
 });
 
 // PUBLIC_INTERFACE
+router.post('/run-all', async (req, res) => {
+  /**
+   * Run the full build workflow end-to-end in a single call.
+   *
+   * This endpoint composes:
+   * - orchestration start (creates buildId for polling)
+   * - link upload/documents
+   * - extract+normalize (requires extracted text to already exist, typically via /uploads/* side effects)
+   * - persona draft generation (placeholder)
+   * - optional finalize
+   *
+   * Poll progress via:
+   * - GET /builds/:id/status (build/workflow progress)
+   * - GET /orchestration/builds/:id (run-all step trace + artifacts)
+   */
+  try {
+    const out = await orchestrationService.runAllOrchestration(req.body || {});
+    return res.status(201).json(out);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// PUBLIC_INTERFACE
 router.get('/builds/:id', async (req, res) => {
   /**
    * Get orchestration record for a build id (link state).

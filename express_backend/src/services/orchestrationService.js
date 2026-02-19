@@ -140,6 +140,40 @@ const OrchestrationFinalizeRequest = z.object({
   createVersion: z.boolean().optional()
 });
 
+const OrchestrationRunAllRequest = z.object({
+  /**
+   * Full end-to-end orchestration request.
+   *
+   * This endpoint is meant to be the "one call" entrypoint once the client has documentIds.
+   * (Upload -> documentId creation remains handled by /uploads/* and /documents/*, which are stable contracts.)
+   */
+  mode: z.enum(['persona_build', 'workflow']).nullable().optional(),
+  userId: z.string().uuid().nullable().optional(),
+  personaId: z.string().uuid().nullable().optional(),
+  context: z
+    .object({
+      targetRole: z.string().min(1).nullable().optional(),
+      seniority: z.string().min(1).nullable().optional(),
+      industry: z.string().min(1).nullable().optional()
+    })
+    .nullable()
+    .optional(),
+
+  // One of these must be provided:
+  uploadLink: OrchestrationUploadLinkRequest.optional(),
+  documentIds: z.array(z.string().uuid()).min(1).optional(),
+
+  // Optional knobs for extract/normalize and draft generation.
+  extract: OrchestrationExtractRequest.optional(),
+  generate: OrchestrationGenerateRequest.optional(),
+
+  // Optional: include a finalize step.
+  finalize: OrchestrationFinalizeRequest.optional(),
+
+  // If true, will create persona automatically when generating draft if personaId not provided.
+  autoCreatePersona: z.boolean().optional()
+});
+
 function _makePlaceholderPersona({ sourceText, context }) {
   /**
    * Internal placeholder persona generation.
@@ -456,16 +490,171 @@ async function finalizePersonaForBuild(buildId, input) {
   };
 }
 
+function _updateWorkflowProgress(buildId, patch) {
+  /**
+   * Best-effort workflow progress updater.
+   *
+   * The system already exposes /builds/{id}/status which reads from workflowService.
+   * Existing workflowService.startWorkflow simulates progress; for the "run all" endpoint
+   * we additionally update status to reflect real orchestration completion.
+   *
+   * Note: workflowService does not currently expose a public "setStatus" method; we
+   * carefully fall back to no-op if workflow is missing. For now, we rely on the
+   * orchestration record + build polling as a combined picture, and keep updates minimal.
+   */
+  const wf = workflowService.getWorkflow(buildId);
+  if (!wf) return null;
+
+  // Mutate-by-replace: workflowService stores objects; we can replace by re-creating through internal map
+  // only if service provides a setter. It doesn't, so we approximate by updating orchestration only.
+  // To still improve polling, we set "message/progress/currentStep" in orchestration and let the simulated
+  // build progress keep moving. This preserves existing contracts and avoids introducing a new workflow API.
+  return { ...wf, ...patch };
+}
+
+// PUBLIC_INTERFACE
+async function runAllOrchestration(input) {
+  /**
+   * Run the full orchestration workflow end-to-end:
+   * - start build/workflow
+   * - link upload/documents
+   * - extract+normalize
+   * - generate draft
+   * - optional finalize
+   *
+   * Returns immediately with buildId so clients can poll /builds/{id}/status.
+   * Also returns the latest orchestration snapshot for convenience.
+   *
+   * This function executes synchronously (within request) but updates an in-memory
+   * orchestration "progress" trace that the client can read at /orchestration/builds/{id}.
+   */
+  const parsed = OrchestrationRunAllRequest.parse(input || {});
+
+  // 1) Start build + orchestration record.
+  const { build, orchestration: initialOrch } = startOrchestration({
+    mode: parsed.mode ?? 'workflow',
+    userId: parsed.userId ?? null,
+    personaId: parsed.personaId ?? null,
+    context: parsed.context ?? null,
+    autoCreatePersona: parsed.autoCreatePersona ?? false,
+    documentIds: parsed.documentIds
+  });
+
+  let orch = _touch(initialOrch, {
+    runAll: {
+      status: 'running',
+      progress: 5,
+      step: 'start',
+      message: 'Orchestration started.',
+      startedAt: _nowIso(),
+      finishedAt: null,
+      error: null
+    }
+  });
+
+  // 2) Link upload/document IDs
+  try {
+    orch = _touch(orch, {
+      runAll: { ...orch.runAll, progress: 15, step: 'link', message: 'Linking documents…' }
+    });
+
+    if (parsed.uploadLink) {
+      orch = linkUploadToBuild(build.id, parsed.uploadLink);
+    } else if (parsed.documentIds?.length) {
+      orch = _touch(orch, { documentIds: parsed.documentIds });
+    } else {
+      const err = new Error('Either uploadLink or documentIds must be provided.');
+      err.code = 'MISSING_INPUTS';
+      throw err;
+    }
+
+    // 3) Extract + normalize
+    orch = _touch(orch, {
+      runAll: { ...orch.runAll, progress: 40, step: 'extract_normalize', message: 'Extracting and normalizing…' }
+    });
+
+    const extractResp = await extractAndNormalizeForBuild(build.id, parsed.extract || {});
+    orch = extractResp.orchestration;
+
+    // 4) Generate draft
+    orch = _touch(orch, {
+      runAll: { ...orch.runAll, progress: 75, step: 'generate_draft', message: 'Generating draft persona…' }
+    });
+
+    const genResp = await generatePersonaDraftForBuild(build.id, parsed.generate || {});
+    orch = genResp.orchestration;
+
+    // 5) Optional finalize
+    let finalizeResp = null;
+    if (parsed.finalize) {
+      orch = _touch(orch, {
+        runAll: { ...orch.runAll, progress: 90, step: 'finalize', message: 'Finalizing persona…' }
+      });
+
+      finalizeResp = await finalizePersonaForBuild(build.id, parsed.finalize || {});
+      orch = finalizeResp.orchestration;
+    }
+
+    orch = _touch(orch, {
+      runAll: {
+        ...orch.runAll,
+        status: 'succeeded',
+        progress: 100,
+        step: null,
+        message: 'Orchestration complete.',
+        finishedAt: _nowIso(),
+        error: null
+      }
+    });
+
+    // Best-effort: touch workflow (does not change store; see comment).
+    _updateWorkflowProgress(build.id, { status: 'succeeded', progress: 100, message: 'Build complete.' });
+
+    return {
+      build,
+      orchestration: orch,
+      results: {
+        extract: {
+          documentIds: extractResp.documentIds,
+          stats: extractResp.stats
+        },
+        generate: {
+          personaId: genResp.personaId
+        },
+        finalize: finalizeResp
+          ? { personaId: finalizeResp.personaId }
+          : null
+      }
+    };
+  } catch (err) {
+    orch = _touch(orch, {
+      runAll: {
+        ...(orch.runAll || {}),
+        status: 'failed',
+        step: orch.runAll?.step || null,
+        message: err?.message || 'Orchestration failed.',
+        finishedAt: _nowIso(),
+        error: { code: err?.code || 'ORCHESTRATION_FAILED', message: err?.message || String(err) }
+      }
+    });
+
+    _updateWorkflowProgress(build.id, { status: 'failed', message: 'Build failed.' });
+    throw err;
+  }
+}
+
 module.exports = {
   OrchestrationStartRequest,
   OrchestrationUploadLinkRequest,
   OrchestrationExtractRequest,
   OrchestrationGenerateRequest,
   OrchestrationFinalizeRequest,
+  OrchestrationRunAllRequest,
   getOrchestration,
   startOrchestration,
   linkUploadToBuild,
   extractAndNormalizeForBuild,
   generatePersonaDraftForBuild,
-  finalizePersonaForBuild
+  finalizePersonaForBuild,
+  runAllOrchestration
 };
