@@ -11,7 +11,7 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const { getDbEngine, isDbConfigured, dbQuery, dbClose } = require('./connection');
 
-const REQUIRED_TABLES = ['builds', 'ai_runs'];
+const REQUIRED_TABLES = ['builds', 'ai_runs', 'personas', 'persona_versions'];
 
 function _formatList(arr) {
   return arr.map((s) => `'${s}'`).join(', ');

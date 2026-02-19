@@ -26,6 +26,9 @@ const { getMigrationSql: getMysqlInitSql } = require('./migrations/001_init.mysq
 const {
   getMigrationSql: getMysqlDocumentsExtractedTextSql
 } = require('./migrations/002_documents_extracted_text.mysql.sql');
+const {
+  getMigrationSql: getMysqlPersonasAndVersionsSql
+} = require('./migrations/003_personas_and_versions.mysql.sql');
 
 function _splitSqlStatements(sql) {
   /**
@@ -76,7 +79,8 @@ async function runMigrations() {
       // mysql2 rejects multi-statements unless explicitly enabled.
       const migrations = [
         { name: '001_init', sql: getMysqlInitSql() },
-        { name: '002_documents_extracted_text', sql: getMysqlDocumentsExtractedTextSql() }
+        { name: '002_documents_extracted_text', sql: getMysqlDocumentsExtractedTextSql() },
+        { name: '003_personas_and_versions', sql: getMysqlPersonasAndVersionsSql() }
       ];
 
       for (const m of migrations) {
