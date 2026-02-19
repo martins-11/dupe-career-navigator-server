@@ -26,6 +26,7 @@ const openapiDefinition = {
   tags: [
     { name: 'Health', description: 'Service health and readiness endpoints.' },
     { name: 'Documents', description: 'Document metadata and extracted text persistence.' },
+    { name: 'Uploads', description: 'Multi-file upload endpoints (placeholder; no persistence yet).' },
     { name: 'Personas', description: 'Persona CRUD and version history.' }
   ],
   servers: [
@@ -188,6 +189,32 @@ const openapiDefinition = {
           versions: { type: 'array', items: { $ref: '#/components/schemas/PersonaVersion' } }
         },
         required: ['personaId', 'versions']
+      },
+
+      UploadFileResult: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          fieldname: { type: 'string', description: 'Multipart field name.' },
+          originalname: { type: 'string', description: 'Client-provided original filename.' },
+          mimetype: { type: 'string', description: 'Client-provided mime type.' },
+          size: { type: 'integer', minimum: 0, description: 'Size in bytes as received by the server.' }
+        },
+        required: ['fieldname', 'originalname', 'mimetype', 'size']
+      },
+      MultiFileUploadResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          uploadId: { type: 'string', format: 'uuid', description: 'Server-generated placeholder upload batch id.' },
+          receivedFiles: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/UploadFileResult' },
+            description: 'Files accepted by multer (stored in memory only for this scaffold).'
+          },
+          message: { type: 'string', description: 'Human-readable status message.' }
+        },
+        required: ['uploadId', 'receivedFiles', 'message']
       }
     },
     parameters: {
@@ -272,6 +299,97 @@ const openapiDefinition = {
           },
           503: {
             description: 'DB unavailable',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/uploads/documents': {
+      post: {
+        tags: ['Uploads'],
+        summary: 'Upload one or more documents (multi-file upload)',
+        description:
+          'Placeholder multi-file upload endpoint using multipart/form-data. Files are accepted into memory and metadata is returned; no DB/storage persistence is performed in this scaffold.',
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  files: {
+                    type: 'array',
+                    items: { type: 'string', format: 'binary' },
+                    description: 'One or more files.'
+                  },
+                  userId: { type: 'string', format: 'uuid', nullable: true, description: 'Optional user id.' },
+                  source: { type: 'string', nullable: true, description: 'Optional source label (e.g., resume, linkedin).' }
+                },
+                required: ['files']
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Upload accepted (placeholder)',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/MultiFileUploadResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error (e.g., missing files)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          413: {
+            description: 'Payload too large',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/uploads/text': {
+      post: {
+        tags: ['Uploads'],
+        summary: 'Upload one or more plain text files (multi-file upload)',
+        description:
+          'Placeholder multi-file upload endpoint for text inputs. Uses multipart/form-data and returns received file metadata only.',
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  files: {
+                    type: 'array',
+                    items: { type: 'string', format: 'binary' },
+                    description: 'One or more text files.'
+                  },
+                  userId: { type: 'string', format: 'uuid', nullable: true }
+                },
+                required: ['files']
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Upload accepted (placeholder)',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/MultiFileUploadResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error (e.g., missing files)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          413: {
+            description: 'Payload too large',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
