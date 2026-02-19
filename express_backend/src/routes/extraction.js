@@ -3,20 +3,20 @@
 const express = require('express');
 const { z } = require('zod');
 const { uuidV4 } = require('../utils/uuid');
+const { extractTextFromUploadedFile } = require('../services/extractionService');
+const { normalizeText } = require('../services/normalizationService');
 
 const router = express.Router();
 
 /**
- * Extraction APIs (placeholder).
+ * Extraction APIs (real implementation; no DB required).
  *
- * Goals:
- * - Define stable HTTP contracts for PDF/TXT extraction and normalization.
- * - Keep implementations safe and side-effect-free (no DB access, no external services).
- * - Provide deterministic placeholder responses suitable for front-end integration.
+ * Maintains existing HTTP contracts, but now performs:
+ * - real PDF extraction (when pdf-parse dependency is present)
+ * - real text decoding for TXT payloads
+ * - shared normalization logic via normalizationService
  *
- * Notes:
- * - This does NOT parse real PDFs yet.
- * - This does NOT persist extracted text; that is handled via /documents/:id/extracted-text (existing scaffold).
+ * Still does NOT persist extracted text; persistence remains via /documents/:id/extracted-text.
  */
 
 const ExtractTextRequest = z.object({
@@ -75,24 +75,63 @@ router.post('/pdf/extract-text', async (req, res) => {
 
   const requestId = uuidV4();
 
-  // Safe placeholder "extraction": just echo content with minimal normalization.
-  const extractedText = String(parsed.data.content).replace(/\r\n/g, '\n');
+  // Contract still expects `content` as a string (not bytes). We support two modes:
+  // 1) If content looks like base64 and mimeType indicates PDF, decode and parse as PDF
+  // 2) Otherwise treat content as plain text fallback (with warning)
+  const content = String(parsed.data.content || '');
+  const mimeType = parsed.data.mimeType ?? 'application/pdf';
+
+  let warnings = [];
+  let extractedText = '';
+  let extractor = 'plain-text';
+  let extractorVersion = '1.0.0';
+  let metadata = {
+    filename: parsed.data.filename ?? null,
+    mimeType,
+    length: 0
+  };
+
+  const looksBase64 = /^[A-Za-z0-9+/=\r\n]+$/.test(content) && content.length > 256;
+  if (looksBase64) {
+    try {
+      const buf = Buffer.from(content, 'base64');
+      const extraction = await extractTextFromUploadedFile({
+        filename: parsed.data.filename,
+        mimeType,
+        buffer: buf
+      });
+
+      if (extraction) {
+        extractedText = extraction.text || '';
+        extractor = extraction.extractor;
+        extractorVersion = extraction.extractorVersion;
+        warnings = extraction.warnings || [];
+        metadata = { ...metadata, ...extraction.metadata, length: extractedText.length };
+      } else {
+        warnings.push('Content provided, but could not determine file type for extraction.');
+        extractedText = '';
+      }
+    } catch (e) {
+      warnings.push('Base64 decode/PDF parse failed; no text extracted.');
+      extractedText = '';
+    }
+  } else {
+    // Fallback: treat as already-extracted plain text.
+    extractedText = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    warnings.push(
+      'PDF endpoint received non-base64 `content`; treated as plain text fallback. For real PDF extraction, submit base64 PDF bytes in `content`.'
+    );
+  }
 
   return res.status(200).json({
     requestId,
-    extractor: 'placeholder',
-    extractorVersion: '0.1.0',
+    extractor,
+    extractorVersion,
     sourceType: 'pdf',
     language: parsed.data.languageHint ?? null,
     text: extractedText,
-    warnings: [
-      'Placeholder implementation: no real PDF parsing performed. Submit plain text in `content` for now.'
-    ],
-    metadata: {
-      filename: parsed.data.filename ?? null,
-      mimeType: parsed.data.mimeType ?? 'application/pdf',
-      length: extractedText.length
-    }
+    warnings,
+    metadata
   });
 });
 
@@ -107,20 +146,26 @@ router.post('/txt/extract-text', async (req, res) => {
   if (!parsed.success) return validationError(res, parsed);
 
   const requestId = uuidV4();
-  const extractedText = String(parsed.data.content).replace(/\r\n/g, '\n');
+  const extractedText = String(parsed.data.content).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  const normalized = normalizeText(extractedText, {
+    removeExtraWhitespace: true,
+    normalizeLineBreaks: true
+  });
 
   return res.status(200).json({
     requestId,
-    extractor: 'placeholder',
-    extractorVersion: '0.1.0',
+    extractor: 'plain-text',
+    extractorVersion: '1.0.0',
     sourceType: 'txt',
     language: parsed.data.languageHint ?? null,
-    text: extractedText,
+    text: normalized.text,
     warnings: [],
     metadata: {
       filename: parsed.data.filename ?? null,
       mimeType: parsed.data.mimeType ?? 'text/plain',
-      length: extractedText.length
+      length: normalized.text.length,
+      normalization: normalized.stats
     }
   });
 });
@@ -140,31 +185,16 @@ router.post('/normalize', async (req, res) => {
   const requestId = uuidV4();
   const opts = parsed.data.options || {};
 
-  let normalized = String(parsed.data.text);
-
-  if (opts.normalizeLineBreaks !== false) {
-    normalized = normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  }
-  if (opts.removeExtraWhitespace !== false) {
-    // Collapse multiple spaces/tabs but keep line breaks meaningful.
-    normalized = normalized
-      .split('\n')
-      .map((line) => line.replace(/[ \t]+/g, ' ').trimEnd())
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-  }
-  if (opts.maxLength && normalized.length > opts.maxLength) {
-    normalized = normalized.slice(0, opts.maxLength);
-  }
+  const out = normalizeText(parsed.data.text, {
+    removeExtraWhitespace: opts.removeExtraWhitespace,
+    normalizeLineBreaks: opts.normalizeLineBreaks,
+    maxLength: opts.maxLength
+  });
 
   return res.status(200).json({
     requestId,
-    text: normalized,
-    stats: {
-      originalLength: parsed.data.text.length,
-      normalizedLength: normalized.length
-    }
+    text: out.text,
+    stats: out.stats
   });
 });
 

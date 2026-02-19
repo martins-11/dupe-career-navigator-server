@@ -51,16 +51,36 @@ function validationError(res, parsed) {
   return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
 }
 
+const PersonaDraftSchema = z
+  .object({
+    schemaVersion: z.string().min(1),
+    title: z.string().min(1),
+    summary: z.string().min(1),
+    profile: z.object({
+      headline: z.string().min(1),
+      seniority: z.string().nullable(),
+      industry: z.string().nullable(),
+      location: z.string().nullable()
+    }),
+    strengths: z.array(z.string().min(1)).min(1),
+    skills: z.array(z.string().min(1)).min(1),
+    experienceHighlights: z.array(z.string().min(1)).min(1),
+    provenance: z.object({
+      source: z.string().min(1),
+      sourceTextLength: z.number().int().nonnegative()
+    })
+  })
+  .strict();
+
 function makePlaceholderPersona({ sourceText, context }) {
-  // Keep placeholder deterministic and safe: only derive small hints from the input.
+  // Deterministic non-LLM implementation while Claude API credentials are pending.
   const text = (sourceText || '').trim();
   const length = text.length;
 
-  // Very lightweight keyword sniffing (no PII extraction; no "smart" model behavior).
   const lower = text.toLowerCase();
   const maybeSkills = [];
   if (/\breact\b/.test(lower)) maybeSkills.push('React');
-  if (/\bnode\b/.test(lower)) maybeSkills.push('Node.js');
+  if (/\bnode(\.js)?\b/.test(lower)) maybeSkills.push('Node.js');
   if (/\bexpress\b/.test(lower)) maybeSkills.push('Express');
   if (/\bpostgres\b|\bpostgresql\b/.test(lower)) maybeSkills.push('PostgreSQL');
   if (/\baws\b/.test(lower)) maybeSkills.push('AWS');
@@ -70,33 +90,31 @@ function makePlaceholderPersona({ sourceText, context }) {
   const industry = context?.industry || null;
   const seniority = context?.seniority || null;
 
-  return {
+  const draft = {
     schemaVersion: '0.1.0',
     title: targetRole ? `${targetRole} Persona (Draft)` : 'Professional Persona (Draft)',
     summary:
-      'Placeholder persona generated without an LLM. Replace with real AI integration in a future step.',
+      'Persona draft generated without an LLM (Claude integration pending). This output is schema-validated JSON.',
     profile: {
       headline: targetRole || 'Professional',
       seniority,
       industry,
       location: null
     },
-    strengths: [
-      'Clear communication',
-      'Ownership mindset',
-      'Continuous improvement'
-    ],
+    strengths: ['Clear communication', 'Ownership mindset', 'Continuous improvement'],
     skills: maybeSkills.length ? maybeSkills : ['Problem solving', 'Collaboration', 'Writing'],
     experienceHighlights: [
-      'Built and shipped features end-to-end (placeholder).',
-      'Collaborated with cross-functional teams (placeholder).'
+      'Built and shipped features end-to-end (non-LLM draft).',
+      'Collaborated with cross-functional teams (non-LLM draft).'
     ],
-    // Include minimal provenance for UI debugging without leaking anything sensitive.
     provenance: {
       source: 'placeholder',
       sourceTextLength: length
     }
   };
+
+  // Strict schema validation requirement.
+  return PersonaDraftSchema.parse(draft);
 }
 
 // PUBLIC_INTERFACE

@@ -2,7 +2,7 @@
 
 const express = require('express');
 const { DocumentCreateRequest, ExtractedTextUpsertRequest } = require('../models/documents');
-const documentsRepo = require('../repositories/documentsRepo');
+const documentsRepo = require('../repositories/documentsRepoAdapter');
 
 const router = express.Router();
 

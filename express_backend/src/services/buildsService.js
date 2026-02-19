@@ -1,6 +1,6 @@
 'use strict';
 
-const { uuidV4 } = require('../utils/uuid');
+const workflowService = require('./workflowService');
 
 /**
  * In-memory build/workflow service (scaffold).
@@ -24,71 +24,9 @@ const { uuidV4 } = require('../utils/uuid');
  * @property {string|null} currentStep
  * @property {string} createdAt - ISO timestamp
  * @property {string} updatedAt - ISO timestamp
- */
-
-const _builds = new Map();
-
-/**
- * @param {BuildRecord} build
- */
-function _setBuild(build) {
-  _builds.set(build.id, build);
-}
-
-/**
- * @param {string} buildId
- * @returns {BuildRecord|null}
- */
-function _getBuild(buildId) {
-  return _builds.get(buildId) || null;
-}
-
-function _nowIso() {
-  return new Date().toISOString();
-}
-
-/**
- * Simple progress "simulation": over ~8 seconds goes from queued->running->succeeded.
- * This is only to make polling meaningful for the frontend during scaffolding.
  *
- * @param {string} buildId
+ * Backed by workflowService (in-memory).
  */
-function _simulateProgress(buildId) {
-  const steps = [
-    'validate_inputs',
-    'extract_text',
-    'normalize_text',
-    'generate_persona_draft',
-    'finalize'
-  ];
-
-  const schedule = [
-    { ms: 250, status: 'running', progress: 10, step: steps[0], message: 'Validating inputs…' },
-    { ms: 1200, status: 'running', progress: 25, step: steps[1], message: 'Extracting text…' },
-    { ms: 2600, status: 'running', progress: 45, step: steps[2], message: 'Normalizing text…' },
-    { ms: 4800, status: 'running', progress: 75, step: steps[3], message: 'Generating persona draft…' },
-    { ms: 7000, status: 'running', progress: 90, step: steps[4], message: 'Finalizing…' },
-    { ms: 8200, status: 'succeeded', progress: 100, step: null, message: 'Build complete.' }
-  ];
-
-  for (const item of schedule) {
-    setTimeout(() => {
-      const b = _getBuild(buildId);
-      if (!b) return;
-      if (b.status === 'cancelled' || b.status === 'failed' || b.status === 'succeeded') return;
-
-      const updated = {
-        ...b,
-        status: item.status,
-        progress: item.progress,
-        currentStep: item.step,
-        message: item.message,
-        updatedAt: _nowIso()
-      };
-      _setBuild(updated);
-    }, item.ms);
-  }
-}
 
 // PUBLIC_INTERFACE
 function isDbConfiguredForBuilds() {
@@ -104,39 +42,25 @@ function isDbConfiguredForBuilds() {
 // PUBLIC_INTERFACE
 function createBuild(input) {
   /**
-   * Create a build/workflow (in-memory scaffold).
+   * Create a build/workflow (in-memory).
    *
    * @param {{ personaId?: string|null, documentId?: string|null, mode?: string|null }} input
    * @returns {BuildRecord}
    */
-  const id = uuidV4();
-  const now = _nowIso();
-
-  const build = {
-    id,
+  const wf = workflowService.createWorkflow({
     personaId: input.personaId ?? null,
     documentId: input.documentId ?? null,
-    status: 'queued',
-    progress: 0,
-    message: 'Build queued.',
-    steps: ['validate_inputs', 'extract_text', 'normalize_text', 'generate_persona_draft', 'finalize'],
-    currentStep: null,
-    createdAt: now,
-    updatedAt: now
-  };
+    mode: input.mode ?? null
+  });
 
-  _setBuild(build);
-
-  // Start progress simulation immediately.
-  _simulateProgress(id);
-
-  return build;
+  workflowService.startWorkflow(wf.id);
+  return wf;
 }
 
 // PUBLIC_INTERFACE
 function getBuild(buildId) {
   /** Return a build record by id (or null if not found). */
-  return _getBuild(buildId);
+  return workflowService.getWorkflow(buildId);
 }
 
 // PUBLIC_INTERFACE
@@ -145,33 +69,15 @@ function getBuildStatus(buildId) {
    * Return a status projection (or null if not found).
    * Keeps payload small for polling.
    */
-  const b = _getBuild(buildId);
-  if (!b) return null;
-  return {
-    id: b.id,
-    status: b.status,
-    progress: b.progress,
-    message: b.message,
-    currentStep: b.currentStep,
-    updatedAt: b.updatedAt
-  };
+  return workflowService.getWorkflowStatus(buildId);
 }
 
 // PUBLIC_INTERFACE
 function cancelBuild(buildId) {
   /** Cancel an in-progress build. Returns updated status projection or null if not found. */
-  const b = _getBuild(buildId);
-  if (!b) return null;
-  if (b.status === 'succeeded' || b.status === 'failed') return getBuildStatus(buildId);
-
-  const updated = {
-    ...b,
-    status: 'cancelled',
-    message: 'Build cancelled.',
-    updatedAt: _nowIso()
-  };
-  _setBuild(updated);
-  return getBuildStatus(buildId);
+  const wf = workflowService.cancelWorkflow(buildId);
+  if (!wf) return null;
+  return workflowService.getWorkflowStatus(buildId);
 }
 
 module.exports = {

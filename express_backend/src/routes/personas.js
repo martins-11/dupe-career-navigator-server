@@ -6,7 +6,7 @@ const {
   PersonaUpdateRequest,
   PersonaVersionCreateRequest
 } = require('../models/personas');
-const personasRepo = require('../repositories/personasRepo');
+const personasRepo = require('../repositories/personasRepoAdapter');
 
 const router = express.Router();
 
@@ -25,10 +25,13 @@ const router = express.Router();
  */
 
 function handleRepoError(res, err) {
-  if (err && (err.code === 'DB_NOT_CONFIGURED' || /not configured/i.test(String(err.message)))) {
-    return res.status(503).json({ error: 'db_unavailable', message: err.message });
+  // In adapter mode, DB-not-configured should never be fatal (memory fallback).
+  // Only treat connection/runtime DB errors as 503.
+  const msg = String(err && err.message ? err.message : err);
+  if (/database/i.test(msg) || /postgres/i.test(msg) || /connection/i.test(msg)) {
+    return res.status(503).json({ error: 'db_unavailable', message: msg });
   }
-  return res.status(503).json({ error: 'db_unavailable', message: err.message });
+  return res.status(500).json({ error: 'internal_server_error', message: msg });
 }
 
 router.post('/', async (req, res) => {

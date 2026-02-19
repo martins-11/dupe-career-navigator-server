@@ -2,27 +2,33 @@
 
 const express = require('express');
 const multer = require('multer');
+const crypto = require('crypto');
 const { uuidV4 } = require('../utils/uuid');
+const documentsRepo = require('../repositories/documentsRepoAdapter');
+const { extractTextFromUploadedFile } = require('../services/extractionService');
+const { normalizeText } = require('../services/normalizationService');
 
 const router = express.Router();
 
 /**
- * Upload APIs (placeholder).
+ * Upload APIs (real implementation with in-memory persistence).
  *
- * Goals:
- * - Provide real multipart/form-data endpoints for multi-file uploads
- * - Keep behavior safe even when DB/storage env vars are not configured
- * - Return deterministic metadata about received files
+ * Maintains existing API contract:
+ * - POST /uploads/documents -> { uploadId, receivedFiles, message }
+ * - POST /uploads/text      -> { uploadId, receivedFiles, message }
  *
- * This scaffold intentionally uses memoryStorage so no files are written to disk.
- * In a future iteration, the handler can stream to S3 (or persist to DB).
+ * Enhancements (side effects are now real, but response stays stable):
+ * - Compute sha256 for each file
+ * - Create document metadata record (memory by default; Postgres if configured)
+ * - Extract text for txt/pdf where possible
+ * - Normalize extracted text and persist as document_extracted_text
  */
 
 // Conservative defaults; can be tuned via env.
 const maxFileSizeBytes = Number(process.env.UPLOAD_MAX_FILE_SIZE_BYTES || 15 * 1024 * 1024); // 15MB
 const maxFiles = Number(process.env.UPLOAD_MAX_FILES || 10);
 
-// Memory storage keeps this endpoint side-effect-free.
+// Memory storage keeps it disk-free; we still persist metadata/text to repositories.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -48,8 +54,54 @@ function multerErrorToResponse(err) {
   if (err && err.code === 'LIMIT_FILE_COUNT') {
     return { status: 400, body: { error: 'too_many_files', message } };
   }
-  // Default to 400 for malformed multipart requests.
   return { status: 400, body: { error: 'upload_error', message } };
+}
+
+function sha256Hex(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+async function persistOneFile({ file, userId, source }) {
+  const fileBytes = file.buffer || Buffer.alloc(0);
+  const hash = fileBytes.length ? sha256Hex(fileBytes) : null;
+
+  const doc = await documentsRepo.createDocument({
+    userId: userId ?? null,
+    originalFilename: file.originalname,
+    mimeType: file.mimetype || null,
+    source: source ?? null,
+    storageProvider: 'memory',
+    storagePath: null,
+    fileSizeBytes: Number.isFinite(file.size) ? file.size : fileBytes.length,
+    sha256: hash
+  });
+
+  // Best-effort extract; if fails, we still keep the document metadata.
+  const extraction = await extractTextFromUploadedFile({
+    filename: file.originalname,
+    mimeType: file.mimetype,
+    buffer: fileBytes
+  });
+
+  if (extraction && extraction.text && String(extraction.text).trim()) {
+    const normalized = normalizeText(extraction.text, {
+      removeExtraWhitespace: true,
+      normalizeLineBreaks: true
+    });
+
+    await documentsRepo.upsertExtractedText(doc.id, {
+      extractor: extraction.extractor,
+      extractorVersion: extraction.extractorVersion,
+      language: extraction.language ?? null,
+      textContent: normalized.text,
+      metadataJson: {
+        ...extraction.metadata,
+        normalization: normalized.stats
+      }
+    });
+  }
+
+  return doc;
 }
 
 /**
@@ -57,8 +109,7 @@ function multerErrorToResponse(err) {
  * Accepts multipart/form-data with field "files" (multiple).
  */
 router.post('/documents', (req, res) => {
-  // Multer parsing is callback-style; we translate errors to safe JSON.
-  upload.array('files', maxFiles)(req, res, (err) => {
+  upload.array('files', maxFiles)(req, res, async (err) => {
     if (err) {
       const mapped = multerErrorToResponse(err);
       return res.status(mapped.status).json(mapped.body);
@@ -66,15 +117,37 @@ router.post('/documents', (req, res) => {
 
     const files = req.files;
     if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'validation_error', message: 'No files received. Use field name "files".' });
+      return res
+        .status(400)
+        .json({ error: 'validation_error', message: 'No files received. Use field name "files".' });
     }
 
     const uploadId = uuidV4();
+
+    // Keep response contract stable; do real persistence in background of request.
+    try {
+      const userId = req.body?.userId || null;
+      const source = req.body?.source || null;
+
+      // Persist sequentially to keep memory usage predictable.
+      for (const file of files) {
+        // eslint-disable-next-line no-await-in-loop
+        await persistOneFile({ file, userId, source });
+      }
+    } catch (persistErr) {
+      // If persistence fails, still return stable response but make message explicit.
+      return res.status(200).json({
+        uploadId,
+        receivedFiles: mapFiles(files),
+        message:
+          'Files received. Persistence/extraction partially failed; check server logs. (API contract preserved.)'
+      });
+    }
+
     return res.json({
       uploadId,
       receivedFiles: mapFiles(files),
-      message:
-        'Files received (placeholder). No persistence performed; integrate storage/DB in a later step.'
+      message: 'Files received and persisted (memory by default). Extracted text stored when possible.'
     });
   });
 });
@@ -84,7 +157,7 @@ router.post('/documents', (req, res) => {
  * Same behavior as /uploads/documents, kept separate to allow future content-type validation.
  */
 router.post('/text', (req, res) => {
-  upload.array('files', maxFiles)(req, res, (err) => {
+  upload.array('files', maxFiles)(req, res, async (err) => {
     if (err) {
       const mapped = multerErrorToResponse(err);
       return res.status(mapped.status).json(mapped.body);
@@ -92,15 +165,32 @@ router.post('/text', (req, res) => {
 
     const files = req.files;
     if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'validation_error', message: 'No files received. Use field name "files".' });
+      return res
+        .status(400)
+        .json({ error: 'validation_error', message: 'No files received. Use field name "files".' });
     }
 
     const uploadId = uuidV4();
+
+    try {
+      const userId = req.body?.userId || null;
+      for (const file of files) {
+        // eslint-disable-next-line no-await-in-loop
+        await persistOneFile({ file, userId, source: 'text_upload' });
+      }
+    } catch (persistErr) {
+      return res.status(200).json({
+        uploadId,
+        receivedFiles: mapFiles(files),
+        message:
+          'Files received. Persistence/extraction partially failed; check server logs. (API contract preserved.)'
+      });
+    }
+
     return res.json({
       uploadId,
       receivedFiles: mapFiles(files),
-      message:
-        'Files received (placeholder). No persistence performed; integrate storage/DB in a later step.'
+      message: 'Files received and persisted (memory by default). Extracted text stored when possible.'
     });
   });
 });
