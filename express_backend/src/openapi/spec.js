@@ -329,9 +329,68 @@ const openapiDefinition = {
       },
       PersonaDraft: {
         type: 'object',
-        additionalProperties: true,
+        additionalProperties: false,
         description:
-          'Generated persona JSON draft. This is intentionally flexible and will evolve as the product matures.'
+          'Generated persona JSON draft. This schema is strict and matches the Zod PersonaDraftSchema used by POST /ai/personas/generate.',
+        properties: {
+          schemaVersion: { type: 'string', minLength: 1, description: 'Persona schema version string.' },
+          title: { type: 'string', minLength: 1, description: 'Human-readable persona title.' },
+          summary: { type: 'string', minLength: 1, description: 'Short summary of the persona.' },
+          profile: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'Core profile attributes for the persona.',
+            properties: {
+              headline: { type: 'string', minLength: 1, description: 'Primary headline for the persona.' },
+              seniority: { type: 'string', nullable: true, description: 'Optional seniority (nullable).' },
+              industry: { type: 'string', nullable: true, description: 'Optional industry (nullable).' },
+              location: { type: 'string', nullable: true, description: 'Optional location (nullable).' }
+            },
+            required: ['headline', 'seniority', 'industry', 'location']
+          },
+          strengths: {
+            type: 'array',
+            description: 'Key strengths. Must contain at least one non-empty string.',
+            items: { type: 'string', minLength: 1 },
+            minItems: 1
+          },
+          skills: {
+            type: 'array',
+            description: 'Key skills. Must contain at least one non-empty string.',
+            items: { type: 'string', minLength: 1 },
+            minItems: 1
+          },
+          experienceHighlights: {
+            type: 'array',
+            description: 'Experience highlights. Must contain at least one non-empty string.',
+            items: { type: 'string', minLength: 1 },
+            minItems: 1
+          },
+          provenance: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'Metadata about how the persona was generated.',
+            properties: {
+              source: { type: 'string', minLength: 1, description: 'Generator/source identifier.' },
+              sourceTextLength: {
+                type: 'integer',
+                minimum: 0,
+                description: 'Length of the source text used to generate the persona.'
+              }
+            },
+            required: ['source', 'sourceTextLength']
+          }
+        },
+        required: [
+          'schemaVersion',
+          'title',
+          'summary',
+          'profile',
+          'strengths',
+          'skills',
+          'experienceHighlights',
+          'provenance'
+        ]
       },
       PersonaGenerateResponse: {
         type: 'object',
