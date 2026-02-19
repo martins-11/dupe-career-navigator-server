@@ -33,13 +33,14 @@ function getMigrationSql() {
 CREATE TABLE IF NOT EXISTS documents (
   id CHAR(36) PRIMARY KEY,
   user_id CHAR(36) NULL,
-  original_filename TEXT NOT NULL,
-  mime_type TEXT NULL,
-  source TEXT NULL,
-  storage_provider TEXT NULL,
-  storage_path TEXT NULL,
+  -- Metadata fields: use VARCHAR with sensible caps (instead of TEXT) to better reflect typical sizes.
+  original_filename VARCHAR(512) NOT NULL,
+  mime_type VARCHAR(255) NULL,
+  source VARCHAR(255) NULL,
+  storage_provider VARCHAR(64) NULL,
+  storage_path VARCHAR(1024) NULL,
+  sha256 VARCHAR(64) NULL,
   file_size_bytes BIGINT NULL,
-  sha256 TEXT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB;
