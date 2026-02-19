@@ -27,6 +27,7 @@ const openapiDefinition = {
     { name: 'Health', description: 'Service health and readiness endpoints.' },
     { name: 'Documents', description: 'Document metadata and extracted text persistence.' },
     { name: 'Uploads', description: 'Multi-file upload endpoints (placeholder; no persistence yet).' },
+    { name: 'Extraction', description: 'PDF/TXT text extraction and text normalization (placeholders).' },
     { name: 'Personas', description: 'Persona CRUD and version history.' }
   ],
   servers: [
@@ -215,6 +216,75 @@ const openapiDefinition = {
           message: { type: 'string', description: 'Human-readable status message.' }
         },
         required: ['uploadId', 'receivedFiles', 'message']
+      },
+
+      ExtractTextRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          filename: { type: 'string', description: 'Optional client filename for tracing.' },
+          mimeType: { type: 'string', description: 'Optional mime type hint.' },
+          content: {
+            type: 'string',
+            minLength: 1,
+            description:
+              'Raw content as text. Placeholder: for PDFs this should be plain text until multipart/base64 is introduced.'
+          },
+          languageHint: { type: 'string', description: 'Optional language hint, e.g. "en".' }
+        },
+        required: ['content']
+      },
+      ExtractTextResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          requestId: { type: 'string', format: 'uuid' },
+          extractor: { type: 'string', example: 'placeholder' },
+          extractorVersion: { type: 'string', example: '0.1.0' },
+          sourceType: { type: 'string', enum: ['pdf', 'txt'] },
+          language: { type: 'string', nullable: true },
+          text: { type: 'string' },
+          warnings: { type: 'array', items: { type: 'string' } },
+          metadata: { type: 'object', additionalProperties: true }
+        },
+        required: ['requestId', 'extractor', 'extractorVersion', 'sourceType', 'language', 'text', 'warnings', 'metadata']
+      },
+
+      NormalizeTextRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', minLength: 1 },
+          options: {
+            type: 'object',
+            nullable: true,
+            additionalProperties: false,
+            properties: {
+              removeExtraWhitespace: { type: 'boolean', nullable: true },
+              normalizeLineBreaks: { type: 'boolean', nullable: true },
+              maxLength: { type: 'integer', minimum: 1, nullable: true }
+            }
+          }
+        },
+        required: ['text']
+      },
+      NormalizeTextResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          requestId: { type: 'string', format: 'uuid' },
+          text: { type: 'string' },
+          stats: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              originalLength: { type: 'integer', minimum: 0 },
+              normalizedLength: { type: 'integer', minimum: 0 }
+            },
+            required: ['originalLength', 'normalizedLength']
+          }
+        },
+        required: ['requestId', 'text', 'stats']
       }
     },
     parameters: {
@@ -390,6 +460,87 @@ const openapiDefinition = {
           },
           413: {
             description: 'Payload too large',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/extraction/pdf/extract-text': {
+      post: {
+        tags: ['Extraction'],
+        summary: 'Extract text from a PDF payload (placeholder)',
+        description:
+          'Placeholder endpoint for PDF text extraction. For now, expects plain text in `content` (not PDF bytes). Future versions may accept multipart/form-data or base64-encoded PDF bytes.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/ExtractTextRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Extracted text (placeholder)',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/ExtractTextResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/extraction/txt/extract-text': {
+      post: {
+        tags: ['Extraction'],
+        summary: 'Extract text from a TXT payload (placeholder)',
+        description:
+          'Extracts/normalizes text from a plain text payload. This is close to real behavior for TXT; it normalizes line breaks.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/ExtractTextRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Extracted text',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/ExtractTextResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/extraction/normalize': {
+      post: {
+        tags: ['Extraction'],
+        summary: 'Normalize extracted text (placeholder)',
+        description:
+          'Normalizes text for downstream processing (whitespace cleanup, line break normalization, optional truncation).',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/NormalizeTextRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Normalized text',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/NormalizeTextResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
