@@ -169,21 +169,32 @@ async function persistOneFile({ file, userId, source }) {
     buffer: fileBytes
   });
 
-  if (extraction && extraction.text && String(extraction.text).trim()) {
-    const normalized = normalizeText(extraction.text, {
+  // Always persist an extracted_text row when we recognize the type (extraction != null),
+  // even if the extracted text is empty (e.g., unsupported legacy .doc). This guarantees
+  // "one extracted_text row per uploaded document" while keeping DB-optional behavior intact.
+  if (extraction) {
+    const rawText = extraction.text || '';
+    const hasMeaningfulText = Boolean(String(rawText).trim());
+
+    const normalized = normalizeText(rawText, {
       removeExtraWhitespace: true,
       normalizeLineBreaks: true
     });
+
+    // If no text could be extracted, keep empty string but persist warnings/metadata for traceability.
+    const warnings = Array.isArray(extraction.warnings) ? extraction.warnings : [];
 
     // Create ONE extracted_text row per document upload (MVP). This repo keeps history via INSERT.
     await documentsRepo.upsertExtractedText(doc.id, {
       extractor: extraction.extractor,
       extractorVersion: extraction.extractorVersion,
       language: extraction.language ?? null,
-      textContent: normalized.text,
+      textContent: hasMeaningfulText ? normalized.text : '',
       metadataJson: {
         ...extraction.metadata,
+        warnings,
         normalization: normalized.stats,
+        extractedTextEmpty: !hasMeaningfulText,
         localFile: {
           storageProvider: 'local',
           storagePath: absPath
