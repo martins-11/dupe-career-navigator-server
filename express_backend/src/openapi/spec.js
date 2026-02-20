@@ -808,7 +808,19 @@ const openapiDefinition = {
         tags: ['Uploads'],
         summary: 'Upload one or more documents (multi-file upload)',
         description:
-          'Uploads one or more documents via multipart/form-data (field: `files`). After each file is accepted, the server automatically persists a `documents` metadata row and triggers extraction/normalization; as a side effect it creates **one `extracted_text` row per uploaded document** (best-effort). The HTTP response contract remains stable and only reports the upload batch id + received file metadata.',
+          [
+            'Uploads one or more documents via multipart/form-data (field name: `files`).',
+            '',
+            'Category tagging (used by orchestration auto-selection):',
+            '- Canonical categories: `resume`, `job_description`, `performance_review`.',
+            '- You may provide categories using ONE of the additive patterns below (all are optional).',
+            '- Precedence (highest → lowest): `category` → `categoryByIndexJson` → `categoriesJson` → `categoryByOriginalnameJson`.',
+            '',
+            'Automatic side effects (contract-stable):',
+            '- For each accepted file the server persists a `documents` metadata row (no blobs).',
+            '- Then it attempts extraction + normalization and (best-effort) creates **one `extracted_text` row per uploaded document**.',
+            '- The HTTP response contract remains stable and only returns `uploadId`, `receivedFiles`, and a `message` (no document ids).'
+          ].join('\n'),
         requestBody: {
           required: true,
           content: {
@@ -820,40 +832,47 @@ const openapiDefinition = {
                   files: {
                     type: 'array',
                     items: { type: 'string', format: 'binary' },
-                    description: 'One or more files.'
+                    description:
+                      'One or more files. Must be sent with multipart field name `files` (i.e., `files[]` in many clients).'
                   },
                   userId: { type: 'string', format: 'uuid', nullable: true, description: 'Optional user id.' },
-                  source: { type: 'string', nullable: true, description: 'Optional source label (e.g., resume, linkedin).' },
+                  source: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Optional source label for metadata (e.g., resume, linkedin). Does not affect extraction.'
+                  },
 
                   category: {
                     type: 'string',
                     nullable: true,
+                    enum: ['resume', 'job_description', 'performance_review'],
                     description:
-                      'Additive: apply a single document category to all uploaded files. Canonical: resume | job_description | performance_review.'
+                      'Apply a single category to ALL uploaded files in this request. Canonical categories are used for orchestration auto-selection.'
                   },
                   categoriesJson: {
                     type: 'string',
                     nullable: true,
                     description:
-                      'Additive: JSON array of category strings aligned with upload order (index-based).'
+                      'JSON array of category strings aligned with upload order (index-based). Example: `["resume","job_description","performance_review"]`.'
                   },
                   categoryByOriginalnameJson: {
                     type: 'string',
                     nullable: true,
                     description:
-                      'Additive: JSON object mapping original filename to category, e.g. {\"resume.pdf\":\"resume\"}.'
+                      'JSON object mapping original filename to category. Example: `{"resume.pdf":"resume"}`.'
                   },
                   categoryByIndexJson: {
                     type: 'string',
                     nullable: true,
                     description:
-                      'Additive: JSON object mapping file index to category, e.g. {\"0\":\"resume\",\"1\":\"job_description\"}.'
+                      'JSON object mapping file index to category. Example: `{"0":"resume","1":"job_description"}`.'
                   },
                   requireCategories: {
                     type: 'string',
                     nullable: true,
                     description:
-                      'Additive: if \"true\", server validates that all 3 categories are present in this upload request.'
+                      'If `"true"`, the server validates that the request includes at least one file for EACH canonical category: resume, job_description, performance_review.'
                   }
                 },
                 required: ['files']
@@ -864,13 +883,13 @@ const openapiDefinition = {
         responses: {
           200: {
             description:
-              'Upload accepted. Side effects: creates a `documents` row per file and triggers automatic extraction/normalization, creating one `extracted_text` row per uploaded document when extraction is possible.',
+              'Upload accepted. Side effects: persists a `documents` row per file and attempts extraction+normalization, creating one `extracted_text` row per uploaded document when possible (best-effort). Response contract stays stable (no created ids returned).',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/MultiFileUploadResponse' } }
             }
           },
           400: {
-            description: 'Validation error (e.g., missing files)',
+            description: 'Validation error (e.g., missing files, invalid/missing required categories)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           413: {
@@ -886,7 +905,18 @@ const openapiDefinition = {
         tags: ['Uploads'],
         summary: 'Upload one or more plain text files (multi-file upload)',
         description:
-          'Uploads one or more text files via multipart/form-data (field: `files`). After each file is accepted, the server automatically persists a `documents` metadata row and triggers extraction/normalization; as a side effect it creates **one `extracted_text` row per uploaded document** (best-effort). The HTTP response contract remains stable and only reports the upload batch id + received file metadata.',
+          [
+            'Uploads one or more text files via multipart/form-data (field name: `files`).',
+            '',
+            'Category tagging (used by orchestration auto-selection):',
+            '- Canonical categories: `resume`, `job_description`, `performance_review`.',
+            '- Precedence (highest → lowest): `category` → `categoryByIndexJson` → `categoriesJson` → `categoryByOriginalnameJson`.',
+            '',
+            'Automatic side effects (contract-stable):',
+            '- For each accepted file the server persists a `documents` metadata row (no blobs).',
+            '- Then it attempts extraction + normalization and (best-effort) creates **one `extracted_text` row per uploaded document**.',
+            '- The HTTP response contract remains stable and only returns `uploadId`, `receivedFiles`, and a `message` (no document ids).'
+          ].join('\n'),
         requestBody: {
           required: true,
           content: {
@@ -898,39 +928,41 @@ const openapiDefinition = {
                   files: {
                     type: 'array',
                     items: { type: 'string', format: 'binary' },
-                    description: 'One or more text files.'
+                    description:
+                      'One or more text files. Must be sent with multipart field name `files` (i.e., `files[]` in many clients).'
                   },
                   userId: { type: 'string', format: 'uuid', nullable: true },
 
                   category: {
                     type: 'string',
                     nullable: true,
+                    enum: ['resume', 'job_description', 'performance_review'],
                     description:
-                      'Additive: apply a single document category to all uploaded files. Canonical: resume | job_description | performance_review.'
+                      'Apply a single category to ALL uploaded files in this request. Canonical categories are used for orchestration auto-selection.'
                   },
                   categoriesJson: {
                     type: 'string',
                     nullable: true,
                     description:
-                      'Additive: JSON array of category strings aligned with upload order (index-based).'
+                      'JSON array of category strings aligned with upload order (index-based). Example: `["resume","job_description","performance_review"]`.'
                   },
                   categoryByOriginalnameJson: {
                     type: 'string',
                     nullable: true,
                     description:
-                      'Additive: JSON object mapping original filename to category, e.g. {\"review.pdf\":\"performance_review\"}.'
+                      'JSON object mapping original filename to category. Example: `{"review.txt":"performance_review"}`.'
                   },
                   categoryByIndexJson: {
                     type: 'string',
                     nullable: true,
                     description:
-                      'Additive: JSON object mapping file index to category, e.g. {\"0\":\"resume\",\"1\":\"job_description\"}.'
+                      'JSON object mapping file index to category. Example: `{"0":"resume","1":"job_description"}`.'
                   },
                   requireCategories: {
                     type: 'string',
                     nullable: true,
                     description:
-                      'Additive: if \"true\", server validates that all 3 categories are present in this upload request.'
+                      'If `"true"`, the server validates that the request includes at least one file for EACH canonical category: resume, job_description, performance_review.'
                   }
                 },
                 required: ['files']
@@ -941,13 +973,13 @@ const openapiDefinition = {
         responses: {
           200: {
             description:
-              'Upload accepted. Side effects: creates a `documents` row per file and triggers automatic extraction/normalization, creating one `extracted_text` row per uploaded document when extraction is possible.',
+              'Upload accepted. Side effects: persists a `documents` row per file and attempts extraction+normalization, creating one `extracted_text` row per uploaded document when possible (best-effort). Response contract stays stable (no created ids returned).',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/MultiFileUploadResponse' } }
             }
           },
           400: {
-            description: 'Validation error (e.g., missing files)',
+            description: 'Validation error (e.g., missing files, invalid/missing required categories)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           413: {
