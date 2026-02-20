@@ -3,6 +3,8 @@
 const express = require('express');
 const multer = require('multer');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { uuidV4 } = require('../utils/uuid');
 const documentsRepo = require('../repositories/documentsRepoAdapter');
 const { extractTextFromUploadedFile } = require('../services/extractionService');
@@ -11,26 +13,65 @@ const { normalizeText } = require('../services/normalizationService');
 const router = express.Router();
 
 /**
- * Upload APIs (real implementation with in-memory persistence).
+ * Upload APIs (MVP: local file save + metadata + extracted text).
  *
  * Maintains existing API contract:
  * - POST /uploads/documents -> { uploadId, receivedFiles, message }
  * - POST /uploads/text      -> { uploadId, receivedFiles, message }
  *
- * Enhancements (side effects are now real, but response stays stable):
- * - Compute sha256 for each file
- * - Create document metadata record (memory by default; Postgres if configured)
- * - Extract text for txt/pdf where possible
- * - Normalize extracted text and persist as document_extracted_text
+ * MVP behavior (side effects; response stays stable):
+ * - Multi-file upload in one request (field: "files")
+ * - Save raw files to local disk (NO S3)
+ * - Persist ONLY metadata to DB (no blobs)
+ * - Immediately extract + normalize and create 1 extracted_text row per document
+ *
+ * Notes:
+ * - Repository adapter still chooses memory when DB is not configured.
+ * - When DB is configured (MySQL by default), metadata + extracted text are persisted there.
  */
 
 // Conservative defaults; can be tuned via env.
 const maxFileSizeBytes = Number(process.env.UPLOAD_MAX_FILE_SIZE_BYTES || 15 * 1024 * 1024); // 15MB
 const maxFiles = Number(process.env.UPLOAD_MAX_FILES || 10);
 
-// Memory storage keeps it disk-free; we still persist metadata/text to repositories.
+// Where raw files are stored locally.
+// ENV (optional): UPLOAD_LOCAL_DIR (default: <repo>/express_backend/.local_uploads)
+const localUploadsDir = path.resolve(__dirname, '../../.local_uploads');
+
+function ensureLocalUploadsDir() {
+  try {
+    fs.mkdirSync(localUploadsDir, { recursive: true });
+  } catch (e) {
+    // If we cannot create the dir, multer will fail later; let the request error.
+  }
+}
+
+function safeBasename(originalname) {
+  // Prevent path traversal and normalize to a simple file name.
+  const base = path.basename(String(originalname || 'file'));
+  // Replace characters that commonly cause issues across platforms.
+  return base.replace(/[^\w.\-()+\s]/g, '_');
+}
+
+function diskStorage() {
+  return multer.diskStorage({
+    destination: (req, file, cb) => {
+      ensureLocalUploadsDir();
+      cb(null, localUploadsDir);
+    },
+    filename: (req, file, cb) => {
+      // Create collision-resistant names while keeping the original basename.
+      const ext = path.extname(file.originalname || '');
+      const stem = safeBasename(path.basename(file.originalname || 'file', ext));
+      const unique = uuidV4();
+      cb(null, `${unique}__${stem}${ext}`);
+    }
+  });
+}
+
+// Disk storage saves files locally per MVP. We still persist metadata/text to repositories.
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: diskStorage(),
   limits: {
     fileSize: maxFileSizeBytes,
     files: maxFiles
@@ -61,17 +102,29 @@ function sha256Hex(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
+function readFileBufferOrEmpty(filePath) {
+  try {
+    return fs.readFileSync(filePath);
+  } catch (_) {
+    return Buffer.alloc(0);
+  }
+}
+
 async function persistOneFile({ file, userId, source }) {
-  const fileBytes = file.buffer || Buffer.alloc(0);
+  // With diskStorage, multer provides file.path.
+  const absPath = file.path ? path.resolve(file.path) : null;
+  const fileBytes = absPath ? readFileBufferOrEmpty(absPath) : Buffer.alloc(0);
+
   const hash = fileBytes.length ? sha256Hex(fileBytes) : null;
 
+  // Persist ONLY metadata (no blobs).
   const doc = await documentsRepo.createDocument({
     userId: userId ?? null,
     originalFilename: file.originalname,
     mimeType: file.mimetype || null,
     source: source ?? null,
-    storageProvider: 'memory',
-    storagePath: null,
+    storageProvider: 'local',
+    storagePath: absPath, // Local path only; never store file contents in DB.
     fileSizeBytes: Number.isFinite(file.size) ? file.size : fileBytes.length,
     sha256: hash
   });
@@ -89,6 +142,7 @@ async function persistOneFile({ file, userId, source }) {
       normalizeLineBreaks: true
     });
 
+    // Create ONE extracted_text row per document upload (MVP). This repo keeps history via INSERT.
     await documentsRepo.upsertExtractedText(doc.id, {
       extractor: extraction.extractor,
       extractorVersion: extraction.extractorVersion,
@@ -96,7 +150,11 @@ async function persistOneFile({ file, userId, source }) {
       textContent: normalized.text,
       metadataJson: {
         ...extraction.metadata,
-        normalization: normalized.stats
+        normalization: normalized.stats,
+        localFile: {
+          storageProvider: 'local',
+          storagePath: absPath
+        }
       }
     });
   }
@@ -124,7 +182,7 @@ router.post('/documents', (req, res) => {
 
     const uploadId = uuidV4();
 
-    // Keep response contract stable; do real persistence in background of request.
+    // Keep response contract stable; do real persistence within request for MVP.
     try {
       const userId = req.body?.userId || null;
       const source = req.body?.source || null;
@@ -147,7 +205,7 @@ router.post('/documents', (req, res) => {
     return res.json({
       uploadId,
       receivedFiles: mapFiles(files),
-      message: 'Files received and persisted (memory by default). Extracted text stored when possible.'
+      message: 'Files received and persisted (local disk). Extracted text stored when possible.'
     });
   });
 });
@@ -190,7 +248,7 @@ router.post('/text', (req, res) => {
     return res.json({
       uploadId,
       receivedFiles: mapFiles(files),
-      message: 'Files received and persisted (memory by default). Extracted text stored when possible.'
+      message: 'Files received and persisted (local disk). Extracted text stored when possible.'
     });
   });
 });
