@@ -82,7 +82,11 @@ router.post('/:id/extracted-text', async (req, res) => {
   }
 });
 
-router.get('/:id/extracted-text/latest', async (req, res) => {
+/**
+ * Shared handler for "latest extracted text" routes.
+ * Kept as an internal helper so both routes stay perfectly consistent.
+ */
+async function _getLatestExtractedTextHandler(req, res) {
   try {
     const doc = await documentsRepo.getDocumentById(req.params.id);
     if (!doc) return res.status(404).json({ error: 'document_not_found' });
@@ -94,6 +98,14 @@ router.get('/:id/extracted-text/latest', async (req, res) => {
   } catch (err) {
     return res.status(503).json({ error: 'db_unavailable', message: err.message });
   }
-});
+}
+
+router.get('/:id/extracted-text/latest', _getLatestExtractedTextHandler);
+
+/**
+ * Alias route for backwards compatibility:
+ * GET /documents/:id/extracted-text -> same as /documents/:id/extracted-text/latest
+ */
+router.get('/:id/extracted-text', _getLatestExtractedTextHandler);
 
 module.exports = router;

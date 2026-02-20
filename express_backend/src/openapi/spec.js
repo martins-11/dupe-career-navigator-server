@@ -1441,6 +1441,29 @@ const openapiDefinition = {
       }
     },
     '/documents/{id}/extracted-text': {
+      get: {
+        tags: ['Documents'],
+        summary: 'Get latest extracted text for a document (alias)',
+        description:
+          'Alias for GET /documents/{id}/extracted-text/latest. Returns the most recently persisted extracted text row for the document.',
+        parameters: [{ $ref: '#/components/parameters/DocumentIdParam' }],
+        responses: {
+          200: {
+            description: 'Latest extracted text',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/DocumentExtractedText' } }
+            }
+          },
+          404: {
+            description: 'Document or extracted text not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      },
       post: {
         tags: ['Documents'],
         summary: 'Persist extracted text for a document',
