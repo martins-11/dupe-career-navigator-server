@@ -3,7 +3,6 @@
 const { z } = require('zod');
 const documentsRepo = require('../repositories/documentsRepoAdapter');
 const personasRepo = require('../repositories/personasRepoAdapter');
-const { extractTextFromUploadedFile } = require('./extractionService');
 const { normalizeText } = require('./normalizationService');
 const buildsService = require('./buildsService');
 const workflowService = require('./workflowService');
@@ -28,6 +27,60 @@ const _orchestrations = new Map(); // buildId -> orchestration record
 
 function _nowIso() {
   return new Date().toISOString();
+}
+
+/**
+ * Attempt to persist build<->documents links.
+ *
+ * This must remain DB-optional: if DB isn't configured or the repo doesn't support
+ * link persistence, we treat it as a no-op and keep working from in-memory orchestration.
+ */
+async function _bestEffortPersistBuildDocumentsLink(buildId, documentIds) {
+  try {
+    if (!documentIds || documentIds.length === 0) return;
+
+    // Prefer a bulk operation if available.
+    if (typeof buildsService.linkDocumentsToBuild === 'function') {
+      // PUBLIC_INTERFACE via buildsService (if implemented)
+      // eslint-disable-next-line no-await-in-loop
+      await buildsService.linkDocumentsToBuild(buildId, documentIds);
+      return;
+    }
+
+    // Fallback: if a single-link API exists, call it for each doc.
+    if (typeof buildsService.linkDocumentToBuild === 'function') {
+      for (const documentId of documentIds) {
+        // eslint-disable-next-line no-await-in-loop
+        await buildsService.linkDocumentToBuild(buildId, documentId);
+      }
+    }
+  } catch (err) {
+    // No-op: keep DB-optional behavior intact.
+  }
+}
+
+/**
+ * Load the latest extracted text rows for the given documents from persistence.
+ * Uses documentsRepo adapter, which already routes to mysql/postgres/memory.
+ *
+ * @returns {Promise<{extractedRows: Array<object>, extractedById: Record<string, object|null>}>}
+ */
+async function _loadLatestExtractedTextForDocuments(documentIds) {
+  const extractedRows = [];
+  const extractedById = {};
+
+  for (const documentId of documentIds) {
+    // eslint-disable-next-line no-await-in-loop
+    const latest = await documentsRepo.getLatestExtractedText(documentId);
+    if (latest && latest.textContent) {
+      extractedRows.push(latest);
+      extractedById[documentId] = latest;
+    } else {
+      extractedById[documentId] = null;
+    }
+  }
+
+  return { extractedRows, extractedById };
 }
 
 function _getOrNull(buildId) {
@@ -279,6 +332,9 @@ async function startOrchestration(input) {
     autoCreatePersona: Boolean(parsed.autoCreatePersona)
   });
 
+  // Best-effort: persist build<->documents links (DB optional; no-op if unsupported).
+  await _bestEffortPersistBuildDocumentsLink(build.id, next.documentIds);
+
   return { build, orchestration: next };
 }
 
@@ -290,6 +346,10 @@ function linkUploadToBuild(buildId, input) {
   const parsed = OrchestrationUploadLinkRequest.parse(input || {});
   const orch = _ensure(buildId);
 
+  // Persist link best-effort; do not block request if DB not configured.
+  // Note: fire-and-forget is acceptable here to keep route contract stable and avoid surfacing DB errors.
+  void _bestEffortPersistBuildDocumentsLink(buildId, parsed.documentIds);
+
   return _touch(orch, {
     uploadId: parsed.uploadId,
     documentIds: parsed.documentIds
@@ -299,12 +359,13 @@ function linkUploadToBuild(buildId, input) {
 // PUBLIC_INTERFACE
 async function extractAndNormalizeForBuild(buildId, input) {
   /**
-   * Extract latest text for linked documents and compute a normalized combined text blob.
+   * Load latest extracted text for linked documents from persistence (DB via adapter, memory fallback),
+   * then compute a normalized combined text blob.
    *
    * Behavior:
-   * - uses documentsRepo.getLatestExtractedText() if present (e.g., created by /uploads/*)
-   * - if missing extracted text, attempts best-effort extraction by reading document metadata only
-   *   (BUT we do not have file bytes here, so that path is limited; it will just skip).
+   * - Reads stored extracted text via documentsRepo.getLatestExtractedText(documentId)
+   * - Does NOT attempt ad-hoc extraction here (no file bytes available). This keeps contracts stable:
+   *   extraction is handled by /uploads/* or /documents/:id/extracted-text.
    *
    * This method does not require DB credentials (memory repo default).
    */
@@ -318,6 +379,9 @@ async function extractAndNormalizeForBuild(buildId, input) {
     throw err;
   }
 
+  // Best-effort: persist build<->documents links for multi-doc builds (no-op if DB not configured).
+  await _bestEffortPersistBuildDocumentsLink(buildId, documentIds);
+
   // Update workflow status (best-effort; keeps /builds polling meaningful).
   const wf = workflowService.getWorkflow(buildId);
   if (wf && wf.status !== 'cancelled') {
@@ -325,26 +389,12 @@ async function extractAndNormalizeForBuild(buildId, input) {
     // Still, orchestration will proceed.
   }
 
-  const extractedRows = [];
-  const extractedById = { ...orch.extractedTextByDocumentId };
-
-  for (const documentId of documentIds) {
-    // eslint-disable-next-line no-await-in-loop
-    const latest = await documentsRepo.getLatestExtractedText(documentId);
-    if (latest && latest.textContent) {
-      extractedRows.push(latest);
-      extractedById[documentId] = latest;
-      continue;
-    }
-
-    // If no extracted text exists, we cannot extract without bytes. Keep a trace.
-    extractedById[documentId] = extractedById[documentId] || null;
-  }
+  const { extractedRows, extractedById } = await _loadLatestExtractedTextForDocuments(documentIds);
 
   const combined = _concatTexts(extractedRows);
   if (!combined.trim()) {
     const err = new Error(
-      'No extracted text available for linked documents. Ensure you uploaded files via /uploads/* or posted extracted text to /documents/:id/extracted-text.'
+      'No extracted text available for linked documents. Ensure extracted text was stored via /uploads/* or /documents/:id/extracted-text.'
     );
     err.code = 'NO_EXTRACTED_TEXT';
     throw err;
@@ -596,6 +646,7 @@ async function runAllOrchestration(input) {
       orch = linkUploadToBuild(build.id, parsed.uploadLink);
     } else if (parsed.documentIds?.length) {
       orch = _touch(orch, { documentIds: parsed.documentIds });
+      await _bestEffortPersistBuildDocumentsLink(build.id, parsed.documentIds);
     } else {
       const err = new Error('Either uploadLink or documentIds must be provided.');
       err.code = 'MISSING_INPUTS';

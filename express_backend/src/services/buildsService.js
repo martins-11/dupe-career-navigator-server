@@ -123,10 +123,65 @@ async function cancelBuild(buildId) {
   return workflowService.getWorkflowStatus(buildId);
 }
 
+// PUBLIC_INTERFACE
+async function linkDocumentToBuild(buildId, documentId) {
+  /**
+   * Link a single document to a build in persistence, if supported by the active repo.
+   *
+   * This is intentionally DB-optional: in memory-only mode (or if the repo doesn't implement
+   * build-document linking), this function is a no-op and returns { linked: false }.
+   *
+   * @param {string} buildId
+   * @param {string} documentId
+   * @returns {Promise<{linked: boolean}>}
+   */
+  const repo = buildsRepo;
+
+  if (typeof repo.linkDocumentToBuild !== 'function') return { linked: false };
+
+  await repo.linkDocumentToBuild(buildId, documentId);
+  return { linked: true };
+}
+
+// PUBLIC_INTERFACE
+async function linkDocumentsToBuild(buildId, documentIds) {
+  /**
+   * Link multiple documents to a build in persistence, if supported by the active repo.
+   *
+   * DB-optional behavior:
+   * - If repo implements linkDocumentsToBuild: use it.
+   * - Else if repo implements linkDocumentToBuild: call for each.
+   * - Else: no-op.
+   *
+   * @param {string} buildId
+   * @param {string[]} documentIds
+   * @returns {Promise<{linked: boolean, count: number}>}
+   */
+  const ids = Array.isArray(documentIds) ? documentIds.filter(Boolean) : [];
+  if (ids.length === 0) return { linked: false, count: 0 };
+
+  const repo = buildsRepo;
+
+  if (typeof repo.linkDocumentsToBuild === 'function') {
+    await repo.linkDocumentsToBuild(buildId, ids);
+    return { linked: true, count: ids.length };
+  }
+
+  if (typeof repo.linkDocumentToBuild === 'function') {
+    // eslint-disable-next-line no-await-in-loop
+    for (const documentId of ids) await repo.linkDocumentToBuild(buildId, documentId);
+    return { linked: true, count: ids.length };
+  }
+
+  return { linked: false, count: 0 };
+}
+
 module.exports = {
   isDbConfiguredForBuilds,
   createBuild,
   getBuild,
   getBuildStatus,
-  cancelBuild
+  cancelBuild,
+  linkDocumentToBuild,
+  linkDocumentsToBuild
 };
