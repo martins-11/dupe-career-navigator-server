@@ -25,17 +25,18 @@ async function createDocument(input) {
   await dbQuery(
     `
     INSERT INTO documents (
-      id, user_id, original_filename, mime_type, source,
+      id, user_id, original_filename, mime_type, category, source,
       storage_provider, storage_path, file_size_bytes, sha256,
       created_at, updated_at
     )
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     `,
     [
       id,
       input.userId ?? null,
       input.originalFilename,
       input.mimeType ?? null,
+      input.category ?? null,
       input.source ?? null,
       input.storageProvider ?? null,
       input.storagePath ?? null,
@@ -53,6 +54,7 @@ async function createDocument(input) {
       user_id as userId,
       original_filename as originalFilename,
       mime_type as mimeType,
+      category,
       source,
       storage_provider as storageProvider,
       storage_path as storagePath,
@@ -92,6 +94,7 @@ async function listDocuments(options = {}) {
       user_id as userId,
       original_filename as originalFilename,
       mime_type as mimeType,
+      category,
       source,
       storage_provider as storageProvider,
       storage_path as storagePath,
@@ -120,6 +123,7 @@ async function getDocumentById(documentId) {
       user_id as userId,
       original_filename as originalFilename,
       mime_type as mimeType,
+      category,
       source,
       storage_provider as storageProvider,
       storage_path as storagePath,
@@ -209,10 +213,51 @@ async function getLatestExtractedText(documentId) {
   return res.rows[0] || null;
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Get latest document for a user and category.
+ *
+ * @param {string|null} userId
+ * @param {string} category canonical category string
+ * @returns {Promise<object|null>}
+ */
+async function getLatestDocumentForUserByCategory(userId, category) {
+  // If userId is null, match NULL user_id documents (useful for anonymous flows).
+  const whereUser = userId ? 'user_id = ?' : 'user_id IS NULL';
+  const params = userId ? [userId, category] : [category];
+
+  const res = await dbQuery(
+    `
+    SELECT
+      id,
+      user_id as userId,
+      original_filename as originalFilename,
+      mime_type as mimeType,
+      category,
+      source,
+      storage_provider as storageProvider,
+      storage_path as storagePath,
+      file_size_bytes as fileSizeBytes,
+      sha256,
+      created_at as createdAt,
+      updated_at as updatedAt
+    FROM documents
+    WHERE ${whereUser}
+      AND category = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    params
+  );
+
+  return res.rows[0] || null;
+}
+
 module.exports = {
   createDocument,
   listDocuments,
   getDocumentById,
   upsertExtractedText,
-  getLatestExtractedText
+  getLatestExtractedText,
+  getLatestDocumentForUserByCategory
 };

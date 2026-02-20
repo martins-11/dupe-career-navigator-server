@@ -9,6 +9,11 @@ const { uuidV4 } = require('../utils/uuid');
 const documentsRepo = require('../repositories/documentsRepoAdapter');
 const { extractTextFromUploadedFile } = require('../services/extractionService');
 const { normalizeText } = require('../services/normalizationService');
+const {
+  DOCUMENT_CATEGORIES,
+  DOCUMENT_CATEGORY_VALUES,
+  normalizeDocumentCategory
+} = require('../models/documentCategories');
 
 const router = express.Router();
 
@@ -143,7 +148,93 @@ function readFileBufferOrEmpty(filePath) {
   }
 }
 
-async function persistOneFile({ file, userId, source }) {
+/**
+ * Resolve per-file category using additive request fields.
+ *
+ * Supported patterns:
+ * 1) category (single value): applies to all files
+ * 2) categoriesJson: JSON array of category strings aligned with upload order
+ * 3) categoryByOriginalnameJson: JSON object { "<originalname>": "<category>" }
+ * 4) categoryByIndexJson: JSON object { "0": "resume", "1": "job_description", ... }
+ *
+ * If none are provided, returns null category.
+ */
+function resolveCategoryForFile(req, file, index) {
+  const single = normalizeDocumentCategory(req.body?.category);
+  if (single) return single;
+
+  const byIndexJson = req.body?.categoryByIndexJson;
+  if (byIndexJson) {
+    try {
+      const obj = JSON.parse(byIndexJson);
+      const value = obj != null ? obj[String(index)] : null;
+      const norm = normalizeDocumentCategory(value);
+      if (norm) return norm;
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  const categoriesJson = req.body?.categoriesJson;
+  if (categoriesJson) {
+    try {
+      const arr = JSON.parse(categoriesJson);
+      if (Array.isArray(arr) && index >= 0 && index < arr.length) {
+        const norm = normalizeDocumentCategory(arr[index]);
+        if (norm) return norm;
+      }
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  const byNameJson = req.body?.categoryByOriginalnameJson;
+  if (byNameJson) {
+    try {
+      const obj = JSON.parse(byNameJson);
+      const value = obj != null ? obj[String(file.originalname)] : null;
+      const norm = normalizeDocumentCategory(value);
+      if (norm) return norm;
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+/**
+ * MVP validation helper: if client supplies `requireCategories=true`, ensure at least
+ * one file exists for each of the 3 primary categories.
+ *
+ * This is additive: default is not required.
+ */
+function validateRequiredCategoriesIfRequested(files, requireCategoriesRaw, categoriesByIndex) {
+  const requireCategories = String(requireCategoriesRaw || '').toLowerCase() === 'true';
+  if (!requireCategories) return { ok: true };
+
+  const present = new Set();
+  for (const c of categoriesByIndex) {
+    if (c) present.add(c);
+  }
+
+  const missing = DOCUMENT_CATEGORY_VALUES.filter((c) => !present.has(c));
+  if (missing.length === 0) return { ok: true };
+
+  return {
+    ok: false,
+    error: {
+      error: 'validation_error',
+      message: `Missing required document categories: ${missing.join(', ')}`,
+      details: {
+        requiredCategories: DOCUMENT_CATEGORY_VALUES,
+        receivedCategories: Array.from(present)
+      }
+    }
+  };
+}
+
+async function persistOneFile({ file, userId, source, category }) {
   // With diskStorage, multer provides file.path.
   const absPath = file.path ? path.resolve(file.path) : null;
   const fileBytes = absPath ? readFileBufferOrEmpty(absPath) : Buffer.alloc(0);
@@ -155,6 +246,10 @@ async function persistOneFile({ file, userId, source }) {
     userId: userId ?? null,
     originalFilename: file.originalname,
     mimeType: file.mimetype || null,
+
+    // Additive: category is used by orchestration auto-selection.
+    category: category ?? null,
+
     source: source ?? null,
     storageProvider: 'local',
     storagePath: absPath, // Local path only; never store file contents in DB.
@@ -231,10 +326,23 @@ router.post('/documents', (req, res) => {
       const userId = req.body?.userId || null;
       const source = req.body?.source || null;
 
+      // Resolve categories per file (additive semantics).
+      const categoriesByIndex = files.map((f, idx) => resolveCategoryForFile(req, f, idx));
+
+      const validation = validateRequiredCategoriesIfRequested(
+        files,
+        req.body?.requireCategories,
+        categoriesByIndex
+      );
+      if (!validation.ok) return res.status(400).json(validation.error);
+
       // Persist sequentially to keep memory usage predictable.
-      for (const file of files) {
+      for (let i = 0; i < files.length; i += 1) {
+        const file = files[i];
+        const category = categoriesByIndex[i] || null;
+
         // eslint-disable-next-line no-await-in-loop
-        await persistOneFile({ file, userId, source });
+        await persistOneFile({ file, userId, source, category });
       }
     } catch (persistErr) {
       // If persistence fails, still return stable response but make message explicit.
@@ -276,9 +384,23 @@ router.post('/text', (req, res) => {
 
     try {
       const userId = req.body?.userId || null;
-      for (const file of files) {
+
+      // Resolve categories per file (additive semantics).
+      const categoriesByIndex = files.map((f, idx) => resolveCategoryForFile(req, f, idx));
+
+      const validation = validateRequiredCategoriesIfRequested(
+        files,
+        req.body?.requireCategories,
+        categoriesByIndex
+      );
+      if (!validation.ok) return res.status(400).json(validation.error);
+
+      for (let i = 0; i < files.length; i += 1) {
+        const file = files[i];
+        const category = categoriesByIndex[i] || null;
+
         // eslint-disable-next-line no-await-in-loop
-        await persistOneFile({ file, userId, source: 'text_upload' });
+        await persistOneFile({ file, userId, source: 'text_upload', category });
       }
     } catch (persistErr) {
       return res.status(200).json({

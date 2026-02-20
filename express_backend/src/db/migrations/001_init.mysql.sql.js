@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS documents (
   user_id CHAR(36) NULL,
   original_filename TEXT NOT NULL,
   mime_type TEXT NULL,
+
+  -- Additive: category used to auto-select latest docs for orchestration
+  -- Canonical values: resume | job_description | performance_review
+  category VARCHAR(64) NULL,
+
   source TEXT NULL,
   storage_provider TEXT NULL,
   storage_path TEXT NULL,

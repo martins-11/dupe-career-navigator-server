@@ -25,6 +25,10 @@ async function createDocument(input) {
     userId: input.userId ?? null,
     originalFilename: input.originalFilename,
     mimeType: input.mimeType ?? null,
+
+    // Additive: category enables orchestration auto-selection
+    category: input.category ?? null,
+
     source: input.source ?? null,
     storageProvider: input.storageProvider ?? null,
     storagePath: input.storagePath ?? null,
@@ -103,10 +107,28 @@ async function getLatestExtractedText(documentId) {
   return arr[arr.length - 1];
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Get the latest document for a user and category (newest by createdAt).
+ *
+ * @param {string|null} userId
+ * @param {string} category canonical category string
+ * @returns {Promise<object|null>}
+ */
+async function getLatestDocumentForUserByCategory(userId, category) {
+  const all = Array.from(_documents.values());
+
+  const filtered = all.filter((d) => (userId ? d.userId === userId : d.userId == null) && d.category === category);
+
+  filtered.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  return filtered[0] || null;
+}
+
 module.exports = {
   createDocument,
   listDocuments,
   getDocumentById,
   upsertExtractedText,
-  getLatestExtractedText
+  getLatestExtractedText,
+  getLatestDocumentForUserByCategory
 };

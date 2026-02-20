@@ -198,8 +198,13 @@ const OrchestrationRunAllRequest = z.object({
   /**
    * Full end-to-end orchestration request.
    *
-   * This endpoint is meant to be the "one call" entrypoint once the client has documentIds.
-   * (Upload -> documentId creation remains handled by /uploads/* and /documents/*, which are stable contracts.)
+   * IMPORTANT (additive semantics):
+   * - Previously, the caller had to provide `documentIds` or `uploadLink`.
+   * - Now, the caller MAY omit those and instead rely on category-based auto-selection:
+   *   the service will load the latest uploaded docs for the user in these categories:
+   *   resume, job_description, performance_review.
+   *
+   * Existing contracts remain supported; this is additive.
    */
   mode: z.enum(['persona_build', 'workflow']).nullable().optional(),
   userId: z.string().uuid().nullable().optional(),
@@ -213,9 +218,16 @@ const OrchestrationRunAllRequest = z.object({
     .nullable()
     .optional(),
 
-  // One of these must be provided:
+  // Existing inputs (still supported):
   uploadLink: OrchestrationUploadLinkRequest.optional(),
   documentIds: z.array(z.string().uuid()).min(1).optional(),
+
+  /**
+   * Additive:
+   * If true, orchestration will auto-select latest docs by category (requires userId).
+   * Default: true (so MVP does "no user selection" out of the box).
+   */
+  useLatestCategoryDocs: z.boolean().optional(),
 
   // Optional knobs for extract/normalize and draft generation.
   extract: OrchestrationExtractRequest.optional(),
@@ -601,7 +613,7 @@ async function runAllOrchestration(input) {
   /**
    * Run the full orchestration workflow end-to-end:
    * - start build/workflow
-   * - link upload/documents
+   * - link upload/documents OR auto-select latest category docs (additive)
    * - extract+normalize
    * - generate draft
    * - optional finalize
@@ -636,19 +648,76 @@ async function runAllOrchestration(input) {
     }
   });
 
-  // 2) Link upload/document IDs
+  // 2) Link upload/document IDs OR auto-select
   try {
     orch = _touch(orch, {
       runAll: { ...orch.runAll, progress: 15, step: 'link', message: 'Linking documents…' }
     });
+
+    const useLatestCategoryDocs = parsed.useLatestCategoryDocs ?? true;
 
     if (parsed.uploadLink) {
       orch = linkUploadToBuild(build.id, parsed.uploadLink);
     } else if (parsed.documentIds?.length) {
       orch = _touch(orch, { documentIds: parsed.documentIds });
       await _bestEffortPersistBuildDocumentsLink(build.id, parsed.documentIds);
+    } else if (useLatestCategoryDocs) {
+      // Additive MVP path: auto-select the latest docs by category for this userId.
+      if (!parsed.userId) {
+        const err = new Error('userId is required when useLatestCategoryDocs is enabled and no documentIds are provided.');
+        err.code = 'MISSING_USER_ID';
+        err.httpStatus = 422;
+        throw err;
+      }
+
+      orch = _touch(orch, {
+        runAll: { ...orch.runAll, progress: 20, step: 'auto_select', message: 'Selecting latest uploaded docs…' }
+      });
+
+      const { DOCUMENT_CATEGORIES } = require('../models/documentCategories');
+
+      // Fetch latest docs for each category.
+      const latestResume = await documentsRepo.getLatestDocumentForUserByCategory(
+        parsed.userId,
+        DOCUMENT_CATEGORIES.RESUME
+      );
+      const latestJd = await documentsRepo.getLatestDocumentForUserByCategory(
+        parsed.userId,
+        DOCUMENT_CATEGORIES.JOB_DESCRIPTION
+      );
+      const latestPerf = await documentsRepo.getLatestDocumentForUserByCategory(
+        parsed.userId,
+        DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW
+      );
+
+      const missing = [];
+      if (!latestResume) missing.push(DOCUMENT_CATEGORIES.RESUME);
+      if (!latestJd) missing.push(DOCUMENT_CATEGORIES.JOB_DESCRIPTION);
+      if (!latestPerf) missing.push(DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW);
+
+      if (missing.length) {
+        const err = new Error(
+          `Missing required uploaded documents for categories: ${missing.join(', ')}. Upload these first.`
+        );
+        err.code = 'MISSING_REQUIRED_CATEGORY_DOCS';
+        err.httpStatus = 422;
+        err.details = { missingCategories: missing };
+        throw err;
+      }
+
+      const documentIds = [latestResume.id, latestJd.id, latestPerf.id];
+      orch = _touch(orch, {
+        documentIds,
+        categoryDocumentIds: {
+          [DOCUMENT_CATEGORIES.RESUME]: latestResume.id,
+          [DOCUMENT_CATEGORIES.JOB_DESCRIPTION]: latestJd.id,
+          [DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW]: latestPerf.id
+        }
+      });
+
+      await _bestEffortPersistBuildDocumentsLink(build.id, documentIds);
     } else {
-      const err = new Error('Either uploadLink or documentIds must be provided.');
+      const err = new Error('Either uploadLink or documentIds must be provided (or enable useLatestCategoryDocs).');
       err.code = 'MISSING_INPUTS';
       throw err;
     }

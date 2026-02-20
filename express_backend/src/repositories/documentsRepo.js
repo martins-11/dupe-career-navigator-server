@@ -17,15 +17,16 @@ async function createDocument(input) {
   const nowRes = await query(
     `
     INSERT INTO documents (
-      id, user_id, original_filename, mime_type, source,
+      id, user_id, original_filename, mime_type, category, source,
       storage_provider, storage_path, file_size_bytes, sha256
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
     RETURNING
       id,
       user_id as "userId",
       original_filename as "originalFilename",
       mime_type as "mimeType",
+      category,
       source,
       storage_provider as "storageProvider",
       storage_path as "storagePath",
@@ -39,6 +40,7 @@ async function createDocument(input) {
       input.userId ?? null,
       input.originalFilename,
       input.mimeType ?? null,
+      input.category ?? null,
       input.source ?? null,
       input.storageProvider ?? null,
       input.storagePath ?? null,
@@ -60,6 +62,7 @@ async function getDocumentById(documentId) {
       user_id as "userId",
       original_filename as "originalFilename",
       mime_type as "mimeType",
+      category,
       source,
       storage_provider as "storageProvider",
       storage_path as "storagePath",
@@ -141,9 +144,47 @@ async function getLatestExtractedText(documentId) {
   return res.rows[0] || null;
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Get latest document for a user and category.
+ *
+ * @param {string|null} userId
+ * @param {string} category canonical category string
+ * @returns {Promise<object|null>}
+ */
+async function getLatestDocumentForUserByCategory(userId, category) {
+  // Note: explicit NULL match keeps anonymous flows supported.
+  const res = await query(
+    `
+    SELECT
+      id,
+      user_id as "userId",
+      original_filename as "originalFilename",
+      mime_type as "mimeType",
+      category,
+      source,
+      storage_provider as "storageProvider",
+      storage_path as "storagePath",
+      file_size_bytes as "fileSizeBytes",
+      sha256,
+      created_at as "createdAt",
+      updated_at as "updatedAt"
+    FROM documents
+    WHERE ( ($1::uuid IS NULL AND user_id IS NULL) OR user_id = $1 )
+      AND category = $2
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [userId ?? null, category]
+  );
+
+  return res.rows[0] || null;
+}
+
 module.exports = {
   createDocument,
   getDocumentById,
   upsertExtractedText,
-  getLatestExtractedText
+  getLatestExtractedText,
+  getLatestDocumentForUserByCategory
 };

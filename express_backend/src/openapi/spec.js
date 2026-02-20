@@ -616,7 +616,7 @@ const openapiDefinition = {
         type: 'object',
         additionalProperties: false,
         description:
-          'Single-call orchestration that starts a build, links documents, extracts+normalizes, generates a draft persona, and optionally finalizes. Progress can be polled via /builds/{id}/status and /orchestration/builds/{id}.',
+          'Single-call orchestration that starts a build, links documents, extracts+normalizes, generates a draft persona, and optionally finalizes. Progress can be polled via /builds/{id}/status and /orchestration/builds/{id}. Additive behavior: if documentIds/uploadLink are omitted, the service can auto-select the latest uploaded docs for the 3 primary categories (resume, job_description, performance_review) when useLatestCategoryDocs=true (default).',
         properties: {
           mode: { type: 'string', enum: ['persona_build', 'workflow'], nullable: true },
           userId: { type: 'string', format: 'uuid', nullable: true },
@@ -631,8 +631,19 @@ const openapiDefinition = {
               industry: { type: 'string', nullable: true }
             }
           },
+
+          // Existing options:
           uploadLink: { $ref: '#/components/schemas/OrchestrationUploadLinkRequest' },
           documentIds: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1 },
+
+          // Additive option:
+          useLatestCategoryDocs: {
+            type: 'boolean',
+            nullable: true,
+            description:
+              'If true (default), and uploadLink/documentIds are not provided, orchestration will load latest docs by category for the given userId.'
+          },
+
           extract: { $ref: '#/components/schemas/OrchestrationExtractRequest' },
           generate: { $ref: '#/components/schemas/OrchestrationGenerateDraftRequest' },
           finalize: { $ref: '#/components/schemas/OrchestrationFinalizeRequest' },
@@ -812,7 +823,38 @@ const openapiDefinition = {
                     description: 'One or more files.'
                   },
                   userId: { type: 'string', format: 'uuid', nullable: true, description: 'Optional user id.' },
-                  source: { type: 'string', nullable: true, description: 'Optional source label (e.g., resume, linkedin).' }
+                  source: { type: 'string', nullable: true, description: 'Optional source label (e.g., resume, linkedin).' },
+
+                  category: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: apply a single document category to all uploaded files. Canonical: resume | job_description | performance_review.'
+                  },
+                  categoriesJson: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: JSON array of category strings aligned with upload order (index-based).'
+                  },
+                  categoryByOriginalnameJson: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: JSON object mapping original filename to category, e.g. {\"resume.pdf\":\"resume\"}.'
+                  },
+                  categoryByIndexJson: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: JSON object mapping file index to category, e.g. {\"0\":\"resume\",\"1\":\"job_description\"}.'
+                  },
+                  requireCategories: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: if \"true\", server validates that all 3 categories are present in this upload request.'
+                  }
                 },
                 required: ['files']
               }
@@ -858,7 +900,38 @@ const openapiDefinition = {
                     items: { type: 'string', format: 'binary' },
                     description: 'One or more text files.'
                   },
-                  userId: { type: 'string', format: 'uuid', nullable: true }
+                  userId: { type: 'string', format: 'uuid', nullable: true },
+
+                  category: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: apply a single document category to all uploaded files. Canonical: resume | job_description | performance_review.'
+                  },
+                  categoriesJson: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: JSON array of category strings aligned with upload order (index-based).'
+                  },
+                  categoryByOriginalnameJson: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: JSON object mapping original filename to category, e.g. {\"review.pdf\":\"performance_review\"}.'
+                  },
+                  categoryByIndexJson: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: JSON object mapping file index to category, e.g. {\"0\":\"resume\",\"1\":\"job_description\"}.'
+                  },
+                  requireCategories: {
+                    type: 'string',
+                    nullable: true,
+                    description:
+                      'Additive: if \"true\", server validates that all 3 categories are present in this upload request.'
+                  }
                 },
                 required: ['files']
               }
