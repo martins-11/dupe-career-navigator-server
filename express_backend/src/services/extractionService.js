@@ -2,11 +2,20 @@
 
 let pdfParse = null;
 try {
-  // Optional dependency; we add it to package.json in this change.
+  // Optional dependency.
   // eslint-disable-next-line global-require
   pdfParse = require('pdf-parse');
 } catch (e) {
   pdfParse = null;
+}
+
+let mammoth = null;
+try {
+  // Optional dependency for DOCX text extraction.
+  // eslint-disable-next-line global-require
+  mammoth = require('mammoth');
+} catch (e) {
+  mammoth = null;
 }
 
 /**
@@ -15,13 +24,19 @@ try {
  * Supported:
  * - PDF buffers -> text via pdf-parse (if installed)
  * - TXT buffers -> utf8 decode
+ * - DOCX buffers -> text via mammoth (if installed) (best-effort)
+ * - DOC buffers -> NOT reliably supported without external tooling (best-effort returns empty with warnings)
  *
  * Returns a stable shape that routes can persist (extractor, version, metadata).
  */
 
 function _decodeToText(buffer) {
-  // Best-effort UTF-8 decode; for binary PDFs this will be garbage, which is why we use pdf-parse when possible.
+  // Best-effort UTF-8 decode; for binary types this will be garbage, so only use for actual text.
   return Buffer.isBuffer(buffer) ? buffer.toString('utf8') : String(buffer || '');
+}
+
+function _normalizeNewlines(text) {
+  return String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
 // PUBLIC_INTERFACE
@@ -30,15 +45,32 @@ async function extractTextFromUploadedFile({ filename, mimeType, buffer }) {
    * Extract text from an uploaded file buffer.
    *
    * @param {{filename?: string, mimeType?: string, buffer: Buffer}} params
-   * @returns {Promise<{extractor: string, extractorVersion: string, sourceType: 'pdf'|'txt', language: string|null, text: string, warnings: string[], metadata: object}|null>}
+   * @returns {Promise<{
+   *   extractor: string,
+   *   extractorVersion: string,
+   *   sourceType: 'pdf'|'txt'|'doc'|'docx',
+   *   language: string|null,
+   *   text: string,
+   *   warnings: string[],
+   *   metadata: object
+   * }|null>}
    */
   const mt = String(mimeType || '').toLowerCase();
   const name = String(filename || '').toLowerCase();
 
   const isPdf = mt.includes('pdf') || name.endsWith('.pdf');
+
+  const isDocx =
+    mt === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    mt.includes('officedocument.wordprocessingml.document') ||
+    name.endsWith('.docx');
+
+  // NOTE: .doc is a legacy binary format; we do not add heavy/native deps here.
+  const isDoc = mt === 'application/msword' || mt.includes('application/msword') || name.endsWith('.doc');
+
   const isTxt =
     mt.includes('text/plain') ||
-    mt.includes('text/') ||
+    (mt.startsWith('text/') && !mt.includes('text/html')) ||
     name.endsWith('.txt') ||
     name.endsWith('.md');
 
@@ -57,7 +89,7 @@ async function extractTextFromUploadedFile({ filename, mimeType, buffer }) {
 
     try {
       const data = await pdfParse(buffer);
-      const text = String(data.text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const text = _normalizeNewlines(data.text || '');
 
       return {
         extractor: 'pdf-parse',
@@ -92,8 +124,75 @@ async function extractTextFromUploadedFile({ filename, mimeType, buffer }) {
     }
   }
 
+  if (isDocx) {
+    if (!mammoth) {
+      return {
+        extractor: 'mammoth',
+        extractorVersion: 'missing_dependency',
+        sourceType: 'docx',
+        language: null,
+        text: '',
+        warnings: ['DOCX parsing dependency not installed; no text extracted.'],
+        metadata: { filename: filename ?? null, mimeType: mimeType ?? null }
+      };
+    }
+
+    try {
+      // mammoth extracts raw text from docx; we keep best-effort extraction.
+      const result = await mammoth.extractRawText({ buffer });
+      const text = _normalizeNewlines(result && result.value ? result.value : '');
+      const warnings = [];
+
+      if (result && Array.isArray(result.messages) && result.messages.length) {
+        // Preserve mammoth messages as warnings for debugging.
+        warnings.push(
+          ...result.messages.map((m) => (m && m.message ? String(m.message) : String(m))).filter(Boolean)
+        );
+      }
+
+      return {
+        extractor: 'mammoth',
+        extractorVersion: '1.x',
+        sourceType: 'docx',
+        language: null,
+        text,
+        warnings,
+        metadata: { filename: filename ?? null, mimeType: mimeType ?? null }
+      };
+    } catch (err) {
+      return {
+        extractor: 'mammoth',
+        extractorVersion: '1.x',
+        sourceType: 'docx',
+        language: null,
+        text: '',
+        warnings: ['DOCX parsing failed; no text extracted.'],
+        metadata: {
+          filename: filename ?? null,
+          mimeType: mimeType ?? null,
+          error: String(err && err.message ? err.message : err)
+        }
+      };
+    }
+  }
+
+  if (isDoc) {
+    // Best-effort only: without external converters, DOC parsing is unreliable.
+    return {
+      extractor: 'doc_unsupported',
+      extractorVersion: '1.0.0',
+      sourceType: 'doc',
+      language: null,
+      text: '',
+      warnings: [
+        'Legacy .doc (binary) extraction is not supported in this service without external tooling; no text extracted.'
+      ],
+      metadata: { filename: filename ?? null, mimeType: mimeType ?? null }
+    };
+  }
+
   if (isTxt) {
-    const text = _decodeToText(buffer).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const text = _normalizeNewlines(_decodeToText(buffer));
     return {
       extractor: 'plain-text',
       extractorVersion: '1.0.0',

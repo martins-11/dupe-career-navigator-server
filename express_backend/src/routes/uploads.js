@@ -69,9 +69,39 @@ function diskStorage() {
   });
 }
 
+const allowedMimeTypes = new Set([
+  'application/pdf',
+  'text/plain',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+]);
+
+const allowedExtensions = new Set(['.pdf', '.txt', '.md', '.doc', '.docx']);
+
+/**
+ * Multer file filter.
+ * Best-effort allow based on mime type OR file extension (some clients send generic mime types).
+ */
+function fileFilter(req, file, cb) {
+  const mt = String(file.mimetype || '').toLowerCase();
+  const ext = path.extname(String(file.originalname || '')).toLowerCase();
+
+  const allowedByMime = allowedMimeTypes.has(mt);
+  const allowedByExt = allowedExtensions.has(ext);
+
+  if (allowedByMime || allowedByExt) return cb(null, true);
+
+  return cb(
+    Object.assign(new Error(`Unsupported file type: ${file.mimetype || 'unknown'} (${ext || 'no extension'})`), {
+      code: 'UNSUPPORTED_FILE_TYPE'
+    })
+  );
+}
+
 // Disk storage saves files locally per MVP. We still persist metadata/text to repositories.
 const upload = multer({
   storage: diskStorage(),
+  fileFilter,
   limits: {
     fileSize: maxFileSizeBytes,
     files: maxFiles
@@ -94,6 +124,9 @@ function multerErrorToResponse(err) {
   }
   if (err && err.code === 'LIMIT_FILE_COUNT') {
     return { status: 400, body: { error: 'too_many_files', message } };
+  }
+  if (err && err.code === 'UNSUPPORTED_FILE_TYPE') {
+    return { status: 415, body: { error: 'unsupported_media_type', message } };
   }
   return { status: 400, body: { error: 'upload_error', message } };
 }
