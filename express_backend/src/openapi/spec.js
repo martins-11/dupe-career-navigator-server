@@ -214,11 +214,12 @@ const openapiDefinition = {
         type: 'object',
         additionalProperties: false,
         properties: {
-          uploadId: { type: 'string', format: 'uuid', description: 'Server-generated placeholder upload batch id.' },
+          uploadId: { type: 'string', format: 'uuid', description: 'Server-generated upload batch id.' },
           receivedFiles: {
             type: 'array',
             items: { $ref: '#/components/schemas/UploadFileResult' },
-            description: 'Files accepted by multer (stored in memory only for this scaffold).'
+            description:
+              'Files accepted by the server. Note: upload endpoints also trigger automatic persistence + extraction as side effects, but this response intentionally does not include created document ids or extracted_text ids (existing contract remains stable).'
           },
           message: { type: 'string', description: 'Human-readable status message.' }
         },
@@ -796,7 +797,7 @@ const openapiDefinition = {
         tags: ['Uploads'],
         summary: 'Upload one or more documents (multi-file upload)',
         description:
-          'Placeholder multi-file upload endpoint using multipart/form-data. Files are accepted into memory and metadata is returned; no DB/storage persistence is performed in this scaffold.',
+          'Uploads one or more documents via multipart/form-data (field: `files`). After each file is accepted, the server automatically persists a `documents` metadata row and triggers extraction/normalization; as a side effect it creates **one `extracted_text` row per uploaded document** (best-effort). The HTTP response contract remains stable and only reports the upload batch id + received file metadata.',
         requestBody: {
           required: true,
           content: {
@@ -820,7 +821,8 @@ const openapiDefinition = {
         },
         responses: {
           200: {
-            description: 'Upload accepted (placeholder)',
+            description:
+              'Upload accepted. Side effects: creates a `documents` row per file and triggers automatic extraction/normalization, creating one `extracted_text` row per uploaded document when extraction is possible.',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/MultiFileUploadResponse' } }
             }
@@ -842,7 +844,7 @@ const openapiDefinition = {
         tags: ['Uploads'],
         summary: 'Upload one or more plain text files (multi-file upload)',
         description:
-          'Placeholder multi-file upload endpoint for text inputs. Uses multipart/form-data and returns received file metadata only.',
+          'Uploads one or more text files via multipart/form-data (field: `files`). After each file is accepted, the server automatically persists a `documents` metadata row and triggers extraction/normalization; as a side effect it creates **one `extracted_text` row per uploaded document** (best-effort). The HTTP response contract remains stable and only reports the upload batch id + received file metadata.',
         requestBody: {
           required: true,
           content: {
@@ -865,7 +867,8 @@ const openapiDefinition = {
         },
         responses: {
           200: {
-            description: 'Upload accepted (placeholder)',
+            description:
+              'Upload accepted. Side effects: creates a `documents` row per file and triggers automatic extraction/normalization, creating one `extracted_text` row per uploaded document when extraction is possible.',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/MultiFileUploadResponse' } }
             }
