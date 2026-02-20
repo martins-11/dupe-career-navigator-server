@@ -24,11 +24,11 @@ const router = express.Router();
  * - POST /uploads/text      -> { uploadId, receivedFiles, message }
  *
  * Improvements:
- * - Better multi-file validation reporting (identify offending file names) for:
+ * - Better multi-file validation reporting (structured per-file errors) for:
  *   - file size (413 payload_too_large)
  *   - unsupported types (415 unsupported_media_type)
  * - Enhanced server-side logging for:
- *   - multer parsing issues
+ *   - multer parsing/limits issues
  *   - persistence/extraction failures (per file)
  *
  * Notes:
@@ -288,14 +288,24 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
  * than failing at the first one.
  */
 function validateAllFiles(files) {
+  /**
+   * Structured per-file errors:
+   * - filename
+   * - index (upload order)
+   * - reason (machine-friendly)
+   */
   const tooLarge = [];
   const unsupported = [];
 
-  for (const f of files || []) {
+  for (let i = 0; i < (files || []).length; i += 1) {
+    const f = files[i];
     const size = Number.isFinite(f.size) ? f.size : null;
+
     if (size != null && size > maxFileSizeBytes) {
       tooLarge.push({
-        originalname: f.originalname,
+        filename: f.originalname,
+        index: i,
+        reason: 'file_too_large',
         size,
         maxSizeBytes: maxFileSizeBytes
       });
@@ -305,7 +315,9 @@ function validateAllFiles(files) {
     const allowed = isAllowedType(f);
     if (!allowed.ok) {
       unsupported.push({
-        originalname: f.originalname,
+        filename: f.originalname,
+        index: i,
+        reason: 'unsupported_file_type',
         mimetype: f.mimetype || null,
         extension: allowed.ext || null
       });
@@ -360,11 +372,16 @@ function handleMultiUpload({ routeName, sourceDefault }) {
 
     uploadMemory(req, res, async (err) => {
       if (err) {
+        // Multer-level failures (limits, parsing, etc).
         // eslint-disable-next-line no-console
         console.error(`[uploads:${routeName}] Multer error`, {
           requestId,
+          method: req.method,
+          path: req.originalUrl,
+          ip: req.ip,
           code: err.code,
-          message: err.message
+          message: err.message,
+          stack: err.stack
         });
         const mapped = multerErrorToResponse(err);
         return res.status(mapped.status).json(mapped.body);
@@ -372,6 +389,14 @@ function handleMultiUpload({ routeName, sourceDefault }) {
 
       const files = req.files;
       if (!files || files.length === 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`[uploads:${routeName}] No files received`, {
+          requestId,
+          method: req.method,
+          path: req.originalUrl,
+          contentType: req.headers['content-type']
+        });
+
         return res
           .status(400)
           .json({ error: 'validation_error', message: 'No files received. Use field name "files".' });
@@ -394,10 +419,20 @@ function handleMultiUpload({ routeName, sourceDefault }) {
       const uploadId = uuidV4();
 
       // Keep response contract stable; do real persistence within request for MVP.
+      // Store structured per-file failures for warnings response (still 200).
       const perFileFailures = [];
       try {
         const userId = req.body?.userId || null;
         const source = req.body?.source || sourceDefault || null;
+
+        // eslint-disable-next-line no-console
+        console.info(`[uploads:${routeName}] Upload received`, {
+          requestId,
+          uploadId,
+          fileCount: files.length,
+          userId,
+          source
+        });
 
         // Resolve categories per file (additive semantics).
         const categoriesByIndex = files.map((f, idx) => resolveCategoryForFile(req, f, idx));
@@ -407,7 +442,15 @@ function handleMultiUpload({ routeName, sourceDefault }) {
           req.body?.requireCategories,
           categoriesByIndex
         );
-        if (!requiredCategoryValidation.ok) return res.status(400).json(requiredCategoryValidation.error);
+        if (!requiredCategoryValidation.ok) {
+          // eslint-disable-next-line no-console
+          console.warn(`[uploads:${routeName}] Category requirements validation failed`, {
+            requestId,
+            uploadId,
+            error: requiredCategoryValidation.error
+          });
+          return res.status(400).json(requiredCategoryValidation.error);
+        }
 
         // Persist sequentially to keep memory usage predictable.
         for (let i = 0; i < files.length; i += 1) {
@@ -418,8 +461,11 @@ function handleMultiUpload({ routeName, sourceDefault }) {
             // eslint-disable-next-line no-await-in-loop
             await persistOneMemoryFile({ file, userId, source, category });
           } catch (persistErr) {
+            // Add structured per-file error response details.
             perFileFailures.push({
-              originalname: file.originalname,
+              filename: file.originalname,
+              index: i,
+              reason: 'persistence_or_extraction_failed',
               message: String(persistErr?.message || 'Persistence/extraction failed')
             });
 
@@ -427,9 +473,11 @@ function handleMultiUpload({ routeName, sourceDefault }) {
             console.error(`[uploads:${routeName}] Persistence/extraction failed for file`, {
               requestId,
               uploadId,
-              originalname: file.originalname,
+              index: i,
+              filename: file.originalname,
               mimetype: file.mimetype,
               size: file.size,
+              category,
               errorMessage: persistErr?.message,
               stack: persistErr?.stack
             });
