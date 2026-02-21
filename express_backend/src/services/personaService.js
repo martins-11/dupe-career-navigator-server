@@ -140,11 +140,73 @@ function _extractTextFromBedrockResponseJson(respJson) {
   return '';
 }
 
+function _stripMarkdownCodeFences(text) {
+  /**
+   * Remove markdown code fences commonly returned by LLMs:
+   *  - ```json\n{...}\n```
+   *  - ```\n{...}\n```
+   *
+   * If the content is fenced, we return the inner content; otherwise return the
+   * original text trimmed.
+   */
+  const t = String(text || '').trim();
+
+  // Match a full fenced block, optionally with a language tag.
+  const fenced = t.match(/^```(?:\s*json)?\s*\n([\s\S]*?)\n```$/i);
+  if (fenced && typeof fenced[1] === 'string') {
+    return fenced[1].trim();
+  }
+
+  return t;
+}
+
+function _extractFirstJsonSubstring(text) {
+  /**
+   * Best-effort extraction for cases where the model adds leading/trailing prose.
+   * We keep this conservative: find the first '{' or '[' and parse until the last
+   * '}' or ']'. This is only used as a fallback when direct parsing fails.
+   */
+  const t = String(text || '');
+  const firstObj = t.indexOf('{');
+  const firstArr = t.indexOf('[');
+
+  let start = -1;
+  if (firstObj === -1) start = firstArr;
+  else if (firstArr === -1) start = firstObj;
+  else start = Math.min(firstObj, firstArr);
+
+  if (start === -1) return null;
+
+  const lastObj = t.lastIndexOf('}');
+  const lastArr = t.lastIndexOf(']');
+
+  let end = -1;
+  if (lastObj === -1) end = lastArr;
+  else if (lastArr === -1) end = lastObj;
+  else end = Math.max(lastObj, lastArr);
+
+  if (end === -1 || end <= start) return null;
+
+  return t.slice(start, end + 1).trim();
+}
+
 function _safeJsonParse(jsonText) {
+  const cleaned = _stripMarkdownCodeFences(jsonText);
+
   try {
-    return { ok: true, value: JSON.parse(jsonText) };
-  } catch (e) {
-    return { ok: false, error: e };
+    return { ok: true, value: JSON.parse(cleaned) };
+  } catch (e1) {
+    // Fallback: sometimes models prepend/append commentary even when instructed not to.
+    const extracted = _extractFirstJsonSubstring(cleaned);
+    if (extracted) {
+      try {
+        return { ok: true, value: JSON.parse(extracted) };
+      } catch (e2) {
+        return { ok: false, error: e2 };
+      }
+    }
+
+    return { ok: false, error: e1 };
   }
 }
 
