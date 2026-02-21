@@ -8,6 +8,7 @@ const buildsService = require('./buildsService');
 const workflowService = require('./workflowService');
 const aiRunsRepo = require('../repositories/aiRunsRepoAdapter');
 const { uuidV4 } = require('../utils/uuid');
+const personaService = require('./personaService');
 
 /**
  * Orchestration service (in-memory).
@@ -492,7 +493,9 @@ async function generatePersonaDraftForBuild(buildId, input) {
   });
 
   try {
-    const personaDraft = _makePlaceholderPersona({ sourceText, context });
+    const { persona: personaDraft, mode, warnings } = await personaService.generatePersonaDraft(sourceText, {
+      context
+    });
 
     // Persist draft (in-memory; adapter supports saveDraft)
     const shouldSaveDraft = parsed.saveDraft ?? Boolean(personaId);
@@ -509,6 +512,7 @@ async function generatePersonaDraftForBuild(buildId, input) {
 
     await aiRunsRepo.updateAiRun(aiRun.id, {
       status: 'succeeded',
+      provider: mode === 'bedrock' ? 'aws_bedrock' : 'mock',
       response: { persona: personaDraft }
     });
 
@@ -521,8 +525,8 @@ async function generatePersonaDraftForBuild(buildId, input) {
     return {
       requestId: uuidV4(),
       aiRunId: aiRun.id,
-      mode: 'placeholder',
-      warnings: ['Placeholder implementation: no AI model invoked.'],
+      mode,
+      warnings,
       buildId,
       personaId: personaId ?? null,
       persona: personaDraft,

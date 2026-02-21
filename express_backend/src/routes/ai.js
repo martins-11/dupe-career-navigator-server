@@ -6,6 +6,8 @@ const { uuidV4 } = require('../utils/uuid');
 
 const router = express.Router();
 
+const personaService = require('../services/personaService');
+
 /**
  * AI endpoints (placeholder).
  *
@@ -146,19 +148,29 @@ router.post('/personas/generate', async (req, res) => {
 
   const requestId = uuidV4();
 
-  const persona = makePlaceholderPersona({
-    sourceText: parsed.data.sourceText || '',
-    context: parsed.data.context || null
-  });
+  try {
+    const { persona, mode, warnings } = await personaService.generatePersonaDraft(
+      parsed.data.sourceText || '',
+      { context: parsed.data.context || null }
+    );
 
-  return res.status(200).json({
-    requestId,
-    mode: 'placeholder',
-    warnings: [
-      'Placeholder implementation: no AI model invoked and no DB reads performed.'
-    ],
-    persona
-  });
+    return res.status(200).json({
+      requestId,
+      mode,
+      warnings,
+      persona
+    });
+  } catch (err) {
+    // Keep error shape consistent with other endpoints.
+    const msg = String(err?.message || err);
+    const httpStatus = Number(err?.httpStatus || 500);
+
+    return res.status(httpStatus).json({
+      error: err?.code || 'ai_error',
+      message: msg,
+      details: err?.details || null
+    });
+  }
 });
 
 module.exports = router;
