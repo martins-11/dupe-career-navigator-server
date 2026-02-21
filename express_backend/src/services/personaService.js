@@ -1,6 +1,6 @@
 'use strict';
 
-const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
+const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
 const Ajv = require('ajv');
 
 /**
@@ -117,14 +117,31 @@ function _jsonError(code, message, details) {
 }
 
 /**
- * Parse a Bedrock Claude response into text content.
- * Bedrock response shape varies by model family. For Claude via Messages API,
- * response JSON typically contains `content: [{type:'text', text:'...'}]`.
+ * Parse a Bedrock Converse response into text content.
+ *
+ * Typical Converse output shape:
+ * {
+ *   output: {
+ *     message: {
+ *       role: "assistant",
+ *       content: [{ text: "..." }, ...]
+ *     }
+ *   }
+ * }
  */
 function _extractTextFromBedrockResponseJson(respJson) {
   if (!respJson) return '';
 
-  // Common Claude Messages API format:
+  // Converse API
+  const converseContent = respJson?.output?.message?.content;
+  if (Array.isArray(converseContent)) {
+    const texts = converseContent
+      .map((c) => (c && typeof c.text === 'string' ? c.text : ''))
+      .filter(Boolean);
+    if (texts.length) return texts.join('\n').trim();
+  }
+
+  // Older Claude Messages API format (defensive)
   if (Array.isArray(respJson.content)) {
     const texts = respJson.content
       .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
@@ -140,11 +157,73 @@ function _extractTextFromBedrockResponseJson(respJson) {
   return '';
 }
 
+function _stripMarkdownCodeFences(text) {
+  /**
+   * Remove markdown code fences commonly returned by LLMs:
+   *  - ```json\n{...}\n```
+   *  - ```\n{...}\n```
+   *
+   * If the content is fenced, we return the inner content; otherwise return the
+   * original text trimmed.
+   */
+  const t = String(text || '').trim();
+
+  // Match a full fenced block, optionally with a language tag.
+  const fenced = t.match(/^```(?:\s*json)?\s*\n([\s\S]*?)\n```$/i);
+  if (fenced && typeof fenced[1] === 'string') {
+    return fenced[1].trim();
+  }
+
+  return t;
+}
+
+function _extractFirstJsonSubstring(text) {
+  /**
+   * Best-effort extraction for cases where the model adds leading/trailing prose.
+   * We keep this conservative: find the first '{' or '[' and parse until the last
+   * '}' or ']'. This is only used as a fallback when direct parsing fails.
+   */
+  const t = String(text || '');
+  const firstObj = t.indexOf('{');
+  const firstArr = t.indexOf('[');
+
+  let start = -1;
+  if (firstObj === -1) start = firstArr;
+  else if (firstArr === -1) start = firstObj;
+  else start = Math.min(firstObj, firstArr);
+
+  if (start === -1) return null;
+
+  const lastObj = t.lastIndexOf('}');
+  const lastArr = t.lastIndexOf(']');
+
+  let end = -1;
+  if (lastObj === -1) end = lastArr;
+  else if (lastArr === -1) end = lastObj;
+  else end = Math.max(lastObj, lastArr);
+
+  if (end === -1 || end <= start) return null;
+
+  return t.slice(start, end + 1).trim();
+}
+
 function _safeJsonParse(jsonText) {
+  const cleaned = _stripMarkdownCodeFences(jsonText);
+
   try {
-    return { ok: true, value: JSON.parse(jsonText) };
-  } catch (e) {
-    return { ok: false, error: e };
+    return { ok: true, value: JSON.parse(cleaned) };
+  } catch (e1) {
+    // Fallback: sometimes models prepend/append commentary even when instructed not to.
+    const extracted = _extractFirstJsonSubstring(cleaned);
+    if (extracted) {
+      try {
+        return { ok: true, value: JSON.parse(extracted) };
+      } catch (e2) {
+        return { ok: false, error: e2 };
+      }
+    }
+
+    return { ok: false, error: e1 };
   }
 }
 
@@ -158,16 +237,15 @@ function _assertValidPersonaDraft(obj) {
 }
 
 /**
- * Build a Bedrock "InvokeModel" payload for Anthropic Claude messages.
- * Note: This is model-specific; most current Claude on Bedrock supports:
- * {
- *   anthropic_version: "bedrock-2023-05-31",
- *   max_tokens: ...,
- *   system: "...",
- *   messages: [{role:"user", content:[{type:"text", text:"..."}]}]
- * }
+ * Build a Bedrock "Converse" payload.
+ *
+ * Admin requirement:
+ * - Use the Bedrock Runtime Converse API format (not InvokeModel).
+ *
+ * Docs reference (conceptual):
+ * - input: { modelId, system: [{text}], messages: [{role, content:[{text}]}], inferenceConfig }
  */
-function _buildClaudeInvokeBody({ systemPrompt, extractedText, context }) {
+function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
   const userContent = [
     'INPUT TEXT (unstructured):',
     extractedText,
@@ -177,16 +255,18 @@ function _buildClaudeInvokeBody({ systemPrompt, extractedText, context }) {
   ].join('\n');
 
   return {
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 1200,
-    temperature: 0.2,
-    system: systemPrompt,
+    // Converse system prompt is an array of content blocks.
+    system: [{ text: systemPrompt }],
     messages: [
       {
         role: 'user',
-        content: [{ type: 'text', text: userContent }]
+        content: [{ text: userContent }]
       }
-    ]
+    ],
+    inferenceConfig: {
+      maxTokens: 1200,
+      temperature: 0.2
+    }
   };
 }
 
@@ -241,34 +321,26 @@ async function generatePersonaDraft(extractedText, options = {}) {
 
   const client = _getBedrockClient();
 
-  const body = _buildClaudeInvokeBody({
+  const converseInput = _buildClaudeConverseInput({
     systemPrompt: PERSONA_SYSTEM_PROMPT,
     extractedText: text,
     context: options.context || null
   });
 
-  const cmd = new InvokeModelCommand({
+  const cmd = new ConverseCommand({
     modelId,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body: Buffer.from(JSON.stringify(body), 'utf8')
+    ...converseInput
   });
-
-  let resp;
-  try {
-    resp = await client.send(cmd);
-  } catch (e) {
-    throw _jsonError('BEDROCK_INVOKE_FAILED', 'Failed to invoke Bedrock model.', {
-      message: e?.message || String(e)
-    });
-  }
 
   let respJson;
   try {
-    const raw = Buffer.from(resp.body).toString('utf8');
-    respJson = JSON.parse(raw);
+    respJson = await client.send(cmd);
+
+    // Debug requirement: log raw response to confirm whether Sonnet is wrapping JSON in extra text.
+    // eslint-disable-next-line no-console
+    console.log('[personaService] Raw Bedrock response:', JSON.stringify(respJson, null, 2));
   } catch (e) {
-    throw _jsonError('BEDROCK_RESPONSE_PARSE_FAILED', 'Failed to parse Bedrock response JSON.', {
+    throw _jsonError('BEDROCK_CONVERSE_FAILED', 'Failed to converse with Bedrock model.', {
       message: e?.message || String(e)
     });
   }
@@ -278,14 +350,54 @@ async function generatePersonaDraft(extractedText, options = {}) {
     throw _jsonError('BEDROCK_EMPTY_OUTPUT', 'Bedrock returned empty output.', { bedrockResponse: respJson });
   }
 
-  const parsed = _safeJsonParse(modelText);
+  // Parser fix requirement:
+  // If the model returns prose + JSON, extract the first JSON object block using regex.
+  // (We still attempt strict parsing first; regex is a targeted fallback.)
+  let parsed = _safeJsonParse(modelText);
+  if (!parsed.ok) {
+    const match = String(modelText).match(/\{[\s\S]*\}/);
+    if (match && match[0]) {
+      parsed = _safeJsonParse(match[0]);
+    }
+  }
+
   if (!parsed.ok) {
     throw _jsonError('MODEL_OUTPUT_NOT_JSON', 'Model output was not valid JSON.', {
-      modelTextSnippet: modelText.slice(0, 500)
+      modelTextSnippet: modelText.slice(0, 800)
     });
   }
 
-  const persona = _assertValidPersonaDraft(parsed.value);
+  // DB/schema mapper alignment:
+  // Normalize common alternate field names produced by some prompts/models into our strict schema.
+  // This prevents downstream persistence from failing due to unexpected keys/names.
+  const rawObj = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+  const normalized = { ...rawObj };
+
+  // Common alias: strengths -> mastery_skills
+  if (!Array.isArray(normalized.mastery_skills) && Array.isArray(normalized.strengths)) {
+    normalized.mastery_skills = normalized.strengths;
+    delete normalized.strengths;
+  }
+
+  // Common alias: masteries -> mastery_skills
+  if (!Array.isArray(normalized.mastery_skills) && Array.isArray(normalized.masteries)) {
+    normalized.mastery_skills = normalized.masteries;
+    delete normalized.masteries;
+  }
+
+  // Common alias: improvement_areas -> growth_areas
+  if (!Array.isArray(normalized.growth_areas) && Array.isArray(normalized.improvement_areas)) {
+    normalized.growth_areas = normalized.improvement_areas;
+    delete normalized.improvement_areas;
+  }
+
+  // Common alias: growthAreas -> growth_areas
+  if (!Array.isArray(normalized.growth_areas) && Array.isArray(normalized.growthAreas)) {
+    normalized.growth_areas = normalized.growthAreas;
+    delete normalized.growthAreas;
+  }
+
+  const persona = _assertValidPersonaDraft(normalized);
 
   return { persona, mode: 'bedrock', warnings: [] };
 }

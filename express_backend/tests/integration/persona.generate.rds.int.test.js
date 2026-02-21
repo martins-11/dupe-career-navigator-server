@@ -13,10 +13,27 @@ function requireEnv(name) {
   return v;
 }
 
-// PUBLIC_INTERFACE
+/**
+ * PUBLIC_INTERFACE
+ */
 function buildBaseUrl() {
   /** Resolve API base URL for integration tests. */
   return env('BASE_URL') || env('API_BASE_URL') || 'http://localhost:3001';
+}
+
+/**
+ * PUBLIC_INTERFACE
+ */
+function buildPersonaGeneratePath() {
+  /**
+   * Resolve persona generate endpoint path for integration tests.
+   *
+   * The Express backend mounts aiRouter at `/ai` and defines the route as:
+   *   POST /ai/personas/generate
+   *
+   * Allow override via PERSONA_GENERATE_PATH for portability.
+   */
+  return env('PERSONA_GENERATE_PATH') || '/ai/personas/generate';
 }
 
 async function postJson(url, body) {
@@ -90,21 +107,30 @@ describe('Integration: POST /persona/generate + RDS verification', () => {
 
   test('generates persona draft, enforces 3/2 rule, persists persona_drafts, logs alignment_score', async () => {
     const baseUrl = buildBaseUrl();
+    const personaGeneratePath = buildPersonaGeneratePath();
 
+    // Jordan Rivera resume text (admin-required test input)
     const sampleResumeText = [
-      'Jane Doe',
-      'Senior Backend Engineer',
+      'Jordan Rivera',
+      'Senior Software Engineer',
       '',
-      'Experience:',
-      '- 7+ years building Node.js/Express APIs',
-      '- Designed MySQL schemas and improved query performance',
-      '- Led services on AWS (ECS/Lambda), implemented CI/CD',
+      'SUMMARY',
+      'Senior Software Engineer with experience building scalable backend systems and customer-facing products.',
+      'Strong background in Node.js services, API design, and cloud infrastructure.',
       '',
-      'Skills: Node.js, Express, MySQL, AWS, System Design, Mentorship',
+      'EXPERIENCE',
+      'Senior Software Engineer',
+      '- Built and maintained Node.js/Express APIs supporting production workloads.',
+      '- Worked with MySQL data models and performance optimizations.',
+      '- Implemented AWS-based services and CI/CD automation.',
+      '',
+      'SKILLS',
+      'Node.js, JavaScript, Express, MySQL, AWS, System Design, Mentorship',
     ].join('\n');
 
-    // Endpoint requested by user story.
-    const apiResp = await postJson(`${baseUrl}/persona/generate`, {
+    // Endpoint used by this backend: POST /ai/personas/generate
+    const apiUrl = `${baseUrl}${personaGeneratePath}`;
+    const apiResp = await postJson(apiUrl, {
       sourceText: sampleResumeText,
       context: {
         targetRole: 'Senior Backend Engineer',
@@ -112,6 +138,15 @@ describe('Integration: POST /persona/generate + RDS verification', () => {
         industry: 'Software',
       },
     });
+
+    if (!apiResp.ok) {
+      // eslint-disable-next-line no-console
+      console.error('[integration] persona generate failed:', {
+        url: apiUrl,
+        status: apiResp.status,
+        body: apiResp.raw,
+      });
+    }
 
     expect(apiResp.ok).toBe(true);
     expect(apiResp.status).toBe(200);
