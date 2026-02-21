@@ -109,16 +109,23 @@ describe('Integration: POST /persona/generate + RDS verification', () => {
     const baseUrl = buildBaseUrl();
     const personaGeneratePath = buildPersonaGeneratePath();
 
+    // Jordan Rivera resume text (admin-required test input)
     const sampleResumeText = [
-      'Jane Doe',
-      'Senior Backend Engineer',
+      'Jordan Rivera',
+      'Senior Software Engineer',
       '',
-      'Experience:',
-      '- 7+ years building Node.js/Express APIs',
-      '- Designed MySQL schemas and improved query performance',
-      '- Led services on AWS (ECS/Lambda), implemented CI/CD',
+      'SUMMARY',
+      'Senior Software Engineer with experience building scalable backend systems and customer-facing products.',
+      'Strong background in Node.js services, API design, and cloud infrastructure.',
       '',
-      'Skills: Node.js, Express, MySQL, AWS, System Design, Mentorship',
+      'EXPERIENCE',
+      'Senior Software Engineer',
+      '- Built and maintained Node.js/Express APIs supporting production workloads.',
+      '- Worked with MySQL data models and performance optimizations.',
+      '- Implemented AWS-based services and CI/CD automation.',
+      '',
+      'SKILLS',
+      'Node.js, JavaScript, Express, MySQL, AWS, System Design, Mentorship',
     ].join('\n');
 
     // Endpoint used by this backend: POST /ai/personas/generate

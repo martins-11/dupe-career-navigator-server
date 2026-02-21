@@ -1,6 +1,6 @@
 'use strict';
 
-const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
+const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
 const Ajv = require('ajv');
 
 /**
@@ -117,14 +117,31 @@ function _jsonError(code, message, details) {
 }
 
 /**
- * Parse a Bedrock Claude response into text content.
- * Bedrock response shape varies by model family. For Claude via Messages API,
- * response JSON typically contains `content: [{type:'text', text:'...'}]`.
+ * Parse a Bedrock Converse response into text content.
+ *
+ * Typical Converse output shape:
+ * {
+ *   output: {
+ *     message: {
+ *       role: "assistant",
+ *       content: [{ text: "..." }, ...]
+ *     }
+ *   }
+ * }
  */
 function _extractTextFromBedrockResponseJson(respJson) {
   if (!respJson) return '';
 
-  // Common Claude Messages API format:
+  // Converse API
+  const converseContent = respJson?.output?.message?.content;
+  if (Array.isArray(converseContent)) {
+    const texts = converseContent
+      .map((c) => (c && typeof c.text === 'string' ? c.text : ''))
+      .filter(Boolean);
+    if (texts.length) return texts.join('\n').trim();
+  }
+
+  // Older Claude Messages API format (defensive)
   if (Array.isArray(respJson.content)) {
     const texts = respJson.content
       .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
@@ -220,16 +237,15 @@ function _assertValidPersonaDraft(obj) {
 }
 
 /**
- * Build a Bedrock "InvokeModel" payload for Anthropic Claude messages.
- * Note: This is model-specific; most current Claude on Bedrock supports:
- * {
- *   anthropic_version: "bedrock-2023-05-31",
- *   max_tokens: ...,
- *   system: "...",
- *   messages: [{role:"user", content:[{type:"text", text:"..."}]}]
- * }
+ * Build a Bedrock "Converse" payload.
+ *
+ * Admin requirement:
+ * - Use the Bedrock Runtime Converse API format (not InvokeModel).
+ *
+ * Docs reference (conceptual):
+ * - input: { modelId, system: [{text}], messages: [{role, content:[{text}]}], inferenceConfig }
  */
-function _buildClaudeInvokeBody({ systemPrompt, extractedText, context }) {
+function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
   const userContent = [
     'INPUT TEXT (unstructured):',
     extractedText,
@@ -239,16 +255,18 @@ function _buildClaudeInvokeBody({ systemPrompt, extractedText, context }) {
   ].join('\n');
 
   return {
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 1200,
-    temperature: 0.2,
-    system: systemPrompt,
+    // Converse system prompt is an array of content blocks.
+    system: [{ text: systemPrompt }],
     messages: [
       {
         role: 'user',
-        content: [{ type: 'text', text: userContent }]
+        content: [{ text: userContent }]
       }
-    ]
+    ],
+    inferenceConfig: {
+      maxTokens: 1200,
+      temperature: 0.2
+    }
   };
 }
 
@@ -303,34 +321,22 @@ async function generatePersonaDraft(extractedText, options = {}) {
 
   const client = _getBedrockClient();
 
-  const body = _buildClaudeInvokeBody({
+  const converseInput = _buildClaudeConverseInput({
     systemPrompt: PERSONA_SYSTEM_PROMPT,
     extractedText: text,
     context: options.context || null
   });
 
-  const cmd = new InvokeModelCommand({
+  const cmd = new ConverseCommand({
     modelId,
-    contentType: 'application/json',
-    accept: 'application/json',
-    body: Buffer.from(JSON.stringify(body), 'utf8')
+    ...converseInput
   });
-
-  let resp;
-  try {
-    resp = await client.send(cmd);
-  } catch (e) {
-    throw _jsonError('BEDROCK_INVOKE_FAILED', 'Failed to invoke Bedrock model.', {
-      message: e?.message || String(e)
-    });
-  }
 
   let respJson;
   try {
-    const raw = Buffer.from(resp.body).toString('utf8');
-    respJson = JSON.parse(raw);
+    respJson = await client.send(cmd);
   } catch (e) {
-    throw _jsonError('BEDROCK_RESPONSE_PARSE_FAILED', 'Failed to parse Bedrock response JSON.', {
+    throw _jsonError('BEDROCK_CONVERSE_FAILED', 'Failed to converse with Bedrock model.', {
       message: e?.message || String(e)
     });
   }
