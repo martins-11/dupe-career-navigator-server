@@ -335,6 +335,10 @@ async function generatePersonaDraft(extractedText, options = {}) {
   let respJson;
   try {
     respJson = await client.send(cmd);
+
+    // Debug requirement: log raw response to confirm whether Sonnet is wrapping JSON in extra text.
+    // eslint-disable-next-line no-console
+    console.log('[personaService] Raw Bedrock response:', JSON.stringify(respJson, null, 2));
   } catch (e) {
     throw _jsonError('BEDROCK_CONVERSE_FAILED', 'Failed to converse with Bedrock model.', {
       message: e?.message || String(e)
@@ -346,14 +350,54 @@ async function generatePersonaDraft(extractedText, options = {}) {
     throw _jsonError('BEDROCK_EMPTY_OUTPUT', 'Bedrock returned empty output.', { bedrockResponse: respJson });
   }
 
-  const parsed = _safeJsonParse(modelText);
+  // Parser fix requirement:
+  // If the model returns prose + JSON, extract the first JSON object block using regex.
+  // (We still attempt strict parsing first; regex is a targeted fallback.)
+  let parsed = _safeJsonParse(modelText);
+  if (!parsed.ok) {
+    const match = String(modelText).match(/\{[\s\S]*\}/);
+    if (match && match[0]) {
+      parsed = _safeJsonParse(match[0]);
+    }
+  }
+
   if (!parsed.ok) {
     throw _jsonError('MODEL_OUTPUT_NOT_JSON', 'Model output was not valid JSON.', {
-      modelTextSnippet: modelText.slice(0, 500)
+      modelTextSnippet: modelText.slice(0, 800)
     });
   }
 
-  const persona = _assertValidPersonaDraft(parsed.value);
+  // DB/schema mapper alignment:
+  // Normalize common alternate field names produced by some prompts/models into our strict schema.
+  // This prevents downstream persistence from failing due to unexpected keys/names.
+  const rawObj = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+  const normalized = { ...rawObj };
+
+  // Common alias: strengths -> mastery_skills
+  if (!Array.isArray(normalized.mastery_skills) && Array.isArray(normalized.strengths)) {
+    normalized.mastery_skills = normalized.strengths;
+    delete normalized.strengths;
+  }
+
+  // Common alias: masteries -> mastery_skills
+  if (!Array.isArray(normalized.mastery_skills) && Array.isArray(normalized.masteries)) {
+    normalized.mastery_skills = normalized.masteries;
+    delete normalized.masteries;
+  }
+
+  // Common alias: improvement_areas -> growth_areas
+  if (!Array.isArray(normalized.growth_areas) && Array.isArray(normalized.improvement_areas)) {
+    normalized.growth_areas = normalized.improvement_areas;
+    delete normalized.improvement_areas;
+  }
+
+  // Common alias: growthAreas -> growth_areas
+  if (!Array.isArray(normalized.growth_areas) && Array.isArray(normalized.growthAreas)) {
+    normalized.growth_areas = normalized.growthAreas;
+    delete normalized.growthAreas;
+  }
+
+  const persona = _assertValidPersonaDraft(normalized);
 
   return { persona, mode: 'bedrock', warnings: [] };
 }

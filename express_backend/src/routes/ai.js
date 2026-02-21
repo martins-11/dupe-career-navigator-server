@@ -181,8 +181,20 @@ router.post('/personas/generate', async (req, res) => {
       }
     } catch (e) {
       // Persistence is best-effort here; do not fail persona generation if DB insert fails.
+      // But for debugging CI failures, print the full error object when DEBUG=true.
       // eslint-disable-next-line no-console
-      console.warn('[ai/personas/generate] persona_drafts insert skipped/failed:', e?.message || String(e));
+      console.warn('[ai/personas/generate] persona_drafts insert skipped/failed:', e);
+
+      if (String(process.env.DEBUG || '').toLowerCase() === 'true') {
+        // eslint-disable-next-line no-console
+        console.log('[ai/personas/generate][DEBUG] insert error details:', {
+          message: e?.message,
+          code: e?.code,
+          errno: e?.errno,
+          sqlState: e?.sqlState,
+          sqlMessage: e?.sqlMessage
+        });
+      }
     }
 
     return res.status(200).json({
