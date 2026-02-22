@@ -338,19 +338,34 @@ async function generatePersonaDraft(extractedText, options = {}) {
   /**
    * Generate a persona draft using AWS Bedrock Claude and validate strict JSON schema.
    *
+   * Hardening requirements:
+   * - Edge-case validation: if input text is under 100 characters, reject with INVALID_INPUT_LENGTH.
+   * - AI failure hardening: if Bedrock call fails OR output is malformed JSON, return structured fallback:
+   *     { error: "AI_GENERATION_FAILED", retryable: true }
+   *
    * @param {string} extractedText - Combined extracted/normalized text from documents.
    * @param {{ context?: object, preferMock?: boolean }} [options]
-   * @returns {Promise<{persona: object, mode: 'bedrock'|'mock', warnings: string[]}>}
+   * @returns {Promise<{persona: object, mode: 'bedrock'|'mock', warnings: string[]} | {error: string, retryable: boolean}>}
    */
   const text = String(extractedText || '').trim();
   if (!text) {
     throw _jsonError('NO_SOURCE_TEXT', 'extractedText is required to generate a persona draft.');
   }
 
+  // Edge-case validation: block obvious nonsense / too-short input.
+  if (text.length < 100) {
+    throw _jsonError(
+      'INVALID_INPUT_LENGTH',
+      'Input text is too short to generate a meaningful persona. Provide at least 100 characters.',
+      { minLength: 100, actualLength: text.length }
+    );
+  }
+
   const preferMock = Boolean(options.preferMock);
   const modelId = _env('BEDROCK_MODEL_ID');
 
   // If explicitly requested OR model isn't configured, fall back to mock.
+  // Note: input-length validation still applies (above) to prevent persisting nonsense even in mock mode.
   if (preferMock || !modelId) {
     const mock = {
       professional_summary:
@@ -400,14 +415,13 @@ async function generatePersonaDraft(extractedText, options = {}) {
     // eslint-disable-next-line no-console
     console.log('[personaService] Raw Bedrock response:', JSON.stringify(respJson, null, 2));
   } catch (e) {
-    throw _jsonError('BEDROCK_CONVERSE_FAILED', 'Failed to converse with Bedrock model.', {
-      message: e?.message || String(e)
-    });
+    // Requirement: structured fallback (do not throw), retryable.
+    return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 
   const modelText = _extractTextFromBedrockResponseJson(respJson);
   if (!modelText) {
-    throw _jsonError('BEDROCK_EMPTY_OUTPUT', 'Bedrock returned empty output.', { bedrockResponse: respJson });
+    return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 
   // Parser fix requirement:
@@ -422,15 +436,17 @@ async function generatePersonaDraft(extractedText, options = {}) {
   }
 
   if (!parsed.ok) {
-    throw _jsonError('MODEL_OUTPUT_NOT_JSON', 'Model output was not valid JSON.', {
-      modelTextSnippet: modelText.slice(0, 800)
-    });
+    return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 
-  const rawObj = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
-  const persona = _assertValidPersonaDraft(rawObj);
-
-  return { persona, mode: 'bedrock', warnings: [] };
+  try {
+    const rawObj = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+    const persona = _assertValidPersonaDraft(rawObj);
+    return { persona, mode: 'bedrock', warnings: [] };
+  } catch (_) {
+    // Schema validation failure counts as malformed output -> fallback.
+    return { error: 'AI_GENERATION_FAILED', retryable: true };
+  }
 }
 
 /**
@@ -469,9 +485,84 @@ async function createPersonaDraft({ personaDraftJson, alignmentScore = 0 }) {
   return { personaDraftId, savedPersonaDraftJson, persisted: true };
 }
 
+/**
+ * PUBLIC_INTERFACE
+ */
+async function finalizePersona(draftId) {
+  /**
+   * Finalize a previously saved persona draft by copying it from persona_drafts to persona_final.
+   *
+   * Behavior:
+   * - Fetch persona_draft_json from persona_drafts by id
+   * - Insert into persona_final with a new id
+   * - Return { finalPersonaId }
+   *
+   * DB-optional:
+   * - If DB isn't configured, returns a deterministic error.
+   *
+   * @param {string} draftId - persona_drafts.id
+   * @returns {Promise<{finalPersonaId: string}>}
+   */
+  const { uuidV4 } = require('../utils/uuid');
+  const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../db/connection');
+
+  const engine = getDbEngine();
+  if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) {
+    const err = _jsonError(
+      'DB_NOT_CONFIGURED',
+      'Database is not configured for finalizePersona (requires MySQL).'
+    );
+    err.httpStatus = 503;
+    throw err;
+  }
+
+  const id = String(draftId || '').trim();
+  if (!id) {
+    throw _jsonError('INVALID_DRAFT_ID', 'draftId is required.');
+  }
+
+  const draftRes = await dbQuery(
+    `
+    SELECT persona_draft_json, alignment_score
+    FROM persona_drafts
+    WHERE id = ?
+    LIMIT 1
+    `,
+    [id]
+  );
+
+  const row = draftRes.rows[0];
+  if (!row) {
+    const err = _jsonError('DRAFT_NOT_FOUND', 'persona draft not found.');
+    err.httpStatus = 404;
+    throw err;
+  }
+
+  // MySQL JSON can be returned as string or object depending on driver config.
+  let personaDraftJson = row.persona_draft_json;
+  if (typeof personaDraftJson === 'string') {
+    personaDraftJson = JSON.parse(personaDraftJson);
+  }
+
+  // Validate schema before persisting final to avoid copying garbage.
+  const validated = _assertValidPersonaDraft(personaDraftJson);
+
+  const finalPersonaId = uuidV4();
+  await dbQuery(
+    `
+    INSERT INTO persona_final (id, persona_final_json, alignment_score, created_at)
+    VALUES (?,?,?,?)
+    `,
+    [finalPersonaId, JSON.stringify(validated), Number(row.alignment_score) || 0, new Date()]
+  );
+
+  return { finalPersonaId };
+}
+
 module.exports = {
   PERSONA_SYSTEM_PROMPT,
   personaDraftJsonSchema,
   generatePersonaDraft,
-  createPersonaDraft
+  createPersonaDraft,
+  finalizePersona
 };

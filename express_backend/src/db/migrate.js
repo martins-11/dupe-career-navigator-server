@@ -30,6 +30,7 @@ const {
   getMigrationSql: getMysqlPersonasAndVersionsSql
 } = require('./migrations/003_personas_and_versions.mysql.sql');
 const { getMigrationSql: getMysqlPersonaDraftsSql } = require('./migrations/004_persona_drafts.mysql.sql');
+const { getMigrationSql: getMysqlPersonaFinalSql } = require('./migrations/005_persona_final.mysql.sql');
 
 function _splitSqlStatements(sql) {
   /**
@@ -82,7 +83,8 @@ async function runMigrations() {
         { name: '001_init', sql: getMysqlInitSql() },
         { name: '002_documents_extracted_text', sql: getMysqlDocumentsExtractedTextSql() },
         { name: '003_personas_and_versions', sql: getMysqlPersonasAndVersionsSql() },
-        { name: '004_persona_drafts', sql: getMysqlPersonaDraftsSql() }
+        { name: '004_persona_drafts', sql: getMysqlPersonaDraftsSql() },
+        { name: '005_persona_final', sql: getMysqlPersonaFinalSql() }
       ];
 
       for (const m of migrations) {

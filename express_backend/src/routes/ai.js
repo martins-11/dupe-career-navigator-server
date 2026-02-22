@@ -149,10 +149,19 @@ router.post('/personas/generate', async (req, res) => {
   const requestId = uuidV4();
 
   try {
-    const { persona, mode, warnings } = await personaService.generatePersonaDraft(
-      parsed.data.sourceText || '',
-      { context: parsed.data.context || null }
-    );
+    const result = await personaService.generatePersonaDraft(parsed.data.sourceText || '', {
+      context: parsed.data.context || null
+    });
+
+    // AI failure hardening: personaService may return a structured fallback.
+    if (result && typeof result === 'object' && result.error === 'AI_GENERATION_FAILED') {
+      return res.status(502).json({
+        requestId,
+        ...result
+      });
+    }
+
+    const { persona, mode, warnings } = result;
 
     // Best-effort persistence contract:
     // - personaService persists into MySQL persona_drafts when DB is configured
