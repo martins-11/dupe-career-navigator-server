@@ -14,6 +14,13 @@
  * - If MySQL env vars are unset, persistence will be skipped and personaDraftId will be null.
  */
 
+const path = require('path');
+
+// Ensure the smoke script loads the same env vars as the server entrypoint.
+// Without this, standalone execution won't see DB/AWS vars and will incorrectly
+// fall back to mock mode + skip persistence.
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+
 const personaService = require('../src/services/personaService');
 
 async function main() {
