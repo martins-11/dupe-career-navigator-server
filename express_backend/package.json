@@ -10,6 +10,7 @@
     "db:migrate": "node src/db/migrate.js",
     "db:check": "node src/db/check.js",
     "db:verify": "node src/db/verifyTables.js",
+    "validate:nonsense": "node scripts/validate-nonsense-input.js",
     "test": "NODE_ENV=test jest --runInBand",
     "test:integration": "NODE_ENV=test jest --runInBand --testPathPattern=tests/integration"
   },

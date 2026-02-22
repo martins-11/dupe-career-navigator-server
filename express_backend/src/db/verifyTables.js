@@ -18,6 +18,8 @@ const REQUIRED_TABLES = [
   'extracted_text',
   'personas',
   'persona_versions',
+  'persona_drafts',
+  'persona_final',
 ];
 
 function _formatList(arr) {

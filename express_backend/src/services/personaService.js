@@ -7,9 +7,10 @@ const Ajv = require('ajv');
  * Persona generation service (AWS Bedrock Claude).
  *
  * Responsibilities:
- * - Provide a strict system prompt that forces strict JSON output and enforces the "3/2 Rule"
+ * - Provide a strict system prompt that forces strict JSON output (no markdown, no commentary)
  * - Call AWS Bedrock using env vars (AWS credentials are loaded by AWS SDK default provider chain)
  * - Validate model output against a strict JSON Schema before returning to callers
+ * - Provide a persistence helper for persona drafts (persona_drafts table) that returns personaDraftId
  *
  * Environment variables required (configured outside code):
  * - AWS_REGION
@@ -18,16 +19,17 @@ const Ajv = require('ajv');
  */
 
 /**
- * System prompt used for persona generation.
- * Enforces:
- * - Strict JSON output (no markdown, no code fences, no extra keys)
- * - "3/2 Rule": exactly 3 mastery skills and exactly 2 growth areas
+ * System prompt used for persona draft generation.
+ *
+ * Pivot note:
+ * - Ignore any prior "3/2 rule" / "alignment scores" requirements.
+ * - Output must be JSON only, strictly matching the persona_draft_json schema below.
  */
 const PERSONA_SYSTEM_PROMPT = [
-  'You are Claude Sonnet 4.5 running inside an automated backend pipeline for persona generation.',
+  'You are Claude Sonnet 4.5 running inside an automated backend pipeline for persona draft generation.',
   '',
   'TASK',
-  'Given unstructured career text (resume/job descriptions/performance reviews), output a SINGLE JSON object that conforms EXACTLY to the schema below.',
+  'Given raw unstructured career text (resume/job descriptions/performance reviews), extract and summarize into a SINGLE JSON object that conforms EXACTLY to the schema below.',
   '',
   'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT)',
   '1) Output MUST be valid JSON (RFC 8259).',
@@ -36,37 +38,46 @@ const PERSONA_SYSTEM_PROMPT = [
   '4) Output MUST contain NO preamble, NO explanation, NO commentary.',
   '5) Output MUST contain NO markdown and NO code fences (no ```).',
   '6) Do not wrap the JSON in quotes. Do not prefix with "Here is the JSON". Do not suffix with anything.',
-  '7) All array items MUST be strings (no objects).',
-  '',
-  '3/2 RULE (MANDATORY; EXACT COUNTS)',
-  '- You MUST extract/produce EXACTLY 3 items in mastery_skills.',
-  '- You MUST extract/produce EXACTLY 2 items in growth_areas.',
-  '- Do not output 4+ mastery skills or 3+ growth areas under any circumstances.',
-  '- If the text suggests more candidates than allowed, choose the MOST representative, highest-signal items grounded in the text.',
-  '- If the text suggests fewer candidates than required, infer plausible items consistent with the text (do NOT contradict it).',
-  '- Each item MUST be a short, specific skill/area phrase (not a sentence, not a paragraph).',
   '',
   'SCHEMA (STRICT; MUST MATCH EXACTLY)',
   '{',
-  '  "full_name": string,',
-  '  "professional_title": string,',
-  '  "mastery_skills": string[3],',
-  '  "growth_areas": string[2],',
-  '  "experience_years": integer,',
-  '  "raw_ai_summary": string',
+  '  "professional_summary": string,',
+  '  "core_competencies": string[],',
+  '  "work_experience": [',
+  '    {',
+  '      "company": string,',
+  '      "title": string,',
+  '      "start_date": string,',
+  '      "end_date": string,',
+  '      "location": string,',
+  '      "highlights": string[]',
+  '    }',
+  '  ],',
+  '  "education": [',
+  '    {',
+  '      "institution": string,',
+  '      "degree": string,',
+  '      "field_of_study": string,',
+  '      "start_date": string,',
+  '      "end_date": string,',
+  '      "notes": string',
+  '    }',
+  '  ],',
+  '  "technical_stack": {',
+  '    "languages": string[],',
+  '    "frameworks": string[],',
+  '    "databases": string[],',
+  '    "cloud_and_devops": string[],',
+  '    "tools": string[]',
+  '  }',
   '}',
   '',
   'FIELD GUIDANCE',
-  '- full_name: use name if present; else empty string.',
-  '- professional_title: concise, realistic title reflecting current/target role.',
-  '- mastery_skills: 3 strongest demonstrated capabilities, concrete and role-relevant.',
-  '- growth_areas: 2 realistic improvement areas suggested or implied by the text.',
-  '- experience_years: integer estimate; if unknown use 0.',
-  '- raw_ai_summary: 2-5 sentences summarizing the candidate and citing evidence from the text.',
-  '',
-  'FINAL CHECK BEFORE YOU OUTPUT',
-  '- Confirm mastery_skills.length === 3 and growth_areas.length === 2.',
-  '- Confirm output is ONLY a JSON object with EXACTLY these keys: full_name, professional_title, mastery_skills, growth_areas, experience_years, raw_ai_summary.',
+  '- professional_summary: 2-5 sentences, professionally written, grounded in evidence from the input text.',
+  '- core_competencies: concise skill/competency phrases (strings).',
+  '- work_experience: most relevant roles; use empty strings when dates/locations are unknown; highlights should be bullet-style strings.',
+  '- education: include degrees/certifications if present; otherwise empty array.',
+  '- technical_stack: categorize technologies; if unknown, return empty arrays.',
   '',
   'OUTPUT NOW: JSON ONLY.'
 ].join('\n');
@@ -79,31 +90,60 @@ const personaDraftJsonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    full_name: { type: 'string' },
-    professional_title: { type: 'string' },
-    mastery_skills: {
+    professional_summary: { type: 'string' },
+    core_competencies: {
       type: 'array',
-      items: { type: 'string' },
-      minItems: 3,
-      maxItems: 3
+      items: { type: 'string' }
     },
-    growth_areas: {
+    work_experience: {
       type: 'array',
-      items: { type: 'string' },
-      minItems: 2,
-      maxItems: 2
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          company: { type: 'string' },
+          title: { type: 'string' },
+          start_date: { type: 'string' },
+          end_date: { type: 'string' },
+          location: { type: 'string' },
+          highlights: {
+            type: 'array',
+            items: { type: 'string' }
+          }
+        },
+        required: ['company', 'title', 'start_date', 'end_date', 'location', 'highlights']
+      }
     },
-    experience_years: { type: 'integer' },
-    raw_ai_summary: { type: 'string' }
+    education: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          institution: { type: 'string' },
+          degree: { type: 'string' },
+          field_of_study: { type: 'string' },
+          start_date: { type: 'string' },
+          end_date: { type: 'string' },
+          notes: { type: 'string' }
+        },
+        required: ['institution', 'degree', 'field_of_study', 'start_date', 'end_date', 'notes']
+      }
+    },
+    technical_stack: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        languages: { type: 'array', items: { type: 'string' } },
+        frameworks: { type: 'array', items: { type: 'string' } },
+        databases: { type: 'array', items: { type: 'string' } },
+        cloud_and_devops: { type: 'array', items: { type: 'string' } },
+        tools: { type: 'array', items: { type: 'string' } }
+      },
+      required: ['languages', 'frameworks', 'databases', 'cloud_and_devops', 'tools']
+    }
   },
-  required: [
-    'full_name',
-    'professional_title',
-    'mastery_skills',
-    'growth_areas',
-    'experience_years',
-    'raw_ai_summary'
-  ]
+  required: ['professional_summary', 'core_competencies', 'work_experience', 'education', 'technical_stack']
 };
 
 const ajv = new Ajv({ allErrors: true, strict: true });
@@ -298,28 +338,57 @@ async function generatePersonaDraft(extractedText, options = {}) {
   /**
    * Generate a persona draft using AWS Bedrock Claude and validate strict JSON schema.
    *
+   * Hardening requirements:
+   * - Edge-case validation: if input text is under 100 characters, reject with INVALID_INPUT_LENGTH.
+   * - AI failure hardening: if Bedrock call fails OR output is malformed JSON, return structured fallback:
+   *     { error: "AI_GENERATION_FAILED", retryable: true }
+   *
    * @param {string} extractedText - Combined extracted/normalized text from documents.
    * @param {{ context?: object, preferMock?: boolean }} [options]
-   * @returns {Promise<{persona: object, mode: 'bedrock'|'mock', warnings: string[]}>}
+   * @returns {Promise<{persona: object, mode: 'bedrock'|'mock', warnings: string[]} | {error: string, retryable: boolean}>}
    */
   const text = String(extractedText || '').trim();
   if (!text) {
     throw _jsonError('NO_SOURCE_TEXT', 'extractedText is required to generate a persona draft.');
   }
 
+  // Edge-case validation: block obvious nonsense / too-short input.
+  if (text.length < 100) {
+    throw _jsonError(
+      'INVALID_INPUT_LENGTH',
+      'Input text is too short to generate a meaningful persona. Provide at least 100 characters.',
+      { minLength: 100, actualLength: text.length }
+    );
+  }
+
   const preferMock = Boolean(options.preferMock);
   const modelId = _env('BEDROCK_MODEL_ID');
 
   // If explicitly requested OR model isn't configured, fall back to mock.
+  // Note: input-length validation still applies (above) to prevent persisting nonsense even in mock mode.
   if (preferMock || !modelId) {
     const mock = {
-      full_name: '',
-      professional_title: 'Professional',
-      mastery_skills: ['Problem solving', 'Communication', 'Ownership'],
-      growth_areas: ['Public speaking', 'Delegation'],
-      experience_years: 0,
-      raw_ai_summary:
-        'Mock persona draft (Bedrock not configured or mock requested). This output is strict JSON and schema-validated.'
+      professional_summary:
+        'Mock persona draft (Bedrock not configured or mock requested). This output is strict JSON and schema-validated.',
+      core_competencies: ['Problem solving', 'Communication', 'Ownership'],
+      work_experience: [
+        {
+          company: '',
+          title: 'Professional',
+          start_date: '',
+          end_date: '',
+          location: '',
+          highlights: ['Mock experience highlight.']
+        }
+      ],
+      education: [],
+      technical_stack: {
+        languages: [],
+        frameworks: [],
+        databases: [],
+        cloud_and_devops: [],
+        tools: []
+      }
     };
 
     return { persona: _assertValidPersonaDraft(mock), mode: 'mock', warnings: ['Mock mode used.'] };
@@ -346,14 +415,13 @@ async function generatePersonaDraft(extractedText, options = {}) {
     // eslint-disable-next-line no-console
     console.log('[personaService] Raw Bedrock response:', JSON.stringify(respJson, null, 2));
   } catch (e) {
-    throw _jsonError('BEDROCK_CONVERSE_FAILED', 'Failed to converse with Bedrock model.', {
-      message: e?.message || String(e)
-    });
+    // Requirement: structured fallback (do not throw), retryable.
+    return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 
   const modelText = _extractTextFromBedrockResponseJson(respJson);
   if (!modelText) {
-    throw _jsonError('BEDROCK_EMPTY_OUTPUT', 'Bedrock returned empty output.', { bedrockResponse: respJson });
+    return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 
   // Parser fix requirement:
@@ -368,48 +436,133 @@ async function generatePersonaDraft(extractedText, options = {}) {
   }
 
   if (!parsed.ok) {
-    throw _jsonError('MODEL_OUTPUT_NOT_JSON', 'Model output was not valid JSON.', {
-      modelTextSnippet: modelText.slice(0, 800)
-    });
+    return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 
-  // DB/schema mapper alignment:
-  // Normalize common alternate field names produced by some prompts/models into our strict schema.
-  // This prevents downstream persistence from failing due to unexpected keys/names.
-  const rawObj = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
-  const normalized = { ...rawObj };
+  try {
+    const rawObj = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
+    const persona = _assertValidPersonaDraft(rawObj);
+    return { persona, mode: 'bedrock', warnings: [] };
+  } catch (_) {
+    // Schema validation failure counts as malformed output -> fallback.
+    return { error: 'AI_GENERATION_FAILED', retryable: true };
+  }
+}
 
-  // Common alias: strengths -> mastery_skills
-  if (!Array.isArray(normalized.mastery_skills) && Array.isArray(normalized.strengths)) {
-    normalized.mastery_skills = normalized.strengths;
-    delete normalized.strengths;
+/**
+ * PUBLIC_INTERFACE
+ */
+async function createPersonaDraft({ personaDraftJson, alignmentScore = 0 }) {
+  /**
+   * Persist a persona draft JSON into the persona_drafts table (best-effort, DB-optional).
+   *
+   * When DB is configured (DB_ENGINE=mysql and MySQL env is present), inserts into:
+   *   persona_drafts(id, persona_draft_json, alignment_score, created_at)
+   *
+   * @param {{personaDraftJson: object, alignmentScore?: number}} input
+   * @returns {Promise<{personaDraftId: string|null, savedPersonaDraftJson: object|null, persisted: boolean}>}
+   */
+  const { uuidV4 } = require('../utils/uuid');
+  const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../db/connection');
+
+  const engine = getDbEngine();
+  if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) {
+    // DB not configured; do not throw (keeps service usable in dev/CI without DB).
+    return { personaDraftId: null, savedPersonaDraftJson: null, persisted: false };
   }
 
-  // Common alias: masteries -> mastery_skills
-  if (!Array.isArray(normalized.mastery_skills) && Array.isArray(normalized.masteries)) {
-    normalized.mastery_skills = normalized.masteries;
-    delete normalized.masteries;
+  const personaDraftId = uuidV4();
+  const savedPersonaDraftJson = _assertValidPersonaDraft(personaDraftJson);
+
+  await dbQuery(
+    `
+    INSERT INTO persona_drafts (id, persona_draft_json, alignment_score, created_at)
+    VALUES (?,?,?,?)
+    `,
+    [personaDraftId, JSON.stringify(savedPersonaDraftJson), Number(alignmentScore) || 0, new Date()]
+  );
+
+  return { personaDraftId, savedPersonaDraftJson, persisted: true };
+}
+
+/**
+ * PUBLIC_INTERFACE
+ */
+async function finalizePersona(draftId) {
+  /**
+   * Finalize a previously saved persona draft by copying it from persona_drafts to persona_final.
+   *
+   * Behavior:
+   * - Fetch persona_draft_json from persona_drafts by id
+   * - Insert into persona_final with a new id
+   * - Return { finalPersonaId }
+   *
+   * DB-optional:
+   * - If DB isn't configured, returns a deterministic error.
+   *
+   * @param {string} draftId - persona_drafts.id
+   * @returns {Promise<{finalPersonaId: string}>}
+   */
+  const { uuidV4 } = require('../utils/uuid');
+  const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../db/connection');
+
+  const engine = getDbEngine();
+  if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) {
+    const err = _jsonError(
+      'DB_NOT_CONFIGURED',
+      'Database is not configured for finalizePersona (requires MySQL).'
+    );
+    err.httpStatus = 503;
+    throw err;
   }
 
-  // Common alias: improvement_areas -> growth_areas
-  if (!Array.isArray(normalized.growth_areas) && Array.isArray(normalized.improvement_areas)) {
-    normalized.growth_areas = normalized.improvement_areas;
-    delete normalized.improvement_areas;
+  const id = String(draftId || '').trim();
+  if (!id) {
+    throw _jsonError('INVALID_DRAFT_ID', 'draftId is required.');
   }
 
-  // Common alias: growthAreas -> growth_areas
-  if (!Array.isArray(normalized.growth_areas) && Array.isArray(normalized.growthAreas)) {
-    normalized.growth_areas = normalized.growthAreas;
-    delete normalized.growthAreas;
+  const draftRes = await dbQuery(
+    `
+    SELECT persona_draft_json, alignment_score
+    FROM persona_drafts
+    WHERE id = ?
+    LIMIT 1
+    `,
+    [id]
+  );
+
+  const row = draftRes.rows[0];
+  if (!row) {
+    const err = _jsonError('DRAFT_NOT_FOUND', 'persona draft not found.');
+    err.httpStatus = 404;
+    throw err;
   }
 
-  const persona = _assertValidPersonaDraft(normalized);
+  // MySQL JSON can be returned as string or object depending on driver config.
+  let personaDraftJson = row.persona_draft_json;
+  if (typeof personaDraftJson === 'string') {
+    personaDraftJson = JSON.parse(personaDraftJson);
+  }
 
-  return { persona, mode: 'bedrock', warnings: [] };
+  // Validate schema before persisting final to avoid copying garbage.
+  const validated = _assertValidPersonaDraft(personaDraftJson);
+
+  const finalPersonaId = uuidV4();
+  await dbQuery(
+    `
+    INSERT INTO persona_final (id, persona_final_json, alignment_score, created_at)
+    VALUES (?,?,?,?)
+    `,
+    [finalPersonaId, JSON.stringify(validated), Number(row.alignment_score) || 0, new Date()]
+  );
+
+  return { finalPersonaId };
 }
 
 module.exports = {
   PERSONA_SYSTEM_PROMPT,
   personaDraftJsonSchema,
-  generatePersonaDraft
+  generatePersonaDraft,
+  createPersonaDraft,
+  finalizePersona
 };
