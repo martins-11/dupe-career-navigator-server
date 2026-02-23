@@ -54,10 +54,27 @@ CREATE TABLE IF NOT EXISTS documents (
 ) ENGINE=InnoDB;
 
 -- Backfill: if the documents table already existed from a prior migration/run, ensure category exists.
--- MySQL 8.0 supports ADD COLUMN IF NOT EXISTS.
-ALTER TABLE documents
-  ADD COLUMN IF NOT EXISTS category VARCHAR(64) NULL
-  AFTER mime_type;
+-- We cannot rely on `ADD COLUMN IF NOT EXISTS` because it is not supported on all MySQL versions.
+-- Instead, use information_schema.columns + prepared statement to conditionally add the column.
+-- @kavia_db_name is set above for conditional column add and reused below.
+
+SET @kavia_sql_add_category := (
+  SELECT IF(
+    EXISTS(
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = @kavia_db_name
+        AND table_name = 'documents'
+        AND column_name = 'category'
+    ),
+    'SELECT 1',
+    'ALTER TABLE documents ADD COLUMN category VARCHAR(64) NULL AFTER mime_type'
+  )
+);
+
+PREPARE kavia_stmt_add_category FROM @kavia_sql_add_category;
+EXECUTE kavia_stmt_add_category;
+DEALLOCATE PREPARE kavia_stmt_add_category;
 
 -- Canonical extracted text table (requested name)
 CREATE TABLE IF NOT EXISTS extracted_text (
