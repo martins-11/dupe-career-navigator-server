@@ -666,13 +666,13 @@ async function runAllOrchestration(input) {
       orch = _touch(orch, { documentIds: parsed.documentIds });
       await _bestEffortPersistBuildDocumentsLink(build.id, parsed.documentIds);
     } else if (useLatestCategoryDocs) {
-      // Additive MVP path: auto-select the latest docs by category for this userId.
-      if (!parsed.userId) {
-        const err = new Error('userId is required when useLatestCategoryDocs is enabled and no documentIds are provided.');
-        err.code = 'MISSING_USER_ID';
-        err.httpStatus = 422;
-        throw err;
-      }
+      // Additive MVP path: auto-select the latest docs by category.
+      //
+      // IMPORTANT:
+      // - The system supports anonymous usage (userId omitted/null) in memory mode.
+      // - The documents repository adapter supports `userId=null` to mean "anonymous".
+      // - Therefore, do NOT hard-require userId here; fall back to null.
+      const effectiveUserId = parsed.userId ?? null;
 
       orch = _touch(orch, {
         runAll: { ...orch.runAll, progress: 20, step: 'auto_select', message: 'Selecting latest uploaded docs…' }
@@ -682,15 +682,15 @@ async function runAllOrchestration(input) {
 
       // Fetch latest docs for each category.
       const latestResume = await documentsRepo.getLatestDocumentForUserByCategory(
-        parsed.userId,
+        effectiveUserId,
         DOCUMENT_CATEGORIES.RESUME
       );
       const latestJd = await documentsRepo.getLatestDocumentForUserByCategory(
-        parsed.userId,
+        effectiveUserId,
         DOCUMENT_CATEGORIES.JOB_DESCRIPTION
       );
       const latestPerf = await documentsRepo.getLatestDocumentForUserByCategory(
-        parsed.userId,
+        effectiveUserId,
         DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW
       );
 
