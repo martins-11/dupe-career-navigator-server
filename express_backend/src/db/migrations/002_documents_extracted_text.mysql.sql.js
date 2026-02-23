@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS documents (
   -- Metadata fields: use VARCHAR with sensible caps (instead of TEXT) to better reflect typical sizes.
   original_filename VARCHAR(512) NOT NULL,
   mime_type VARCHAR(255) NULL,
+
+  -- Additive: category used to auto-select latest docs for orchestration
+  -- Canonical values: resume | job_description | performance_review
+  category VARCHAR(64) NULL,
+
   source VARCHAR(255) NULL,
   storage_provider VARCHAR(64) NULL,
   storage_path VARCHAR(1024) NULL,
@@ -47,6 +52,29 @@ CREATE TABLE IF NOT EXISTS documents (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB;
+
+-- Backfill: if the documents table already existed from a prior migration/run, ensure category exists.
+-- We cannot rely on ADD COLUMN IF NOT EXISTS because it is not supported on all MySQL versions.
+-- Instead, use information_schema.columns + prepared statement to conditionally add the column.
+SET @kavia_db_name := DATABASE();
+
+SET @kavia_sql_add_category := (
+  SELECT IF(
+    EXISTS(
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = @kavia_db_name
+        AND table_name = 'documents'
+        AND column_name = 'category'
+    ),
+    'SELECT 1',
+    'ALTER TABLE documents ADD COLUMN category VARCHAR(64) NULL AFTER mime_type'
+  )
+);
+
+PREPARE kavia_stmt_add_category FROM @kavia_sql_add_category;
+EXECUTE kavia_stmt_add_category;
+DEALLOCATE PREPARE kavia_stmt_add_category;
 
 -- Canonical extracted text table (requested name)
 CREATE TABLE IF NOT EXISTS extracted_text (
@@ -72,8 +100,6 @@ CREATE TABLE IF NOT EXISTS extracted_text (
 --
 -- We implement this using INFORMATION_SCHEMA and prepared statements so each
 -- statement is standalone for the semicolon-splitting migration runner.
-
-SET @kavia_db_name := DATABASE();
 
 -- If there is NO TABLE named document_extracted_text, drop the VIEW (if any) to allow recreation.
 SET @kavia_sql_drop_view := (

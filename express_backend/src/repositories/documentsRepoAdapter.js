@@ -49,6 +49,18 @@ async function upsertExtractedText(documentId, input) {
   return _repo().upsertExtractedText(documentId, input);
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Get latest document for a user by category (used by orchestration auto-selection).
+ *
+ * @param {string|null} userId - User ID (uuid) or null for anonymous.
+ * @param {string} category - Canonical document category.
+ * @returns {Promise<object|null>} Latest document row or null if none exists.
+ */
+async function getLatestDocumentForUserByCategory(userId, category) {
+  return _repo().getLatestDocumentForUserByCategory(userId, category);
+}
+
 // PUBLIC_INTERFACE
 async function getLatestExtractedText(documentId) {
   /** Get the latest extracted text using configured persistence (memory by default). */
@@ -60,5 +72,6 @@ module.exports = {
   listDocuments,
   getDocumentById,
   upsertExtractedText,
-  getLatestExtractedText
+  getLatestExtractedText,
+  getLatestDocumentForUserByCategory
 };
