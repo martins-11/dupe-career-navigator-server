@@ -12,7 +12,7 @@
     "db:verify": "node src/db/verifyTables.js",
     "validate:nonsense": "node scripts/validate-nonsense-input.js",
     "test": "NODE_ENV=test jest --runInBand",
-    "test:integration": "NODE_ENV=test jest --runInBand --testPathPattern=tests/integration"
+    "test:integration": "NODE_ENV=test jest --runInBand --testPathPatterns=tests/integration"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.995.0",
