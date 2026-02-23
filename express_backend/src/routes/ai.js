@@ -187,7 +187,10 @@ router.post('/personas/generate', async (req, res) => {
       mode,
       warnings,
       persona,
-      personaDraftId
+      personaDraftId,
+      // Kept for backward compatibility with existing integration tests/clients.
+      // This service currently does not compute a real alignment score.
+      alignment_score: 0
     });
   } catch (err) {
     // Keep error shape consistent with other endpoints.
