@@ -54,9 +54,9 @@ CREATE TABLE IF NOT EXISTS documents (
 ) ENGINE=InnoDB;
 
 -- Backfill: if the documents table already existed from a prior migration/run, ensure category exists.
--- We cannot rely on `ADD COLUMN IF NOT EXISTS` because it is not supported on all MySQL versions.
+-- We cannot rely on ADD COLUMN IF NOT EXISTS because it is not supported on all MySQL versions.
 -- Instead, use information_schema.columns + prepared statement to conditionally add the column.
--- @kavia_db_name is set above for conditional column add and reused below.
+SET @kavia_db_name := DATABASE();
 
 SET @kavia_sql_add_category := (
   SELECT IF(
@@ -100,8 +100,6 @@ CREATE TABLE IF NOT EXISTS extracted_text (
 --
 -- We implement this using INFORMATION_SCHEMA and prepared statements so each
 -- statement is standalone for the semicolon-splitting migration runner.
-
-SET @kavia_db_name := DATABASE();
 
 -- If there is NO TABLE named document_extracted_text, drop the VIEW (if any) to allow recreation.
 SET @kavia_sql_drop_view := (
