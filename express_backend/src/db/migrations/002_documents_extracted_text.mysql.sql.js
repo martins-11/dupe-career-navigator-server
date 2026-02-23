@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS documents (
   -- Metadata fields: use VARCHAR with sensible caps (instead of TEXT) to better reflect typical sizes.
   original_filename VARCHAR(512) NOT NULL,
   mime_type VARCHAR(255) NULL,
+
+  -- Additive: category used to auto-select latest docs for orchestration
+  -- Canonical values: resume | job_description | performance_review
+  category VARCHAR(64) NULL,
+
   source VARCHAR(255) NULL,
   storage_provider VARCHAR(64) NULL,
   storage_path VARCHAR(1024) NULL,
@@ -47,6 +52,12 @@ CREATE TABLE IF NOT EXISTS documents (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
 ) ENGINE=InnoDB;
+
+-- Backfill: if the documents table already existed from a prior migration/run, ensure category exists.
+-- MySQL 8.0 supports ADD COLUMN IF NOT EXISTS.
+ALTER TABLE documents
+  ADD COLUMN IF NOT EXISTS category VARCHAR(64) NULL
+  AFTER mime_type;
 
 -- Canonical extracted text table (requested name)
 CREATE TABLE IF NOT EXISTS extracted_text (
