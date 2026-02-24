@@ -134,11 +134,63 @@ function makePlaceholderPersona({ sourceText, context }) {
  */
 function mapV2PersonaToLegacyPersona(v2Persona, sourceText, context) {
   const text = String(sourceText || '').trim();
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 80); // keep heuristic work bounded
 
-  // Heuristics: first non-empty line is typically the name; second line often the title.
-  const inferredName = lines[0] || 'Unknown';
-  const inferredTitle = lines[1] || context?.targetRole || 'Professional';
+  /**
+   * Best-effort extraction for:
+   * - Candidate name
+   * - Candidate current role/title
+   *
+   * Important: if we cannot confidently infer, return blank (frontend will leave space blank).
+   */
+  const emailOrPhoneLine = (l) => /@|\b(?:\+?\d[\d\s\-().]{7,}\d)\b/.test(l);
+  const looksLikeName = (l) => {
+    // 2-4 tokens, letters only (with ./'-), Title Case-ish, and not an email/phone line
+    if (!l || l.length > 60) return false;
+    if (emailOrPhoneLine(l)) return false;
+    if (/[0-9]/.test(l)) return false;
+    if (/[,:]/.test(l)) return false;
+    const tokens = l.split(/\s+/).filter(Boolean);
+    if (tokens.length < 2 || tokens.length > 4) return false;
+    // avoid common section headers
+    if (/^(summary|profile|experience|work experience|education|skills|projects|certifications)$/i.test(l)) {
+      return false;
+    }
+    return tokens.every((t) => /^[A-Za-z][A-Za-z.'-]*$/.test(t));
+  };
+
+  const looksLikeTitle = (l) => {
+    if (!l || l.length > 80) return false;
+    if (emailOrPhoneLine(l)) return false;
+    if (/^(summary|profile|experience|work experience|education|skills|projects|certifications)$/i.test(l)) {
+      return false;
+    }
+    // Titles often contain these keywords (not exhaustive)
+    return /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product)\b/i.test(
+      l
+    );
+  };
+
+  // Find first plausible name near the top.
+  const inferredName = (() => {
+    for (let i = 0; i < Math.min(lines.length, 12); i += 1) {
+      if (looksLikeName(lines[i])) return lines[i];
+    }
+    return '';
+  })();
+
+  // Find a plausible title near the inferred name line; else fallback to context.targetRole; else blank.
+  const inferredTitle = (() => {
+    const startIdx = inferredName ? Math.max(0, lines.indexOf(inferredName) - 1) : 0;
+    for (let i = startIdx; i < Math.min(lines.length, startIdx + 8); i += 1) {
+      if (looksLikeTitle(lines[i])) return lines[i];
+    }
+    return context?.targetRole || '';
+  })();
 
   const professionalSummary =
     (v2Persona && typeof v2Persona.professional_summary === 'string' && v2Persona.professional_summary.trim()) ||
