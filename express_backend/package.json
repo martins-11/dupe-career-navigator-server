@@ -5,8 +5,8 @@
   "description": "Express backend for professional persona builder (PostgreSQL/AWS RDS placeholders).",
   "main": "src/server.js",
   "scripts": {
-    "prestart": "node -e \"const {execSync}=require('child_process'); const port=process.env.PORT||3001; try{ execSync(`lsof -t -iTCP:${port} -sTCP:LISTEN | xargs -r kill -TERM`, {stdio:'ignore'});}catch(e){}\"",
-    "predev": "node -e \"const {execSync}=require('child_process'); const port=process.env.PORT||3001; const cmds=[`(command -v lsof >/dev/null 2>&1 && lsof -t -iTCP:${port} -sTCP:LISTEN | xargs -r kill -TERM) || true`,`(command -v fuser >/dev/null 2>&1 && fuser -k -TERM ${port}/tcp) || true`]; for (const c of cmds){ try{ execSync(c,{stdio:'ignore',shell:'/bin/bash'});}catch(e){} } try{ execSync(`(command -v lsof >/dev/null 2>&1 && lsof -t -iTCP:${port} -sTCP:LISTEN | xargs -r kill -KILL) || true`,{stdio:'ignore',shell:'/bin/bash'});}catch(e){}\"",
+    "prestart": "node scripts/free-port.js",
+    "predev": "node scripts/free-port.js",
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "db:migrate": "node src/db/migrate.js",
