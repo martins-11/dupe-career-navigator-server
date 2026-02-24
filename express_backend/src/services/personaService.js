@@ -53,7 +53,12 @@ const PERSONA_SYSTEM_PROMPT = [
   'SCHEMA (STRICT; MUST MATCH EXACTLY)',
   '{',
   '  "professional_summary": string,',
-  '  "career_highlights": string[],',
+  '  "career_highlights": [',
+  '    {',
+  '      "text": string,',
+  '      "source": string',
+  '    }',
+  '  ],',
   '  "core_competencies": string[],',
   '  "education": [',
   '    {',
@@ -76,9 +81,12 @@ const PERSONA_SYSTEM_PROMPT = [
   '',
   'FIELD GUIDANCE (QUALITY BAR)',
   '- professional_summary (2-5 sentences): must read like a real professional summary; include 1-2 concrete proof points from RESUME_TEXT/REVIEWS only.',
-  '- career_highlights (REQUIRED; MUST BE NON-EMPTY): 3-6 concise bullet-style strings summarizing the candidate’s most impressive, evidence-based achievements/impact.',
-  '  - Must be written as CONTRIBUTION + IMPACT (what they did + outcome).',
-  '  - When a highlight describes contribution/impact, it MUST be linked to real experience evidence from RESUME_TEXT and/or PERFORMANCE_REVIEW_TEXT (never from JOB_DESCRIPTION_TEXT).',
+  '- career_highlights (REQUIRED; MUST BE NON-EMPTY): 3-6 concise bullet-style objects summarizing the candidate’s most impressive, evidence-based achievements/impact.',
+  '  - Each item MUST have:',
+  '    - text: the highlight statement (CONTRIBUTION + IMPACT).',
+  '    - source: where it came from, ideally the originating job/role/company from RESUME_TEXT/REVIEWS (e.g., "Software Engineer – Acme", "Course Representative – VIT Chennai", "Project: Movie Ticket Booking System", or "Performance Review").',
+  '  - If there is no clear job/role/company, set source to "Unknown" (do NOT invent employers/titles).',
+  '  - Highlights MUST be linked to evidence from RESUME_TEXT and/or PERFORMANCE_REVIEW_TEXT (never from JOB_DESCRIPTION_TEXT).',
   '  - DO NOT include certifications, certificate names, training courses, or exam completions as career_highlights.',
   '  - EXCLUDE generic role requirements copied from the job description; only include what the candidate actually did.',
   '  - Prefer impact/outcome phrasing: action → scope → result (metrics only when explicitly present in RESUME_TEXT/REVIEWS).',
@@ -111,7 +119,15 @@ const personaDraftJsonSchema = {
     career_highlights: {
       type: 'array',
       minItems: 1,
-      items: { type: 'string' }
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string' },
+          source: { type: 'string' }
+        },
+        required: ['text', 'source']
+      }
     },
     core_competencies: {
       type: 'array',
@@ -276,9 +292,52 @@ function _safeJsonParse(jsonText) {
   }
 }
 
+function _normalizeCareerHighlights(obj) {
+  /**
+   * Normalize career_highlights into the current schema shape:
+   *   [{ text: string, source: string }, ...]
+   *
+   * Backward compat:
+   * - If the model returns string[], upgrade each item to {text, source:"Unknown"}.
+   * - If it returns objects, ensure required keys exist and are non-empty.
+   */
+  if (!obj || typeof obj !== 'object') return obj;
+
+  const ch = obj.career_highlights;
+  if (!Array.isArray(ch)) return obj;
+
+  const normalized = ch
+    .map((item) => {
+      if (typeof item === 'string') {
+        const text = item.trim();
+        if (!text) return null;
+        return { text, source: 'Unknown' };
+      }
+
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const text = typeof item.text === 'string' ? item.text.trim() : '';
+        const source = typeof item.source === 'string' ? item.source.trim() : 'Unknown';
+        if (!text) return null;
+        return { text, source: source || 'Unknown' };
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+
+  // Ensure non-empty per schema requirement.
+  if (normalized.length === 0) {
+    normalized.push({ text: 'Demonstrated impact through documented contributions.', source: 'Unknown' });
+  }
+
+  return { ...obj, career_highlights: normalized };
+}
+
 function _assertValidPersonaDraft(obj) {
-  const ok = validatePersonaDraft(obj);
-  if (ok) return obj;
+  const normalized = _normalizeCareerHighlights(obj);
+
+  const ok = validatePersonaDraft(normalized);
+  if (ok) return normalized;
 
   throw _jsonError('PERSONA_SCHEMA_VALIDATION_FAILED', 'Model output did not match required persona schema.', {
     ajvErrors: validatePersonaDraft.errors
@@ -437,7 +496,7 @@ async function generatePersonaDraft(extractedText, options = {}) {
     const mock = {
       professional_summary:
         'Mock persona draft (Bedrock not configured or mock requested). This output is strict JSON and schema-validated.',
-      career_highlights: ['Mock highlight (Bedrock not configured).'],
+      career_highlights: [{ text: 'Mock highlight (Bedrock not configured).', source: 'Unknown' }],
       core_competencies: ['Problem solving', 'Communication', 'Ownership'],
       education: [],
       technical_stack: {
