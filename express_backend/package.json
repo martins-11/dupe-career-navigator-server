@@ -5,6 +5,7 @@
   "description": "Express backend for professional persona builder (PostgreSQL/AWS RDS placeholders).",
   "main": "src/server.js",
   "scripts": {
+    "prestart": "node -e \"const {execSync}=require('child_process'); try{ execSync('lsof -t -iTCP:3001 -sTCP:LISTEN | xargs -r kill -TERM', {stdio:'ignore'});}catch(e){}\"",
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "db:migrate": "node src/db/migrate.js",
