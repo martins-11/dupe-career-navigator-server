@@ -22,12 +22,83 @@ const personaService = require('./personaService');
  * NOTE:
  * - This module stores orchestration-level references in process memory only.
  * - It relies on existing routes/services for the heavy lifting.
+ *
+ * Persona validation hardening:
+ * - Once validation has begun (draft exists OR final exists), document set mutations must be rejected
+ *   server-side (read-only documents post-validation).
+ * - Relying only on in-memory orchestration state is insufficient across restarts; therefore, we also
+ *   consult persisted draft/final blobs via personasRepo when personaId is known.
  */
 
 const _orchestrations = new Map(); // buildId -> orchestration record
 
 function _nowIso() {
   return new Date().toISOString();
+}
+
+/**
+ * Determine whether a build/persona has entered "validation stage" where documents become read-only.
+ *
+ * Rules:
+ * - If orchestration record indicates personaDraft or personaFinal exists -> locked.
+ * - Else, if a personaId is known, consult personasRepo draft/final blobs:
+ *   - draft exists -> locked
+ *   - final exists -> locked
+ *
+ * @param {{ buildId: string, personaId: string|null, orchestration: object|null }} input
+ * @returns {Promise<{locked: boolean, reason: 'draft'|'final'|null}>}
+ */
+async function _isDocumentMutationLocked({ buildId, personaId, orchestration }) {
+  // Fast path: orchestration already has draft/final in memory.
+  if (orchestration?.personaFinal) return { locked: true, reason: 'final' };
+  if (orchestration?.personaDraft) return { locked: true, reason: 'draft' };
+
+  // If no personaId, we can't consult persisted state; treat as unlocked.
+  if (!personaId) return { locked: false, reason: null };
+
+  // Consult persisted draft/final blobs (memory/db via adapter).
+  // If the persona does not exist or these methods aren't supported, adapter will throw or return null.
+  try {
+    const [draft, finalBlob] = await Promise.all([
+      personasRepo.getDraft(personaId),
+      personasRepo.getFinal(personaId)
+    ]);
+
+    if (finalBlob?.finalJson) return { locked: true, reason: 'final' };
+    if (draft?.draftJson) return { locked: true, reason: 'draft' };
+  } catch (err) {
+    // Be conservative: if the persona exists but persistence is temporarily failing, we should not
+    // allow mutations that can invalidate an ongoing validation flow. Reject mutations.
+    const e = new Error(
+      'Unable to verify persona validation state to safely mutate documents. Please retry later.'
+    );
+    e.code = 'DOCUMENT_MUTATION_GUARD_UNAVAILABLE';
+    e.httpStatus = 422;
+    e.details = { buildId, personaId };
+    throw e;
+  }
+
+  return { locked: false, reason: null };
+}
+
+/**
+ * Throws a 422 error if document mutations are not allowed for the given build/persona.
+ *
+ * @param {{ buildId: string, personaId: string|null, orchestration: object|null, action: string }} input
+ * @returns {Promise<void>}
+ */
+async function _assertDocumentsMutable({ buildId, personaId, orchestration, action }) {
+  const { locked, reason } = await _isDocumentMutationLocked({ buildId, personaId, orchestration });
+  if (!locked) return;
+
+  const err = new Error(
+    `Documents are read-only once validation begins (${reason} exists). ` +
+      `Start a new build/persona to ${action} documents.`
+  );
+  err.code = 'DOCUMENTS_READ_ONLY_POST_VALIDATION';
+  err.httpStatus = 422;
+  err.details = { buildId, personaId, lockedReason: reason, action };
+  throw err;
 }
 
 /**
@@ -154,6 +225,11 @@ const OrchestrationUploadLinkRequest = z.object({
 
 const OrchestrationExtractRequest = z.object({
   // If omitted, uses linked documents from build orchestration.
+  //
+  // IMPORTANT (persona validation hardening):
+  // After a build has produced a personaDraft (i.e., user is in validation/edit flow),
+  // we disallow changing the document set for that build via this endpoint.
+  // Document selection should happen only during ingestion/upload.
   documentIds: z.array(z.string().uuid()).optional(),
   // Normalize options
   normalize: z
@@ -281,17 +357,115 @@ function _makePlaceholderPersona({ sourceText, context }) {
   if (/\baws\b/.test(lower)) maybeSkills.push('AWS');
   if (/\bpython\b/.test(lower)) maybeSkills.push('Python');
 
+  const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+
   const targetRole = context?.targetRole || null;
   const industry = context?.industry || null;
   const seniority = context?.seniority || null;
 
+  // Best-effort extraction for candidate name + current role/title from uploaded docs text.
+  // Kept local (no separate file) per product feedback.
+  const normalizeWhitespace = (s) =>
+    String(s || '')
+      .replace(/ /g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+
+  const stripDecorations = (line) =>
+    normalizeWhitespace(String(line || '').replace(/^[•*\-–—|]+/, '').replace(/[|•]+/g, ' '));
+
+  const isEmailOrPhoneLine = (line) => {
+    const l = String(line || '');
+    return /@/.test(l) || /\b(?:\+?\d[\d\s\-().]{7,}\d)\b/.test(l);
+  };
+
+  const isLikelySectionHeader = (line) =>
+    /^(summary|profile|experience|work experience|employment|education|skills|projects|certifications|contact|objective)$/i.test(
+      String(line || '').trim()
+    );
+
+  const looksLikePersonName = (line) => {
+    const l = stripDecorations(line);
+    if (!l || l.length > 60) return false;
+    if (isEmailOrPhoneLine(l)) return false;
+    if (/[0-9]/.test(l)) return false;
+    if (/[,:]/.test(l)) return false;
+    if (isLikelySectionHeader(l)) return false;
+
+    const tokens = l.split(/\s+/).filter(Boolean);
+    if (tokens.length < 2 || tokens.length > 5) return false;
+
+    const allowedHonorifics = new Set(['mr', 'mrs', 'ms', 'dr', 'prof']);
+    const cleanedTokens = tokens
+      .map((t) => t.replace(/\.$/, ''))
+      .filter((t) => t && !allowedHonorifics.has(t.toLowerCase()));
+
+    if (cleanedTokens.length < 2 || cleanedTokens.length > 4) return false;
+
+    return cleanedTokens.every((t) => /^[A-Za-z][A-Za-z.'-]*$/.test(t));
+  };
+
+  const looksLikeJobTitle = (line) => {
+    const l = stripDecorations(line);
+    if (!l || l.length > 100) return false;
+    if (isEmailOrPhoneLine(l)) return false;
+    if (isLikelySectionHeader(l)) return false;
+    if (/[:@]/.test(l)) return false;
+
+    return /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product|research|scientist)\b/i.test(
+      l
+    );
+  };
+
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map(stripDecorations)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 120);
+
+  const candidateName = (() => {
+    for (const line of lines.slice(0, 25)) {
+      const m = line.match(/^\s*(?:name)\s*[:\-]\s*(.+)\s*$/i);
+      if (m && m[1]) {
+        const candidate = stripDecorations(m[1]);
+        if (looksLikePersonName(candidate)) return candidate;
+      }
+    }
+    for (const line of lines.slice(0, 12)) {
+      if (looksLikePersonName(line)) return stripDecorations(line);
+    }
+    return '';
+  })();
+
+  const currentRole = (() => {
+    for (const line of lines.slice(0, 40)) {
+      const m = line.match(/^\s*(?:title|current\s+role|role|position)\s*[:\-]\s*(.+)\s*$/i);
+      if (m && m[1] && looksLikeJobTitle(m[1])) return stripDecorations(m[1]);
+    }
+
+    const idx = candidateName ? lines.findIndex((l) => stripDecorations(l) === candidateName) : -1;
+    const start = idx >= 0 ? Math.max(0, idx - 1) : 0;
+    const end = idx >= 0 ? Math.min(lines.length, idx + 8) : Math.min(lines.length, 10);
+
+    for (let i = start; i < end; i += 1) {
+      const l = stripDecorations(lines[i]);
+      if (looksLikeJobTitle(l)) return l;
+    }
+
+    return targetRole || 'Professional';
+  })();
+
+  const roleForDisplay = currentRole || targetRole || 'Professional';
+  const nameForDisplay = candidateName || 'Professional';
+
   const draft = {
     schemaVersion: '0.1.0',
-    title: targetRole ? `${targetRole} Persona (Draft)` : 'Professional Persona (Draft)',
+    title: `${nameForDisplay} — ${roleForDisplay} Persona (Draft)`,
     summary:
       'Persona draft generated without an LLM (Claude integration pending). This output is schema-validated JSON.',
     profile: {
-      headline: targetRole || 'Professional',
+      headline: `${nameForDisplay} — ${roleForDisplay}`,
       seniority,
       industry,
       location: null
@@ -352,12 +526,23 @@ async function startOrchestration(input) {
 }
 
 // PUBLIC_INTERFACE
-function linkUploadToBuild(buildId, input) {
+async function linkUploadToBuild(buildId, input) {
   /**
    * Link an existing upload batch (uploadId) and documentIds to a build orchestration.
+   *
+   * Persona Validation hardening:
+   * - Once validation begins (draft exists OR final exists), the document set is locked.
+   * - We must enforce this server-side even across restarts (so we also consult personasRepo).
    */
   const parsed = OrchestrationUploadLinkRequest.parse(input || {});
   const orch = _ensure(buildId);
+
+  await _assertDocumentsMutable({
+    buildId,
+    personaId: orch.personaId ?? null,
+    orchestration: orch,
+    action: 'link'
+  });
 
   // Persist link best-effort; do not block request if DB not configured.
   // Note: fire-and-forget is acceptable here to keep route contract stable and avoid surfacing DB errors.
@@ -375,6 +560,10 @@ async function extractAndNormalizeForBuild(buildId, input) {
    * Load latest extracted text for linked documents from persistence (DB via adapter, memory fallback),
    * then compute a normalized combined text blob.
    *
+   * Persona Validation hardening:
+   * - Once a persona draft has been generated for this build, the set of documents must not change.
+   *   Therefore, this endpoint rejects `documentIds` overrides after `personaDraft` exists.
+   *
    * Behavior:
    * - Reads stored extracted text via documentsRepo.getLatestExtractedText(documentId)
    * - Does NOT attempt ad-hoc extraction here (no file bytes available). This keeps contracts stable:
@@ -384,6 +573,16 @@ async function extractAndNormalizeForBuild(buildId, input) {
    */
   const parsed = OrchestrationExtractRequest.parse(input || {});
   const orch = _ensure(buildId);
+
+  // Disallow changing the document set once validation begins (draft/final exists).
+  if (parsed.documentIds?.length) {
+    await _assertDocumentsMutable({
+      buildId,
+      personaId: orch.personaId ?? null,
+      orchestration: orch,
+      action: 'change'
+    });
+  }
 
   const documentIds = parsed.documentIds?.length ? parsed.documentIds : orch.documentIds;
   if (!documentIds || documentIds.length === 0) {
@@ -402,6 +601,7 @@ async function extractAndNormalizeForBuild(buildId, input) {
     // Still, orchestration will proceed.
   }
 
+  // Load extracted text for ALL linked documents (resume/jd/review when present).
   const { extractedRows, extractedById } = await _loadLatestExtractedTextForDocuments(documentIds);
 
   const combined = _concatTexts(extractedRows);
@@ -498,16 +698,23 @@ async function generatePersonaDraftForBuild(buildId, input) {
     });
 
     // Persist draft (in-memory; adapter supports saveDraft)
+    // Re-generate semantics:
+    // - if createVersion is true, archive the PREVIOUS draft (if present) as a version
+    // - then save the NEW draft as the active draft
     const shouldSaveDraft = parsed.saveDraft ?? Boolean(personaId);
     let savedDraft = null;
     let createdVersion = null;
 
     if (personaId && shouldSaveDraft) {
-      savedDraft = await personasRepo.saveDraft(personaId, personaDraft);
-
       if (parsed.createVersion) {
-        createdVersion = await personasRepo.createPersonaVersion(personaId, { personaJson: personaDraft });
+        const existingDraft = await personasRepo.getDraft(personaId);
+        const existingDraftJson = existingDraft?.draftJson ?? null;
+        if (existingDraftJson) {
+          createdVersion = await personasRepo.createPersonaVersion(personaId, { personaJson: existingDraftJson });
+        }
       }
+
+      savedDraft = await personasRepo.saveDraft(personaId, personaDraft);
     }
 
     await aiRunsRepo.updateAiRun(aiRun.id, {
@@ -694,29 +901,36 @@ async function runAllOrchestration(input) {
         DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW
       );
 
+      // CHANGE (per requirements):
+      // Categories are OPTIONAL. We proceed with whatever categorized docs exist.
+      // We only fail if we can't find ANY documents at all.
       const missing = [];
       if (!latestResume) missing.push(DOCUMENT_CATEGORIES.RESUME);
       if (!latestJd) missing.push(DOCUMENT_CATEGORIES.JOB_DESCRIPTION);
       if (!latestPerf) missing.push(DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW);
 
-      if (missing.length) {
+      const selectedDocs = [latestResume, latestJd, latestPerf].filter(Boolean);
+      if (selectedDocs.length === 0) {
         const err = new Error(
-          `Missing required uploaded documents for categories: ${missing.join(', ')}. Upload these first.`
+          'No uploaded documents found for resume/job_description/performance_review. Upload at least one document or provide documentIds/uploadLink.'
         );
-        err.code = 'MISSING_REQUIRED_CATEGORY_DOCS';
+        err.code = 'NO_CATEGORY_DOCS_AVAILABLE';
         err.httpStatus = 422;
         err.details = { missingCategories: missing };
         throw err;
       }
 
-      const documentIds = [latestResume.id, latestJd.id, latestPerf.id];
+      const documentIds = selectedDocs.map((d) => d.id);
+
+      const categoryDocumentIds = {};
+      if (latestResume) categoryDocumentIds[DOCUMENT_CATEGORIES.RESUME] = latestResume.id;
+      if (latestJd) categoryDocumentIds[DOCUMENT_CATEGORIES.JOB_DESCRIPTION] = latestJd.id;
+      if (latestPerf) categoryDocumentIds[DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW] = latestPerf.id;
+
       orch = _touch(orch, {
         documentIds,
-        categoryDocumentIds: {
-          [DOCUMENT_CATEGORIES.RESUME]: latestResume.id,
-          [DOCUMENT_CATEGORIES.JOB_DESCRIPTION]: latestJd.id,
-          [DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW]: latestPerf.id
-        }
+        categoryDocumentIds,
+        missingCategories: missing
       });
 
       await _bestEffortPersistBuildDocumentsLink(build.id, documentIds);

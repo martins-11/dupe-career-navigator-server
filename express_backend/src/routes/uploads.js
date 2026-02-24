@@ -9,10 +9,7 @@ const { uuidV4 } = require('../utils/uuid');
 const documentsRepo = require('../repositories/documentsRepoAdapter');
 const { extractTextFromUploadedFile } = require('../services/extractionService');
 const { normalizeText } = require('../services/normalizationService');
-const {
-  DOCUMENT_CATEGORY_VALUES,
-  normalizeDocumentCategory
-} = require('../models/documentCategories');
+const { DOCUMENT_CATEGORY_VALUES, normalizeDocumentCategory } = require('../models/documentCategories');
 
 const router = express.Router();
 
@@ -23,19 +20,14 @@ const router = express.Router();
  * - POST /uploads/documents -> { uploadId, receivedFiles, message }
  * - POST /uploads/text      -> { uploadId, receivedFiles, message }
  *
- * Improvements:
- * - Better multi-file validation reporting (structured per-file errors) for:
- *   - file size (413 payload_too_large)
- *   - unsupported types (415 unsupported_media_type)
- * - Enhanced server-side logging for:
- *   - multer parsing/limits issues
- *   - persistence/extraction failures (per file)
+ * Category tagging rules:
+ * - Canonical categories: resume, job_description, performance_review
+ * - Client MAY provide categories via fields (category, categoriesJson, categoryByIndexJson, categoryByOriginalnameJson).
+ * - If client does NOT provide categories, the server classifies documents based on extracted text.
  *
- * Notes:
- * - Multer typically aborts at the first fileFilter/limits error. To provide better UX for
- *   multi-file uploads, we perform a proactive validation pass using `memoryStorage()` to
- *   inspect ALL files and produce an aggregated error payload listing the offending files.
- * - We then persist the files ourselves (write to disk and call existing persistence/extraction).
+ * IMPORTANT CONSTRAINT (per product requirement):
+ * - We MUST NOT infer categories from filename or upload index.
+ * - If classification fails (can't determine required set), return a graceful 400 explaining what went wrong.
  */
 
 // Conservative defaults; can be tuned via env.
@@ -117,17 +109,17 @@ function sha256Hex(buf) {
 }
 
 /**
- * Resolve per-file category using additive request fields.
+ * Resolve per-file category using additive request fields (explicit client tagging).
  *
- * Supported patterns:
+ * Supported patterns (all optional):
  * 1) category (single value): applies to all files
  * 2) categoriesJson: JSON array of category strings aligned with upload order
  * 3) categoryByOriginalnameJson: JSON object { "<originalname>": "<category>" }
  * 4) categoryByIndexJson: JSON object { "0": "resume", "1": "job_description", ... }
  *
- * If none are provided, returns null category.
+ * If none are provided, returns null category (server will classify by extracted text).
  */
-function resolveCategoryForFile(req, file, index) {
+function resolveExplicitCategoryForFile(req, file, index) {
   const single = normalizeDocumentCategory(req.body?.category);
   if (single) return single;
 
@@ -172,18 +164,84 @@ function resolveCategoryForFile(req, file, index) {
 }
 
 /**
- * MVP validation helper: if client supplies `requireCategories=true`, ensure at least
- * one file exists for each of the primary categories.
+ * Classify category based on extracted text.
  *
- * This is additive: default is not required.
+ * This is a lightweight, explainable heuristic classifier (no AI dependency).
+ * Returns:
+ * - category: canonical category string or null
+ * - reasons: array of strings describing scores/why classification failed
  */
-function validateRequiredCategoriesIfRequested(files, requireCategoriesRaw, categoriesByIndex) {
-  const requireCategories = String(requireCategoriesRaw || '').toLowerCase() === 'true';
-  if (!requireCategories) return { ok: true };
+function classifyCategoryFromExtractedText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return { category: null, reasons: ['no_text_extracted'] };
 
+  const lower = raw.toLowerCase();
+
+  const evidence = {
+    resume: 0,
+    job_description: 0,
+    performance_review: 0
+  };
+
+  // Resume signals
+  if (/\bexperience\b/.test(lower)) evidence.resume += 1;
+  if (/\beducation\b/.test(lower)) evidence.resume += 1;
+  if (/\bskills\b/.test(lower)) evidence.resume += 1;
+  if (/\bcertifications?\b/.test(lower)) evidence.resume += 1;
+  if (/\bprofessional summary\b/.test(lower) || /\bsummary\b/.test(lower)) evidence.resume += 1;
+
+  // Job description signals
+  if (/\bresponsibilities\b/.test(lower)) evidence.job_description += 1;
+  if (/\brequirements?\b/.test(lower)) evidence.job_description += 1;
+  if (/\bqualifications?\b/.test(lower)) evidence.job_description += 1;
+  if (/\bwe are looking for\b/.test(lower)) evidence.job_description += 2;
+  if (/\byou will\b/.test(lower) && /\brole\b/.test(lower)) evidence.job_description += 2;
+
+  // Performance review signals
+  if (/\bperformance\b/.test(lower)) evidence.performance_review += 1;
+  if (/\bgoals?\b/.test(lower)) evidence.performance_review += 1;
+  if (/\bstrengths?\b/.test(lower)) evidence.performance_review += 1;
+  if (/\bareas for improvement\b/.test(lower)) evidence.performance_review += 2;
+  if (/\bfeedback\b/.test(lower)) evidence.performance_review += 1;
+  if (/\bmanager\b/.test(lower) && /\bfeedback\b/.test(lower)) evidence.performance_review += 2;
+
+  const scored = Object.entries(evidence).sort((a, b) => b[1] - a[1]);
+  const [topCat, topScore] = scored[0];
+  const [, secondScore] = scored[1];
+
+  // Confidence rule: require >=2 evidence points and strictly above runner-up.
+  if (topScore < 2 || topScore === secondScore) {
+    return {
+      category: null,
+      reasons: ['insufficient_confidence', `scores=${JSON.stringify(evidence)}`]
+    };
+  }
+
+  return {
+    category: topCat,
+    reasons: [`scores=${JSON.stringify(evidence)}`]
+  };
+}
+
+/**
+ * Validate that we have at least one file for each canonical category.
+ * Returns a structured error payload listing which files were categorized as what,
+ * and which files could not be categorized.
+ */
+function validateRequiredCategoriesFromClassification(classificationResults) {
   const present = new Set();
-  for (const c of categoriesByIndex) {
-    if (c) present.add(c);
+  const unclassifiedFiles = [];
+
+  for (const r of classificationResults) {
+    if (r.category) present.add(r.category);
+    else {
+      unclassifiedFiles.push({
+        filename: r.filename,
+        index: r.index,
+        reason: 'could_not_classify_from_text',
+        details: { classificationReasons: r.reasons }
+      });
+    }
   }
 
   const missing = DOCUMENT_CATEGORY_VALUES.filter((c) => !present.has(c));
@@ -193,10 +251,15 @@ function validateRequiredCategoriesIfRequested(files, requireCategoriesRaw, cate
     ok: false,
     error: {
       error: 'validation_error',
-      message: `Missing required document categories: ${missing.join(', ')}`,
+      message: `Unable to determine required document categories from uploaded content. Missing: ${missing.join(
+        ', '
+      )}.`,
       details: {
         requiredCategories: DOCUMENT_CATEGORY_VALUES,
-        receivedCategories: Array.from(present)
+        receivedCategories: Array.from(present),
+        unclassifiedFiles,
+        note:
+          'Please upload one Resume, one Job Description, and one Performance Review. If classification fails, ensure the documents contain recognizable headings (e.g., "Experience", "Responsibilities", "Feedback").'
       }
     }
   };
@@ -217,8 +280,10 @@ function writeUploadToLocalDisk({ originalname, buffer }) {
 }
 
 /**
- * Persist a single uploaded file (metadata + extraction).
+ * Persist a single uploaded file (metadata + extraction + extracted_text).
  * Expects a "memory storage" file object with `.buffer`.
+ *
+ * Returns { doc, extraction, normalizedText }.
  */
 async function persistOneMemoryFile({ file, userId, source, category }) {
   const fileBytes = Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.alloc(0);
@@ -231,7 +296,7 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
     originalFilename: file.originalname,
     mimeType: file.mimetype || null,
 
-    // Additive: category is used by orchestration auto-selection.
+    // Category is used by orchestration auto-selection.
     category: category ?? null,
 
     source: source ?? null,
@@ -250,6 +315,7 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
 
   // Always persist an extracted_text row when we recognize the type (extraction != null),
   // even if the extracted text is empty. This guarantees "one extracted_text row per upload".
+  let normalizedText = '';
   if (extraction) {
     const rawText = extraction.text || '';
     const hasMeaningfulText = Boolean(String(rawText).trim());
@@ -259,13 +325,15 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
       normalizeLineBreaks: true
     });
 
+    normalizedText = hasMeaningfulText ? normalized.text : '';
+
     const warnings = Array.isArray(extraction.warnings) ? extraction.warnings : [];
 
     await documentsRepo.upsertExtractedText(doc.id, {
       extractor: extraction.extractor,
       extractorVersion: extraction.extractorVersion,
       language: extraction.language ?? null,
-      textContent: hasMeaningfulText ? normalized.text : '',
+      textContent: normalizedText,
       metadataJson: {
         ...extraction.metadata,
         warnings,
@@ -279,21 +347,14 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
     });
   }
 
-  return doc;
+  return { doc, extraction, normalizedText };
 }
 
 /**
  * Validate ALL uploaded files and return aggregated offending info.
- * This is what enables multi-file requests to return "which file(s) failed" rather
- * than failing at the first one.
+ * This enables multi-file requests to return "which file(s) failed".
  */
 function validateAllFiles(files) {
-  /**
-   * Structured per-file errors:
-   * - filename
-   * - index (upload order)
-   * - reason (machine-friendly)
-   */
   const tooLarge = [];
   const unsupported = [];
 
@@ -372,7 +433,6 @@ function handleMultiUpload({ routeName, sourceDefault }) {
 
     uploadMemory(req, res, async (err) => {
       if (err) {
-        // Multer-level failures (limits, parsing, etc).
         // eslint-disable-next-line no-console
         console.error(`[uploads:${routeName}] Multer error`, {
           requestId,
@@ -402,7 +462,6 @@ function handleMultiUpload({ routeName, sourceDefault }) {
           .json({ error: 'validation_error', message: 'No files received. Use field name "files".' });
       }
 
-      // Proactive validation to identify all offenders.
       const validation = validateAllFiles(files);
       if (!validation.ok) {
         // eslint-disable-next-line no-console
@@ -418,8 +477,6 @@ function handleMultiUpload({ routeName, sourceDefault }) {
 
       const uploadId = uuidV4();
 
-      // Keep response contract stable; do real persistence within request for MVP.
-      // Store structured per-file failures for warnings response (still 200).
       const perFileFailures = [];
       try {
         const userId = req.body?.userId || null;
@@ -434,34 +491,73 @@ function handleMultiUpload({ routeName, sourceDefault }) {
           source
         });
 
-        // Resolve categories per file (additive semantics).
-        const categoriesByIndex = files.map((f, idx) => resolveCategoryForFile(req, f, idx));
+        // Step 1: For each file, extract text (best-effort), decide category:
+        // - explicit client tag wins
+        // - otherwise classify from extracted text
+        const classifications = [];
+        const persisted = [];
 
-        const requiredCategoryValidation = validateRequiredCategoriesIfRequested(
-          files,
-          req.body?.requireCategories,
-          categoriesByIndex
-        );
-        if (!requiredCategoryValidation.ok) {
-          // eslint-disable-next-line no-console
-          console.warn(`[uploads:${routeName}] Category requirements validation failed`, {
-            requestId,
-            uploadId,
-            error: requiredCategoryValidation.error
-          });
-          return res.status(400).json(requiredCategoryValidation.error);
-        }
-
-        // Persist sequentially to keep memory usage predictable.
         for (let i = 0; i < files.length; i += 1) {
           const file = files[i];
-          const category = categoriesByIndex[i] || null;
+
+          // We want classification to be based on extracted text, which may require actual extraction.
+          // We do a lightweight extraction pass first; persistence does another extraction during persistOneMemoryFile,
+          // but that's acceptable for now to keep changes minimal and avoid refactoring extraction/persistence pipeline.
+          const fileBytes = Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.alloc(0);
+
+          let extraction = null;
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            extraction = await extractTextFromUploadedFile({
+              filename: file.originalname,
+              mimeType: file.mimetype,
+              buffer: fileBytes
+            });
+          } catch (_) {
+            extraction = null;
+          }
+
+          const extractedText = extraction && typeof extraction.text === 'string' ? extraction.text : '';
+
+          const explicit = resolveExplicitCategoryForFile(req, file, i);
+          if (explicit) {
+            classifications[i] = { index: i, filename: file.originalname, category: explicit, reasons: ['explicit'] };
+          } else {
+            const inferred = classifyCategoryFromExtractedText(extractedText);
+            classifications[i] = {
+              index: i,
+              filename: file.originalname,
+              category: inferred.category,
+              reasons: inferred.reasons
+            };
+          }
+        }
+
+        // Step 2: if requireCategories=true, ensure we have at least one of each canonical category.
+        const requireCategories = String(req.body?.requireCategories || '').toLowerCase() === 'true';
+        if (requireCategories) {
+          const requiredCategoryValidation = validateRequiredCategoriesFromClassification(classifications);
+          if (!requiredCategoryValidation.ok) {
+            // eslint-disable-next-line no-console
+            console.warn(`[uploads:${routeName}] Category classification validation failed`, {
+              requestId,
+              uploadId,
+              error: requiredCategoryValidation.error
+            });
+            return res.status(400).json(requiredCategoryValidation.error);
+          }
+        }
+
+        // Step 3: Persist each file with its classified category.
+        for (let i = 0; i < files.length; i += 1) {
+          const file = files[i];
+          const category = classifications[i]?.category || null;
 
           try {
             // eslint-disable-next-line no-await-in-loop
-            await persistOneMemoryFile({ file, userId, source, category });
+            const persistedOne = await persistOneMemoryFile({ file, userId, source, category });
+            persisted.push(persistedOne);
           } catch (persistErr) {
-            // Add structured per-file error response details.
             perFileFailures.push({
               filename: file.originalname,
               index: i,
@@ -492,7 +588,6 @@ function handleMultiUpload({ routeName, sourceDefault }) {
           stack: persistErr?.stack
         });
 
-        // If persistence fails, still return stable response but make message explicit.
         return res.status(200).json({
           uploadId,
           receivedFiles: mapFiles(files),
@@ -502,7 +597,6 @@ function handleMultiUpload({ routeName, sourceDefault }) {
       }
 
       if (perFileFailures.length > 0) {
-        // Preserve current behavior (200 + warning) but include offending file details.
         return res.status(200).json({
           uploadId,
           receivedFiles: mapFiles(files),

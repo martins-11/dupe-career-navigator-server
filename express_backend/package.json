@@ -5,6 +5,8 @@
   "description": "Express backend for professional persona builder (PostgreSQL/AWS RDS placeholders).",
   "main": "src/server.js",
   "scripts": {
+    "prestart": "node scripts/free-port.js",
+    "predev": "node scripts/free-port.js",
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "db:migrate": "node src/db/migrate.js",
