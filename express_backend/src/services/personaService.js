@@ -33,7 +33,7 @@ const PERSONA_SYSTEM_PROMPT = [
   '',
   'CRITICAL INPUT INTERPRETATION RULES',
   '1) Treat the labeled sections as different sources:',
-  '   - RESUME_TEXT: facts about the candidate (education, projects, roles, achievements).',
+  '   - RESUME_TEXT: facts about the candidate (education, work roles/internships, achievements, projects, activities).',
   '   - JOB_DESCRIPTION_TEXT: target role requirements (do NOT claim the candidate has done these unless RESUME_TEXT/REVIEWS provide evidence).',
   '   - PERFORMANCE_REVIEW_TEXT: evidence of impact, outcomes, strengths (if present).',
   '2) Do NOT copy long phrases verbatim. Summarize and synthesize.',
@@ -50,6 +50,7 @@ const PERSONA_SYSTEM_PROMPT = [
   'SCHEMA (STRICT; MUST MATCH EXACTLY)',
   '{',
   '  "professional_summary": string,',
+  '  "career_highlights": string[],',
   '  "core_competencies": string[],',
   '  "work_experience": [',
   '    {',
@@ -81,21 +82,20 @@ const PERSONA_SYSTEM_PROMPT = [
   '}',
   '',
   'FIELD GUIDANCE (QUALITY BAR)',
-  '- professional_summary (2-5 sentences): must read like a real professional summary; include 1-2 concrete proof points (projects, outcomes, competitions, leadership) from RESUME_TEXT/REVIEWS.',
+  '- professional_summary (2-5 sentences): must read like a real professional summary; include 1-2 concrete proof points from RESUME_TEXT/REVIEWS only.',
+  '- career_highlights (REQUIRED; MUST BE NON-EMPTY): 3-6 concise bullet-style strings summarizing the candidate’s most impressive, evidence-based achievements/impact.',
+  '  - These can include projects/hackathons/leadership/awards/certifications and measurable outcomes.',
+  '  - NEVER return an empty array. If evidence is limited, derive highlights from the strongest available facts without inventing new facts.',
   '- core_competencies: 8-14 items max. These are competencies (e.g., "Predictive modeling", "Full-stack web delivery"), not tool dumps.',
-  '- work_experience:',
-  '  - Must contain REAL EXPERIENCE HIGHLIGHTS focused on CONTRIBUTIONS + PROJECTS + IMPACT (not just company/title/duration and not just a list of skills).',
-  '  - Each highlight should answer: What did they do? What project/problem did they work on? What were they good at? What changed because of their work?',
-  '  - Prefer evidence-based statements of actions + outcomes. Good patterns include:',
-  '    "Built/implemented <solution> for <problem/customer>; achieved <measurable result>."',
-  '    "Owned <initiative>; improved <metric> by <amount> through <approach>."',
-  '    "Contributed to <project>; delivered <deliverable>; enabled <impact>."',
-  '  - At least 2 highlights per item when possible.',
-  '  - Avoid empty/low-information highlights like "Worked at X for Y months" or "Responsible for ...". Be specific and impact-oriented.',
-  '  - If formal employment is missing, create entries that represent substantial PROJECTS / HACKATHONS / LEADERSHIP as experience:',
-  '    company can be "Project" or the institution/event; title can be "Project Contributor" / "Hackathon Participant" / "Course Representative" etc.',
+  '- work_experience (drives Key Experiences in the UI):',
+  '  - ONLY include REAL WORK EXPERIENCE such as internships, employment, client work, or clearly defined organizational roles with ongoing responsibilities.',
+  '  - EXCLUDE the following from work_experience (do NOT include them as separate work entries):',
+  '    a) Projects (academic/personal) → use career_highlights instead (or mention inside highlights of a real job/internship if truly part of that role).',
+  '    b) Hackathons / competitions → use career_highlights (or education.notes), NOT work_experience.',
+  '    c) Education / university activities (e.g., course representative, open day volunteering) → use career_highlights and/or education.notes, NOT work_experience.',
+  '  - Each work_experience item should have 2+ highlights when possible, action + outcome oriented.',
   '  - IMPORTANT: Do NOT list technologies or soft skills as highlights (e.g., "Python", "Teamwork"). Those belong in technical_stack/core_competencies.',
-  '- education: include degrees; also include notable certifications/competitions in notes if present.',
+  '- education: include degrees; include notable certifications/competitions/activities in notes if present.',
   '- technical_stack: keep concise; only include technologies actually present in RESUME_TEXT/REVIEWS. Avoid copying JD requirement lists.',
   '',
   'ANTI-REPETITION RULES',
@@ -114,6 +114,11 @@ const personaDraftJsonSchema = {
   additionalProperties: false,
   properties: {
     professional_summary: { type: 'string' },
+    career_highlights: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'string' }
+    },
     core_competencies: {
       type: 'array',
       items: { type: 'string' }
@@ -166,7 +171,14 @@ const personaDraftJsonSchema = {
       required: ['languages', 'frameworks', 'databases', 'cloud_and_devops', 'tools']
     }
   },
-  required: ['professional_summary', 'core_competencies', 'work_experience', 'education', 'technical_stack']
+  required: [
+    'professional_summary',
+    'career_highlights',
+    'core_competencies',
+    'work_experience',
+    'education',
+    'technical_stack'
+  ]
 };
 
 const ajv = new Ajv({ allErrors: true, strict: true });
@@ -457,6 +469,7 @@ async function generatePersonaDraft(extractedText, options = {}) {
     const mock = {
       professional_summary:
         'Mock persona draft (Bedrock not configured or mock requested). This output is strict JSON and schema-validated.',
+      career_highlights: ['Mock highlight (Bedrock not configured).'],
       core_competencies: ['Problem solving', 'Communication', 'Ownership'],
       work_experience: [
         {
@@ -605,7 +618,8 @@ async function createPersonaDraft({ personaDraftJson, alignmentScore = 0 }) {
   if (
     Object.prototype.hasOwnProperty.call(obj, 'professional_summary') ||
     Object.prototype.hasOwnProperty.call(obj, 'core_competencies') ||
-    Object.prototype.hasOwnProperty.call(obj, 'technical_stack')
+    Object.prototype.hasOwnProperty.call(obj, 'technical_stack') ||
+    Object.prototype.hasOwnProperty.call(obj, 'career_highlights')
   ) {
     savedPersonaDraftJson = _assertValidPersonaDraft(obj);
   }
