@@ -694,29 +694,36 @@ async function runAllOrchestration(input) {
         DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW
       );
 
+      // CHANGE (per requirements):
+      // Categories are OPTIONAL. We proceed with whatever categorized docs exist.
+      // We only fail if we can't find ANY documents at all.
       const missing = [];
       if (!latestResume) missing.push(DOCUMENT_CATEGORIES.RESUME);
       if (!latestJd) missing.push(DOCUMENT_CATEGORIES.JOB_DESCRIPTION);
       if (!latestPerf) missing.push(DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW);
 
-      if (missing.length) {
+      const selectedDocs = [latestResume, latestJd, latestPerf].filter(Boolean);
+      if (selectedDocs.length === 0) {
         const err = new Error(
-          `Missing required uploaded documents for categories: ${missing.join(', ')}. Upload these first.`
+          'No uploaded documents found for resume/job_description/performance_review. Upload at least one document or provide documentIds/uploadLink.'
         );
-        err.code = 'MISSING_REQUIRED_CATEGORY_DOCS';
+        err.code = 'NO_CATEGORY_DOCS_AVAILABLE';
         err.httpStatus = 422;
         err.details = { missingCategories: missing };
         throw err;
       }
 
-      const documentIds = [latestResume.id, latestJd.id, latestPerf.id];
+      const documentIds = selectedDocs.map((d) => d.id);
+
+      const categoryDocumentIds = {};
+      if (latestResume) categoryDocumentIds[DOCUMENT_CATEGORIES.RESUME] = latestResume.id;
+      if (latestJd) categoryDocumentIds[DOCUMENT_CATEGORIES.JOB_DESCRIPTION] = latestJd.id;
+      if (latestPerf) categoryDocumentIds[DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW] = latestPerf.id;
+
       orch = _touch(orch, {
         documentIds,
-        categoryDocumentIds: {
-          [DOCUMENT_CATEGORIES.RESUME]: latestResume.id,
-          [DOCUMENT_CATEGORIES.JOB_DESCRIPTION]: latestJd.id,
-          [DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW]: latestPerf.id
-        }
+        categoryDocumentIds,
+        missingCategories: missing
       });
 
       await _bestEffortPersistBuildDocumentsLink(build.id, documentIds);

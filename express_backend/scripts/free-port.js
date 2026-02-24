@@ -62,11 +62,7 @@ function listListeningPidsWithLsof(port) {
   //   lsof -nP -iTCP:<port> -sTCP:LISTEN -t
   // -nP avoids DNS/service name lookups; -t prints only PIDs.
   try {
-    const res = spawnSync(
-      'lsof',
-      ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'],
-      { encoding: 'utf8' }
-    );
+    const res = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' });
     if (res.status !== 0 || !res.stdout) return [];
     return res.stdout
       .split('\n')
