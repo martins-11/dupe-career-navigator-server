@@ -22,12 +22,83 @@ const personaService = require('./personaService');
  * NOTE:
  * - This module stores orchestration-level references in process memory only.
  * - It relies on existing routes/services for the heavy lifting.
+ *
+ * Persona validation hardening:
+ * - Once validation has begun (draft exists OR final exists), document set mutations must be rejected
+ *   server-side (read-only documents post-validation).
+ * - Relying only on in-memory orchestration state is insufficient across restarts; therefore, we also
+ *   consult persisted draft/final blobs via personasRepo when personaId is known.
  */
 
 const _orchestrations = new Map(); // buildId -> orchestration record
 
 function _nowIso() {
   return new Date().toISOString();
+}
+
+/**
+ * Determine whether a build/persona has entered "validation stage" where documents become read-only.
+ *
+ * Rules:
+ * - If orchestration record indicates personaDraft or personaFinal exists -> locked.
+ * - Else, if a personaId is known, consult personasRepo draft/final blobs:
+ *   - draft exists -> locked
+ *   - final exists -> locked
+ *
+ * @param {{ buildId: string, personaId: string|null, orchestration: object|null }} input
+ * @returns {Promise<{locked: boolean, reason: 'draft'|'final'|null}>}
+ */
+async function _isDocumentMutationLocked({ buildId, personaId, orchestration }) {
+  // Fast path: orchestration already has draft/final in memory.
+  if (orchestration?.personaFinal) return { locked: true, reason: 'final' };
+  if (orchestration?.personaDraft) return { locked: true, reason: 'draft' };
+
+  // If no personaId, we can't consult persisted state; treat as unlocked.
+  if (!personaId) return { locked: false, reason: null };
+
+  // Consult persisted draft/final blobs (memory/db via adapter).
+  // If the persona does not exist or these methods aren't supported, adapter will throw or return null.
+  try {
+    const [draft, finalBlob] = await Promise.all([
+      personasRepo.getDraft(personaId),
+      personasRepo.getFinal(personaId)
+    ]);
+
+    if (finalBlob?.finalJson) return { locked: true, reason: 'final' };
+    if (draft?.draftJson) return { locked: true, reason: 'draft' };
+  } catch (err) {
+    // Be conservative: if the persona exists but persistence is temporarily failing, we should not
+    // allow mutations that can invalidate an ongoing validation flow. Reject mutations.
+    const e = new Error(
+      'Unable to verify persona validation state to safely mutate documents. Please retry later.'
+    );
+    e.code = 'DOCUMENT_MUTATION_GUARD_UNAVAILABLE';
+    e.httpStatus = 422;
+    e.details = { buildId, personaId };
+    throw e;
+  }
+
+  return { locked: false, reason: null };
+}
+
+/**
+ * Throws a 422 error if document mutations are not allowed for the given build/persona.
+ *
+ * @param {{ buildId: string, personaId: string|null, orchestration: object|null, action: string }} input
+ * @returns {Promise<void>}
+ */
+async function _assertDocumentsMutable({ buildId, personaId, orchestration, action }) {
+  const { locked, reason } = await _isDocumentMutationLocked({ buildId, personaId, orchestration });
+  if (!locked) return;
+
+  const err = new Error(
+    `Documents are read-only once validation begins (${reason} exists). ` +
+      `Start a new build/persona to ${action} documents.`
+  );
+  err.code = 'DOCUMENTS_READ_ONLY_POST_VALIDATION';
+  err.httpStatus = 422;
+  err.details = { buildId, personaId, lockedReason: reason, action };
+  throw err;
 }
 
 /**
@@ -455,25 +526,23 @@ async function startOrchestration(input) {
 }
 
 // PUBLIC_INTERFACE
-function linkUploadToBuild(buildId, input) {
+async function linkUploadToBuild(buildId, input) {
   /**
    * Link an existing upload batch (uploadId) and documentIds to a build orchestration.
    *
    * Persona Validation hardening:
-   * - Once a persona draft has been generated for this build, the document set is locked.
-   *   Callers must start a new build to use a different set of documents.
+   * - Once validation begins (draft exists OR final exists), the document set is locked.
+   * - We must enforce this server-side even across restarts (so we also consult personasRepo).
    */
   const parsed = OrchestrationUploadLinkRequest.parse(input || {});
   const orch = _ensure(buildId);
 
-  if (orch.personaDraft) {
-    const err = new Error(
-      'Document set is locked after persona draft generation. Start a new build to link a different upload/documents.'
-    );
-    err.code = 'DOCUMENT_SET_LOCKED';
-    err.httpStatus = 422;
-    throw err;
-  }
+  await _assertDocumentsMutable({
+    buildId,
+    personaId: orch.personaId ?? null,
+    orchestration: orch,
+    action: 'link'
+  });
 
   // Persist link best-effort; do not block request if DB not configured.
   // Note: fire-and-forget is acceptable here to keep route contract stable and avoid surfacing DB errors.
@@ -505,14 +574,14 @@ async function extractAndNormalizeForBuild(buildId, input) {
   const parsed = OrchestrationExtractRequest.parse(input || {});
   const orch = _ensure(buildId);
 
-  // Disallow changing the document set after draft generation (validation stage).
-  if (orch.personaDraft && parsed.documentIds?.length) {
-    const err = new Error(
-      'Document set is locked after persona draft generation. Start a new build to use a different set of documents.'
-    );
-    err.code = 'DOCUMENT_SET_LOCKED';
-    err.httpStatus = 422;
-    throw err;
+  // Disallow changing the document set once validation begins (draft/final exists).
+  if (parsed.documentIds?.length) {
+    await _assertDocumentsMutable({
+      buildId,
+      personaId: orch.personaId ?? null,
+      orchestration: orch,
+      action: 'change'
+    });
   }
 
   const documentIds = parsed.documentIds?.length ? parsed.documentIds : orch.documentIds;
