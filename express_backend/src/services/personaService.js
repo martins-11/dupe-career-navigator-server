@@ -29,7 +29,15 @@ const PERSONA_SYSTEM_PROMPT = [
   'You are Claude Sonnet 4.5 running inside an automated backend pipeline for persona draft generation.',
   '',
   'TASK',
-  'Given raw unstructured career text (resume/job descriptions/performance reviews), extract and summarize into a SINGLE JSON object that conforms EXACTLY to the schema below.',
+  'Given raw unstructured career text (RESUME + JOB DESCRIPTION + PERFORMANCE REVIEWS when present), extract and summarize into a SINGLE JSON object that conforms EXACTLY to the schema below.',
+  '',
+  'CRITICAL INPUT INTERPRETATION RULES',
+  '1) Treat the labeled sections as different sources:',
+  '   - RESUME_TEXT: facts about the candidate (education, projects, roles, achievements).',
+  '   - JOB_DESCRIPTION_TEXT: target role requirements (do NOT claim the candidate has done these unless RESUME_TEXT/REVIEWS provide evidence).',
+  '   - PERFORMANCE_REVIEW_TEXT: evidence of impact, outcomes, strengths (if present).',
+  '2) Do NOT copy long phrases verbatim. Summarize and synthesize.',
+  '3) Do NOT invent employers, job titles, dates, or metrics. If unknown, use empty strings.',
   '',
   'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT)',
   '1) Output MUST be valid JSON (RFC 8259).',
@@ -72,12 +80,24 @@ const PERSONA_SYSTEM_PROMPT = [
   '  }',
   '}',
   '',
-  'FIELD GUIDANCE',
-  '- professional_summary: 2-5 sentences, professionally written, grounded in evidence from the input text.',
-  '- core_competencies: concise skill/competency phrases (strings).',
-  '- work_experience: most relevant roles; use empty strings when dates/locations are unknown; highlights should be bullet-style strings.',
-  '- education: include degrees/certifications if present; otherwise empty array.',
-  '- technical_stack: categorize technologies; if unknown, return empty arrays.',
+  'FIELD GUIDANCE (QUALITY BAR)',
+  '- professional_summary (2-5 sentences): must read like a real professional summary; include 1-2 concrete proof points (projects, outcomes, competitions, leadership) from RESUME_TEXT/REVIEWS.',
+  '- core_competencies: 8-14 items max. These are competencies (e.g., "Predictive modeling", "Full-stack web delivery"), not tool dumps.',
+  '- work_experience:',
+  '  - Must contain REAL EXPERIENCE HIGHLIGHTS (not just skills).',
+  '  - Highlights must be evidence-based statements of actions + outcomes. Prefer formats like:',
+  '    "Built <thing> using <approach>; achieved <measurable result/accuracy/latency/users>" or',
+  '    "Led/owned <initiative>; improved <metric>".',
+  '  - At least 2 highlights per item when possible.',
+  '  - If formal employment is missing, create entries that represent substantial PROJECTS / HACKATHONS / LEADERSHIP as experience:',
+  '    company can be "Project" or the institution/event; title can be "Project Contributor" / "Hackathon Participant" / "Course Representative" etc.',
+  '  - IMPORTANT: Do NOT list technologies or soft skills as highlights (e.g., "Python", "Teamwork"). Those belong in technical_stack/core_competencies.',
+  '- education: include degrees; also include notable certifications/competitions in notes if present.',
+  '- technical_stack: keep concise; only include technologies actually present in RESUME_TEXT/REVIEWS. Avoid copying JD requirement lists.',
+  '',
+  'ANTI-REPETITION RULES',
+  '- Avoid repeating the same sentence structure across highlights.',
+  '- Avoid repeating the exact same highlight text across multiple items.',
   '',
   'OUTPUT NOW: JSON ONLY.'
 ].join('\n');
@@ -292,9 +312,64 @@ function _assertValidPersonaDraft(obj) {
  * - input: { modelId, system: [{text}], messages: [{role, content:[{text}]}], inferenceConfig }
  */
 function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
+  // Best-effort labeler:
+  // - Orchestration concatenates documents with "-----"
+  // - Some sources include "JOB DESCRIPTION" headings
+  // We label sections to prevent JD requirements being treated as candidate experience.
+  const text = String(extractedText || '').trim();
+
+  const parts = text
+    .split(/\n\s*-----\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  let resumeText = '';
+  let jobDescriptionText = '';
+  let performanceReviewText = '';
+  const otherTexts = [];
+
+  for (const p of parts) {
+    const lower = p.toLowerCase();
+
+    if (!resumeText && /\b(educational qualification|education|projects|certifications|skills)\b/.test(lower)) {
+      resumeText = p;
+      continue;
+    }
+    if (!jobDescriptionText && /\bjob description\b/.test(lower)) {
+      jobDescriptionText = p;
+      continue;
+    }
+    if (!performanceReviewText && /\bperformance review\b/.test(lower)) {
+      performanceReviewText = p;
+      continue;
+    }
+
+    otherTexts.push(p);
+  }
+
+  // Fallback: if we couldn't detect sections, treat the whole thing as resume-like source of truth.
+  if (!resumeText && !jobDescriptionText && !performanceReviewText) {
+    resumeText = text;
+  }
+
+  // A per-run variation hint. The model must not include this value in JSON output.
+  const generationId = new Date().toISOString();
+
   const userContent = [
-    'INPUT TEXT (unstructured):',
-    extractedText,
+    'GENERATION_ID (variation hint; DO NOT include this value in the JSON):',
+    generationId,
+    '',
+    'RESUME_TEXT (candidate facts; source of truth):',
+    resumeText || '',
+    '',
+    'JOB_DESCRIPTION_TEXT (target role requirements; do NOT claim as candidate experience unless supported by RESUME_TEXT/REVIEWS):',
+    jobDescriptionText || '',
+    '',
+    'PERFORMANCE_REVIEW_TEXT (evidence of impact/outcomes; may be empty):',
+    performanceReviewText || '',
+    ...(otherTexts.length
+      ? ['', 'OTHER_INPUT_TEXT (unclassified; treat cautiously):', otherTexts.join('\n\n-----\n\n')]
+      : []),
     '',
     'OPTIONAL CONTEXT (may be empty JSON):',
     JSON.stringify(context || {}, null, 2)
@@ -310,8 +385,11 @@ function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
       }
     ],
     inferenceConfig: {
-      maxTokens: 1200,
-      temperature: 0.2
+      // Allow slightly longer outputs so we can fit experience highlights with outcomes/metrics.
+      maxTokens: 1400,
+      // Slightly higher temperature reduces identical outputs between runs.
+      // Schema validation remains the guardrail for correctness.
+      temperature: 0.45
     }
   };
 }
@@ -319,11 +397,9 @@ function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
 function _getBedrockClient() {
   const region = _env('AWS_REGION');
   if (!region) {
-    throw _jsonError(
-      'AWS_REGION_MISSING',
-      'AWS_REGION env var is required to call AWS Bedrock.',
-      { requiredEnv: ['AWS_REGION', 'BEDROCK_MODEL_ID'] }
-    );
+    throw _jsonError('AWS_REGION_MISSING', 'AWS_REGION env var is required to call AWS Bedrock.', {
+      requiredEnv: ['AWS_REGION', 'BEDROCK_MODEL_ID']
+    });
   }
 
   // Credentials are resolved via the default provider chain:
@@ -565,10 +641,7 @@ async function finalizePersona(draftId) {
 
   const engine = getDbEngine();
   if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) {
-    const err = _jsonError(
-      'DB_NOT_CONFIGURED',
-      'Database is not configured for finalizePersona (requires MySQL).'
-    );
+    const err = _jsonError('DB_NOT_CONFIGURED', 'Database is not configured for finalizePersona (requires MySQL).');
     err.httpStatus = 503;
     throw err;
   }
