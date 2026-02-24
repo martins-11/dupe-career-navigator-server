@@ -134,62 +134,103 @@ function makePlaceholderPersona({ sourceText, context }) {
  */
 function mapV2PersonaToLegacyPersona(v2Persona, sourceText, context) {
   const text = String(sourceText || '').trim();
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(0, 80); // keep heuristic work bounded
 
-  /**
-   * Best-effort extraction for:
-   * - Candidate name
-   * - Candidate current role/title
-   *
-   * Important: if we cannot confidently infer, return blank (frontend will leave space blank).
-   */
-  const emailOrPhoneLine = (l) => /@|\b(?:\+?\d[\d\s\-().]{7,}\d)\b/.test(l);
-  const looksLikeName = (l) => {
-    // 2-4 tokens, letters only (with ./'-), Title Case-ish, and not an email/phone line
-    if (!l || l.length > 60) return false;
-    if (emailOrPhoneLine(l)) return false;
-    if (/[0-9]/.test(l)) return false;
-    if (/[,:]/.test(l)) return false;
-    const tokens = l.split(/\s+/).filter(Boolean);
-    if (tokens.length < 2 || tokens.length > 4) return false;
-    // avoid common section headers
-    if (/^(summary|profile|experience|work experience|education|skills|projects|certifications)$/i.test(l)) {
-      return false;
-    }
-    return tokens.every((t) => /^[A-Za-z][A-Za-z.'-]*$/.test(t));
+  // Best-effort extraction for candidate name + current role/title.
+  // Kept local (no separate file) per product feedback.
+  const normalizeWhitespace = (s) =>
+    String(s || '')
+      .replace(/ /g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+
+  const stripDecorations = (line) =>
+    normalizeWhitespace(String(line || '').replace(/^[•*\-–—|]+/, '').replace(/[|•]+/g, ' '));
+
+  const isEmailOrPhoneLine = (line) => {
+    const l = String(line || '');
+    return /@/.test(l) || /\b(?:\+?\d[\d\s\-().]{7,}\d)\b/.test(l);
   };
 
-  const looksLikeTitle = (l) => {
-    if (!l || l.length > 80) return false;
-    if (emailOrPhoneLine(l)) return false;
-    if (/^(summary|profile|experience|work experience|education|skills|projects|certifications)$/i.test(l)) {
-      return false;
-    }
-    // Titles often contain these keywords (not exhaustive)
-    return /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product)\b/i.test(
+  const isLikelySectionHeader = (line) =>
+    /^(summary|profile|experience|work experience|employment|education|skills|projects|certifications|contact|objective)$/i.test(
+      String(line || '').trim()
+    );
+
+  const looksLikePersonName = (line) => {
+    const l = stripDecorations(line);
+    if (!l || l.length > 60) return false;
+    if (isEmailOrPhoneLine(l)) return false;
+    if (/[0-9]/.test(l)) return false;
+    if (/[,:]/.test(l)) return false;
+    if (isLikelySectionHeader(l)) return false;
+
+    const tokens = l.split(/\s+/).filter(Boolean);
+    if (tokens.length < 2 || tokens.length > 5) return false;
+
+    const allowedHonorifics = new Set(['mr', 'mrs', 'ms', 'dr', 'prof']);
+    const cleanedTokens = tokens
+      .map((t) => t.replace(/\.$/, ''))
+      .filter((t) => t && !allowedHonorifics.has(t.toLowerCase()));
+
+    if (cleanedTokens.length < 2 || cleanedTokens.length > 4) return false;
+
+    return cleanedTokens.every((t) => /^[A-Za-z][A-Za-z.'-]*$/.test(t));
+  };
+
+  const looksLikeJobTitle = (line) => {
+    const l = stripDecorations(line);
+    if (!l || l.length > 100) return false;
+    if (isEmailOrPhoneLine(l)) return false;
+    if (isLikelySectionHeader(l)) return false;
+    if (/[:@]/.test(l)) return false;
+
+    return /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product|research|scientist)\b/i.test(
       l
     );
   };
 
-  // Find first plausible name near the top.
-  const inferredName = (() => {
-    for (let i = 0; i < Math.min(lines.length, 12); i += 1) {
-      if (looksLikeName(lines[i])) return lines[i];
+  const lines = text
+    .split(/\r?\n/)
+    .map(stripDecorations)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 120);
+
+  const candidateName = (() => {
+    // Prefer explicit "Name: X"
+    for (const line of lines.slice(0, 25)) {
+      const m = line.match(/^\s*(?:name)\s*[:\-]\s*(.+)\s*$/i);
+      if (m && m[1]) {
+        const candidate = stripDecorations(m[1]);
+        if (looksLikePersonName(candidate)) return candidate;
+      }
+    }
+
+    // Otherwise, first plausible name in top ~12 lines
+    for (const line of lines.slice(0, 12)) {
+      if (looksLikePersonName(line)) return stripDecorations(line);
     }
     return '';
   })();
 
-  // Find a plausible title near the inferred name line; else fallback to context.targetRole; else blank.
-  const inferredTitle = (() => {
-    const startIdx = inferredName ? Math.max(0, lines.indexOf(inferredName) - 1) : 0;
-    for (let i = startIdx; i < Math.min(lines.length, startIdx + 8); i += 1) {
-      if (looksLikeTitle(lines[i])) return lines[i];
+  const currentRole = (() => {
+    // Prefer explicit "Title:" / "Current Role:" etc
+    for (const line of lines.slice(0, 40)) {
+      const m = line.match(/^\s*(?:title|current\s+role|role|position)\s*[:\-]\s*(.+)\s*$/i);
+      if (m && m[1] && looksLikeJobTitle(m[1])) return stripDecorations(m[1]);
     }
-    return context?.targetRole || '';
+
+    // Otherwise look near the name line
+    const idx = candidateName ? lines.findIndex((l) => stripDecorations(l) === candidateName) : -1;
+    const start = idx >= 0 ? Math.max(0, idx - 1) : 0;
+    const end = idx >= 0 ? Math.min(lines.length, idx + 8) : Math.min(lines.length, 10);
+
+    for (let i = start; i < end; i += 1) {
+      const l = stripDecorations(lines[i]);
+      if (looksLikeJobTitle(l)) return l;
+    }
+
+    return (context && context.targetRole ? String(context.targetRole) : '') || '';
   })();
 
   const professionalSummary =
@@ -221,8 +262,8 @@ function mapV2PersonaToLegacyPersona(v2Persona, sourceText, context) {
   const experience_years = yearsMatch ? Number.parseInt(yearsMatch[1], 10) : 5;
 
   return {
-    full_name: inferredName,
-    professional_title: inferredTitle,
+    full_name: candidateName,
+    professional_title: currentRole,
     mastery_skills,
     growth_areas,
     experience_years: Number.isInteger(experience_years) ? experience_years : 5,

@@ -281,17 +281,115 @@ function _makePlaceholderPersona({ sourceText, context }) {
   if (/\baws\b/.test(lower)) maybeSkills.push('AWS');
   if (/\bpython\b/.test(lower)) maybeSkills.push('Python');
 
+  const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+
   const targetRole = context?.targetRole || null;
   const industry = context?.industry || null;
   const seniority = context?.seniority || null;
 
+  // Best-effort extraction for candidate name + current role/title from uploaded docs text.
+  // Kept local (no separate file) per product feedback.
+  const normalizeWhitespace = (s) =>
+    String(s || '')
+      .replace(/ /g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+
+  const stripDecorations = (line) =>
+    normalizeWhitespace(String(line || '').replace(/^[•*\-–—|]+/, '').replace(/[|•]+/g, ' '));
+
+  const isEmailOrPhoneLine = (line) => {
+    const l = String(line || '');
+    return /@/.test(l) || /\b(?:\+?\d[\d\s\-().]{7,}\d)\b/.test(l);
+  };
+
+  const isLikelySectionHeader = (line) =>
+    /^(summary|profile|experience|work experience|employment|education|skills|projects|certifications|contact|objective)$/i.test(
+      String(line || '').trim()
+    );
+
+  const looksLikePersonName = (line) => {
+    const l = stripDecorations(line);
+    if (!l || l.length > 60) return false;
+    if (isEmailOrPhoneLine(l)) return false;
+    if (/[0-9]/.test(l)) return false;
+    if (/[,:]/.test(l)) return false;
+    if (isLikelySectionHeader(l)) return false;
+
+    const tokens = l.split(/\s+/).filter(Boolean);
+    if (tokens.length < 2 || tokens.length > 5) return false;
+
+    const allowedHonorifics = new Set(['mr', 'mrs', 'ms', 'dr', 'prof']);
+    const cleanedTokens = tokens
+      .map((t) => t.replace(/\.$/, ''))
+      .filter((t) => t && !allowedHonorifics.has(t.toLowerCase()));
+
+    if (cleanedTokens.length < 2 || cleanedTokens.length > 4) return false;
+
+    return cleanedTokens.every((t) => /^[A-Za-z][A-Za-z.'-]*$/.test(t));
+  };
+
+  const looksLikeJobTitle = (line) => {
+    const l = stripDecorations(line);
+    if (!l || l.length > 100) return false;
+    if (isEmailOrPhoneLine(l)) return false;
+    if (isLikelySectionHeader(l)) return false;
+    if (/[:@]/.test(l)) return false;
+
+    return /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product|research|scientist)\b/i.test(
+      l
+    );
+  };
+
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map(stripDecorations)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 120);
+
+  const candidateName = (() => {
+    for (const line of lines.slice(0, 25)) {
+      const m = line.match(/^\s*(?:name)\s*[:\-]\s*(.+)\s*$/i);
+      if (m && m[1]) {
+        const candidate = stripDecorations(m[1]);
+        if (looksLikePersonName(candidate)) return candidate;
+      }
+    }
+    for (const line of lines.slice(0, 12)) {
+      if (looksLikePersonName(line)) return stripDecorations(line);
+    }
+    return '';
+  })();
+
+  const currentRole = (() => {
+    for (const line of lines.slice(0, 40)) {
+      const m = line.match(/^\s*(?:title|current\s+role|role|position)\s*[:\-]\s*(.+)\s*$/i);
+      if (m && m[1] && looksLikeJobTitle(m[1])) return stripDecorations(m[1]);
+    }
+
+    const idx = candidateName ? lines.findIndex((l) => stripDecorations(l) === candidateName) : -1;
+    const start = idx >= 0 ? Math.max(0, idx - 1) : 0;
+    const end = idx >= 0 ? Math.min(lines.length, idx + 8) : Math.min(lines.length, 10);
+
+    for (let i = start; i < end; i += 1) {
+      const l = stripDecorations(lines[i]);
+      if (looksLikeJobTitle(l)) return l;
+    }
+
+    return targetRole || 'Professional';
+  })();
+
+  const roleForDisplay = currentRole || targetRole || 'Professional';
+  const nameForDisplay = candidateName || 'Professional';
+
   const draft = {
     schemaVersion: '0.1.0',
-    title: targetRole ? `${targetRole} Persona (Draft)` : 'Professional Persona (Draft)',
+    title: `${nameForDisplay} — ${roleForDisplay} Persona (Draft)`,
     summary:
       'Persona draft generated without an LLM (Claude integration pending). This output is schema-validated JSON.',
     profile: {
-      headline: targetRole || 'Professional',
+      headline: `${nameForDisplay} — ${roleForDisplay}`,
       seniority,
       industry,
       location: null
@@ -498,16 +596,23 @@ async function generatePersonaDraftForBuild(buildId, input) {
     });
 
     // Persist draft (in-memory; adapter supports saveDraft)
+    // Re-generate semantics:
+    // - if createVersion is true, archive the PREVIOUS draft (if present) as a version
+    // - then save the NEW draft as the active draft
     const shouldSaveDraft = parsed.saveDraft ?? Boolean(personaId);
     let savedDraft = null;
     let createdVersion = null;
 
     if (personaId && shouldSaveDraft) {
-      savedDraft = await personasRepo.saveDraft(personaId, personaDraft);
-
       if (parsed.createVersion) {
-        createdVersion = await personasRepo.createPersonaVersion(personaId, { personaJson: personaDraft });
+        const existingDraft = await personasRepo.getDraft(personaId);
+        const existingDraftJson = existingDraft?.draftJson ?? null;
+        if (existingDraftJson) {
+          createdVersion = await personasRepo.createPersonaVersion(personaId, { personaJson: existingDraftJson });
+        }
       }
+
+      savedDraft = await personasRepo.saveDraft(personaId, personaDraft);
     }
 
     await aiRunsRepo.updateAiRun(aiRun.id, {
