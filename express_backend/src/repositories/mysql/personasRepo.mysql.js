@@ -191,11 +191,135 @@ async function getLatestPersonaVersion(personaId) {
   return res.rows[0] || null;
 }
 
+/**
+ * Draft/final persistence (epic requirement)
+ *
+ * These tables are separate from the personas/persona_versions history:
+ * - persona_drafts(id, persona_draft_json, alignment_score, created_at)
+ * - persona_final(id, persona_final_json, alignment_score, created_at)
+ *
+ * The adapter layer (personasRepoAdapter) will call these methods when available.
+ */
+
+// PUBLIC_INTERFACE
+async function saveDraft(personaId, draftJson) {
+  /** Save a persona draft JSON blob to MySQL persona_drafts, returning a small payload. */
+  const id = uuidV4();
+
+  await dbQuery(
+    `
+    INSERT INTO persona_drafts (id, persona_draft_json, alignment_score, created_at)
+    VALUES (?,?,?,?)
+    `,
+    [id, JSON.stringify(draftJson ?? {}), 0, new Date()]
+  );
+
+  return {
+    personaId,
+    draftId: id,
+    draftJson,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+// PUBLIC_INTERFACE
+async function getDraft(personaId) {
+  /** Get the latest saved draft for a persona. (Best-effort mapping; personaId isn't stored in table.) */
+  // Schema note: persona_drafts table doesn't include persona_id in this scaffold.
+  // Minimal behavior: return the latest draft row overall.
+  const res = await dbQuery(
+    `
+    SELECT id, persona_draft_json as draftJson, created_at as createdAt
+    FROM persona_drafts
+    ORDER BY created_at DESC
+    LIMIT 1
+    `
+  );
+
+  const row = res.rows[0] || null;
+  if (!row) return null;
+
+  let draftJson = row.draftJson;
+  if (typeof draftJson === 'string') {
+    try {
+      draftJson = JSON.parse(draftJson);
+    } catch (_) {
+      // leave as string if parsing fails
+    }
+  }
+
+  return {
+    personaId,
+    draftId: row.id,
+    draftJson,
+    updatedAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString()
+  };
+}
+
+// PUBLIC_INTERFACE
+async function saveFinal(personaId, finalJson) {
+  /** Save a persona final JSON blob to MySQL persona_final, returning a small payload. */
+  const id = uuidV4();
+
+  await dbQuery(
+    `
+    INSERT INTO persona_final (id, persona_final_json, alignment_score, created_at)
+    VALUES (?,?,?,?)
+    `,
+    [id, JSON.stringify(finalJson ?? {}), 0, new Date()]
+  );
+
+  return {
+    personaId,
+    finalId: id,
+    finalJson,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+// PUBLIC_INTERFACE
+async function getFinal(personaId) {
+  /** Get the latest saved final for a persona. (Best-effort mapping; personaId isn't stored in table.) */
+  // Schema note: persona_final table doesn't include persona_id in this scaffold.
+  // Minimal behavior: return the latest final row overall.
+  const res = await dbQuery(
+    `
+    SELECT id, persona_final_json as finalJson, created_at as createdAt
+    FROM persona_final
+    ORDER BY created_at DESC
+    LIMIT 1
+    `
+  );
+
+  const row = res.rows[0] || null;
+  if (!row) return null;
+
+  let finalJson = row.finalJson;
+  if (typeof finalJson === 'string') {
+    try {
+      finalJson = JSON.parse(finalJson);
+    } catch (_) {
+      // leave as string if parsing fails
+    }
+  }
+
+  return {
+    personaId,
+    finalId: row.id,
+    finalJson,
+    updatedAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString()
+  };
+}
+
 module.exports = {
   createPersona,
   getPersonaById,
   updatePersona,
   createPersonaVersion,
   listPersonaVersions,
-  getLatestPersonaVersion
+  getLatestPersonaVersion,
+  saveDraft,
+  getDraft,
+  saveFinal,
+  getFinal
 };
