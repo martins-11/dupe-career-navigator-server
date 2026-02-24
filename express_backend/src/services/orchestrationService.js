@@ -154,6 +154,11 @@ const OrchestrationUploadLinkRequest = z.object({
 
 const OrchestrationExtractRequest = z.object({
   // If omitted, uses linked documents from build orchestration.
+  //
+  // IMPORTANT (persona validation hardening):
+  // After a build has produced a personaDraft (i.e., user is in validation/edit flow),
+  // we disallow changing the document set for that build via this endpoint.
+  // Document selection should happen only during ingestion/upload.
   documentIds: z.array(z.string().uuid()).optional(),
   // Normalize options
   normalize: z
@@ -453,9 +458,22 @@ async function startOrchestration(input) {
 function linkUploadToBuild(buildId, input) {
   /**
    * Link an existing upload batch (uploadId) and documentIds to a build orchestration.
+   *
+   * Persona Validation hardening:
+   * - Once a persona draft has been generated for this build, the document set is locked.
+   *   Callers must start a new build to use a different set of documents.
    */
   const parsed = OrchestrationUploadLinkRequest.parse(input || {});
   const orch = _ensure(buildId);
+
+  if (orch.personaDraft) {
+    const err = new Error(
+      'Document set is locked after persona draft generation. Start a new build to link a different upload/documents.'
+    );
+    err.code = 'DOCUMENT_SET_LOCKED';
+    err.httpStatus = 422;
+    throw err;
+  }
 
   // Persist link best-effort; do not block request if DB not configured.
   // Note: fire-and-forget is acceptable here to keep route contract stable and avoid surfacing DB errors.
@@ -473,6 +491,10 @@ async function extractAndNormalizeForBuild(buildId, input) {
    * Load latest extracted text for linked documents from persistence (DB via adapter, memory fallback),
    * then compute a normalized combined text blob.
    *
+   * Persona Validation hardening:
+   * - Once a persona draft has been generated for this build, the set of documents must not change.
+   *   Therefore, this endpoint rejects `documentIds` overrides after `personaDraft` exists.
+   *
    * Behavior:
    * - Reads stored extracted text via documentsRepo.getLatestExtractedText(documentId)
    * - Does NOT attempt ad-hoc extraction here (no file bytes available). This keeps contracts stable:
@@ -482,6 +504,16 @@ async function extractAndNormalizeForBuild(buildId, input) {
    */
   const parsed = OrchestrationExtractRequest.parse(input || {});
   const orch = _ensure(buildId);
+
+  // Disallow changing the document set after draft generation (validation stage).
+  if (orch.personaDraft && parsed.documentIds?.length) {
+    const err = new Error(
+      'Document set is locked after persona draft generation. Start a new build to use a different set of documents.'
+    );
+    err.code = 'DOCUMENT_SET_LOCKED';
+    err.httpStatus = 422;
+    throw err;
+  }
 
   const documentIds = parsed.documentIds?.length ? parsed.documentIds : orch.documentIds;
   if (!documentIds || documentIds.length === 0) {
@@ -500,6 +532,7 @@ async function extractAndNormalizeForBuild(buildId, input) {
     // Still, orchestration will proceed.
   }
 
+  // Load extracted text for ALL linked documents (resume/jd/review when present).
   const { extractedRows, extractedById } = await _loadLatestExtractedTextForDocuments(documentIds);
 
   const combined = _concatTexts(extractedRows);
