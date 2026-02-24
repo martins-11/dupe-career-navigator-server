@@ -343,6 +343,10 @@ async function generatePersonaDraft(extractedText, options = {}) {
    * - AI failure hardening: if Bedrock call fails OR output is malformed JSON, return structured fallback:
    *     { error: "AI_GENERATION_FAILED", retryable: true }
    *
+   * Additional behavior (product requirement):
+   * - Best-effort extract the user's name from the source text and populate it when present.
+   * - Extract role/title ONLY when confidently present; otherwise keep role blank.
+   *
    * @param {string} extractedText - Combined extracted/normalized text from documents.
    * @param {{ context?: object, preferMock?: boolean }} [options]
    * @returns {Promise<{persona: object, mode: 'bedrock'|'mock', warnings: string[]} | {error: string, retryable: boolean}>}
@@ -364,9 +368,13 @@ async function generatePersonaDraft(extractedText, options = {}) {
   const preferMock = Boolean(options.preferMock);
   const modelId = _env('BEDROCK_MODEL_ID');
 
+  const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+
   // If explicitly requested OR model isn't configured, fall back to mock.
   // Note: input-length validation still applies (above) to prevent persisting nonsense even in mock mode.
   if (preferMock || !modelId) {
+    const extracted = extractNameAndCurrentRole(text);
+
     const mock = {
       professional_summary:
         'Mock persona draft (Bedrock not configured or mock requested). This output is strict JSON and schema-validated.',
@@ -391,7 +399,17 @@ async function generatePersonaDraft(extractedText, options = {}) {
       }
     };
 
-    return { persona: _assertValidPersonaDraft(mock), mode: 'mock', warnings: ['Mock mode used.'] };
+    // NOTE: We keep strict schema validation for the Bedrock-backed persona shape,
+    // but we can still attach additional top-level fields for client display.
+    // Role is intentionally left blank when not confidently found.
+    const validated = _assertValidPersonaDraft(mock);
+    const enriched = {
+      ...validated,
+      full_name: extracted.name || '',
+      current_role: extracted.role || ''
+    };
+
+    return { persona: enriched, mode: 'mock', warnings: ['Mock mode used.'] };
   }
 
   const client = _getBedrockClient();
@@ -442,7 +460,20 @@ async function generatePersonaDraft(extractedText, options = {}) {
   try {
     const rawObj = parsed.value && typeof parsed.value === 'object' ? parsed.value : {};
     const persona = _assertValidPersonaDraft(rawObj);
-    return { persona, mode: 'bedrock', warnings: [] };
+
+    const extracted = extractNameAndCurrentRole(text);
+
+    // Attach name/role for UI display and downstream mapping.
+    // IMPORTANT:
+    // - Name should be populated when present in uploads.
+    // - Role MUST be blank when not confidently found (no guessing).
+    const enriched = {
+      ...persona,
+      full_name: extracted.name || '',
+      current_role: extracted.role || ''
+    };
+
+    return { persona: enriched, mode: 'bedrock', warnings: [] };
   } catch (_) {
     // Schema validation failure counts as malformed output -> fallback.
     return { error: 'AI_GENERATION_FAILED', retryable: true };
