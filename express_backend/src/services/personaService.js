@@ -24,6 +24,9 @@ const Ajv = require('ajv');
  * Pivot note:
  * - Ignore any prior "3/2 rule" / "alignment scores" requirements.
  * - Output must be JSON only, strictly matching the persona_draft_json schema below.
+ *
+ * Product decision:
+ * - The frontend no longer shows "Key Experiences", so this prompt/schema does NOT include a work_experience field.
  */
 const PERSONA_SYSTEM_PROMPT = [
   'You are Claude Sonnet 4.5 running inside an automated backend pipeline for persona draft generation.',
@@ -52,16 +55,6 @@ const PERSONA_SYSTEM_PROMPT = [
   '  "professional_summary": string,',
   '  "career_highlights": string[],',
   '  "core_competencies": string[],',
-  '  "work_experience": [',
-  '    {',
-  '      "company": string,',
-  '      "title": string,',
-  '      "start_date": string,',
-  '      "end_date": string,',
-  '      "location": string,',
-  '      "highlights": string[]',
-  '    }',
-  '  ],',
   '  "education": [',
   '    {',
   '      "institution": string,',
@@ -84,21 +77,16 @@ const PERSONA_SYSTEM_PROMPT = [
   'FIELD GUIDANCE (QUALITY BAR)',
   '- professional_summary (2-5 sentences): must read like a real professional summary; include 1-2 concrete proof points from RESUME_TEXT/REVIEWS only.',
   '- career_highlights (REQUIRED; MUST BE NON-EMPTY): 3-6 concise bullet-style strings summarizing the candidate’s most impressive, evidence-based achievements/impact.',
+  '  - Must be written as CONTRIBUTION + IMPACT (what they did + outcome).',
+  '  - When a highlight describes contribution/impact, it MUST be linked to real experience evidence from RESUME_TEXT and/or PERFORMANCE_REVIEW_TEXT (never from JOB_DESCRIPTION_TEXT).',
   '  - DO NOT include certifications, certificate names, training courses, or exam completions as career_highlights.',
+  '  - EXCLUDE generic role requirements copied from the job description; only include what the candidate actually did.',
   '  - Prefer impact/outcome phrasing: action → scope → result (metrics only when explicitly present in RESUME_TEXT/REVIEWS).',
   '  - STRICT ANTI-COPY RULE: Do not reuse resume bullet wording. Paraphrase heavily: change phrasing and structure; do not copy 6+ consecutive words from the input.',
   '  - Source discipline: candidate claims MUST come from RESUME_TEXT and/or PERFORMANCE_REVIEW_TEXT only (JOB_DESCRIPTION_TEXT is requirements, not evidence).',
   '  - NEVER return an empty array. If evidence is limited, derive highlights from the strongest available facts without inventing new facts.',
   '- core_competencies: 8-14 items max. These are competencies (e.g., "Predictive modeling", "Full-stack web delivery"), not tool dumps.',
-  '- work_experience (drives Key Experiences in the UI):',
-  '  - ONLY include REAL WORK EXPERIENCE such as internships, employment, client work, or clearly defined organizational roles with ongoing responsibilities.',
-  '  - EXCLUDE the following from work_experience (do NOT include them as separate work entries):',
-  '    a) Projects (academic/personal) → use career_highlights instead (or mention inside highlights of a real job/internship if truly part of that role).',
-  '    b) Hackathons / competitions → use career_highlights (or education.notes), NOT work_experience.',
-  '    c) Education / university activities (e.g., course representative, open day volunteering) → use career_highlights and/or education.notes, NOT work_experience.',
-  '  - Each work_experience item should have 2+ highlights when possible, action + outcome oriented.',
-  '  - IMPORTANT: Do NOT list technologies or soft skills as highlights (e.g., "Python", "Teamwork"). Those belong in technical_stack/core_competencies.',
-  '- education: include degrees; include notable certifications/competitions/activities in notes if present.',
+  '- education: include degrees; include notable competitions/activities in notes if present.',
   '- technical_stack: keep concise; only include technologies actually present in RESUME_TEXT/REVIEWS. Avoid copying JD requirement lists.',
   '',
   'ANTI-REPETITION RULES',
@@ -111,6 +99,9 @@ const PERSONA_SYSTEM_PROMPT = [
 /**
  * Strict JSON schema for generated persona drafts.
  * (additionalProperties=false enforces no extra keys)
+ *
+ * NOTE:
+ * - work_experience is intentionally excluded because the UI no longer renders "Key Experiences".
  */
 const personaDraftJsonSchema = {
   type: 'object',
@@ -125,25 +116,6 @@ const personaDraftJsonSchema = {
     core_competencies: {
       type: 'array',
       items: { type: 'string' }
-    },
-    work_experience: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          company: { type: 'string' },
-          title: { type: 'string' },
-          start_date: { type: 'string' },
-          end_date: { type: 'string' },
-          location: { type: 'string' },
-          highlights: {
-            type: 'array',
-            items: { type: 'string' }
-          }
-        },
-        required: ['company', 'title', 'start_date', 'end_date', 'location', 'highlights']
-      }
     },
     education: {
       type: 'array',
@@ -174,14 +146,7 @@ const personaDraftJsonSchema = {
       required: ['languages', 'frameworks', 'databases', 'cloud_and_devops', 'tools']
     }
   },
-  required: [
-    'professional_summary',
-    'career_highlights',
-    'core_competencies',
-    'work_experience',
-    'education',
-    'technical_stack'
-  ]
+  required: ['professional_summary', 'career_highlights', 'core_competencies', 'education', 'technical_stack']
 };
 
 const ajv = new Ajv({ allErrors: true, strict: true });
@@ -403,7 +368,7 @@ function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
       }
     ],
     inferenceConfig: {
-      // Allow slightly longer outputs so we can fit experience highlights with outcomes/metrics.
+      // Allow slightly longer outputs so we can fit strong, evidence-based highlights.
       maxTokens: 1400,
       // Slightly higher temperature reduces identical outputs between runs.
       // Schema validation remains the guardrail for correctness.
@@ -474,16 +439,6 @@ async function generatePersonaDraft(extractedText, options = {}) {
         'Mock persona draft (Bedrock not configured or mock requested). This output is strict JSON and schema-validated.',
       career_highlights: ['Mock highlight (Bedrock not configured).'],
       core_competencies: ['Problem solving', 'Communication', 'Ownership'],
-      work_experience: [
-        {
-          company: '',
-          title: 'Professional',
-          start_date: '',
-          end_date: '',
-          location: '',
-          highlights: ['Mock experience highlight.']
-        }
-      ],
       education: [],
       technical_stack: {
         languages: [],
