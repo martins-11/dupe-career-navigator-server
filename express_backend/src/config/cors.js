@@ -13,6 +13,12 @@ function buildCorsOptions() {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  // Always allow local frontend dev origin (explicit requirement).
+  // This is additive; if ALLOWED_ORIGINS is set, localhost:3000 will still be allowed.
+  if (!allowedOrigins.includes('http://localhost:3000')) {
+    allowedOrigins.push('http://localhost:3000');
+  }
+
   const allowedHeaders = (process.env.ALLOWED_HEADERS || 'Content-Type,Authorization')
     .split(',')
     .map((s) => s.trim())
