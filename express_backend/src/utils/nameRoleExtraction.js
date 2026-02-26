@@ -140,10 +140,16 @@ function extractNameAndCurrentRole(text) {
     const patterns = [
       // Common "key: value" labels
       /^(?:employee|employee\s+name|associate|associate\s+name|reviewee|reviewed\s+employee|team\s+member|employee\s+being\s+reviewed|name)\s*[:\-]\s*(.+)$/i,
+      // Reviewer/author labels (we still treat the value as the employee name only if it looks like a person name)
+      /^(?:subject|employee\s*\/\s*reviewee|review\s+subject)\s*[:\-]\s*(.+)$/i,
       // "Review for Jane Doe"
       /^(?:review\s+for)\s*[:\-]?\s*(.+)$/i,
       // Sometimes: "Employee - Jane Doe"
       /^(?:employee|employee\s+name)\s*[-–—]\s*(.+)$/i,
+      // Email-style subjects: "Subject: Performance Review - Jane Doe"
+      /^(?:subject)\s*[:\-]\s*(?:performance\s+review\s*[-–—:]?\s*)?(.+)$/i,
+      // Thread subjects: "Re: Performance Review for Jane Doe"
+      /^(?:re)\s*[:\-]\s*(?:performance\s+review\s*(?:for)?\s*)?(.+)$/i,
     ];
 
     for (const line of top) {
@@ -157,6 +163,14 @@ function extractNameAndCurrentRole(text) {
         if (isValidPersonName(candidate)) {
           return candidate;
         }
+      }
+
+      // Additional pattern: "Performance Review for Jane Doe" (not necessarily a key/value format)
+      // Keep strict: only accept if the suffix looks like a valid 2-4 part person name.
+      const m2 = line.match(/\bperformance\s+review\b\s*(?:for)?\s+([A-Za-z][A-Za-z.'-]{1,30}(?:\s+[A-Za-z][A-Za-z.'-]{1,30}){1,3})\s*$/i);
+      if (m2 && m2[1]) {
+        const candidate = normalizeCommaName(m2[1]);
+        if (candidate && isValidPersonName(candidate)) return candidate;
       }
     }
 

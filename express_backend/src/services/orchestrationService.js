@@ -187,8 +187,39 @@ function _touch(record, patch) {
 }
 
 function _concatTexts(rows) {
-  return rows
-    .map((r) => String(r?.textContent || '').trim())
+  /**
+   * Combine extracted text rows into a single source blob for downstream persona generation.
+   *
+   * Bugfix / product requirement:
+   * - When multiple documents are combined, resumes tend to be much longer and can dominate the input,
+   *   causing job descriptions and performance reviews to be underweighted.
+   *
+   * Approach (minimal, explainable, non-AI):
+   * - Add explicit per-document category headers to make downstream prompt sectioning more reliable.
+   * - Cap how much text each document contributes so shorter docs (JD/review) remain influential.
+   */
+  const MAX_PER_DOCUMENT_CHARS = Number(process.env.ORCH_MAX_CHARS_PER_DOCUMENT || 12000);
+
+  const safeTrim = (s) => String(s || '').trim();
+
+  const cap = (s, max) => {
+    if (!max || !Number.isFinite(max) || max <= 0) return s;
+    return s.length > max ? s.slice(0, max) : s;
+  };
+
+  return (rows || [])
+    .map((r) => {
+      const text = safeTrim(r?.textContent || '');
+      if (!text) return '';
+
+      const category = r?.metadataJson?.category || r?.category || null;
+      const header = category ? `[[DOCUMENT_CATEGORY:${category}]]` : '[[DOCUMENT_CATEGORY:unknown]]';
+
+      // Cap AFTER trimming so we don't waste budget on leading whitespace.
+      const capped = cap(text, MAX_PER_DOCUMENT_CHARS);
+
+      return [header, capped].join('\n');
+    })
     .filter(Boolean)
     .join('\n\n-----\n\n');
 }
