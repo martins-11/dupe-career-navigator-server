@@ -135,103 +135,17 @@ function makePlaceholderPersona({ sourceText, context }) {
 function mapV2PersonaToLegacyPersona(v2Persona, sourceText, context) {
   const text = String(sourceText || '').trim();
 
-  // Best-effort extraction for candidate name + current role/title.
-  // Kept local (no separate file) per product feedback.
-  const normalizeWhitespace = (s) =>
-    String(s || '')
-      .replace(/ /g, ' ')
-      .replace(/[ \t]+/g, ' ')
-      .trim();
+  const { extractBestNameAndRoleFromDocuments } = require('../utils/nameRoleExtraction');
 
-  const stripDecorations = (line) =>
-    normalizeWhitespace(String(line || '').replace(/^[•*\-–—|]+/, '').replace(/[|•]+/g, ' '));
+  // IMPORTANT:
+  // - If a resume is present in the provided sourceText, resume header should win.
+  // - If this is a single doc PR/JD, try PR label extraction before falling back.
+  const extracted = extractBestNameAndRoleFromDocuments([{ category: null, textContent: text }]);
 
-  const isEmailOrPhoneLine = (line) => {
-    const l = String(line || '');
-    return /@/.test(l) || /\b(?:\+?\d[\d\s\-().]{7,}\d)\b/.test(l);
-  };
-
-  const isLikelySectionHeader = (line) =>
-    /^(summary|profile|experience|work experience|employment|education|skills|projects|certifications|contact|objective)$/i.test(
-      String(line || '').trim()
-    );
-
-  const looksLikePersonName = (line) => {
-    const l = stripDecorations(line);
-    if (!l || l.length > 60) return false;
-    if (isEmailOrPhoneLine(l)) return false;
-    if (/[0-9]/.test(l)) return false;
-    if (/[,:]/.test(l)) return false;
-    if (isLikelySectionHeader(l)) return false;
-
-    const tokens = l.split(/\s+/).filter(Boolean);
-    if (tokens.length < 2 || tokens.length > 5) return false;
-
-    const allowedHonorifics = new Set(['mr', 'mrs', 'ms', 'dr', 'prof']);
-    const cleanedTokens = tokens
-      .map((t) => t.replace(/\.$/, ''))
-      .filter((t) => t && !allowedHonorifics.has(t.toLowerCase()));
-
-    if (cleanedTokens.length < 2 || cleanedTokens.length > 4) return false;
-
-    return cleanedTokens.every((t) => /^[A-Za-z][A-Za-z.'-]*$/.test(t));
-  };
-
-  const looksLikeJobTitle = (line) => {
-    const l = stripDecorations(line);
-    if (!l || l.length > 100) return false;
-    if (isEmailOrPhoneLine(l)) return false;
-    if (isLikelySectionHeader(l)) return false;
-    if (/[:@]/.test(l)) return false;
-
-    return /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product|research|scientist)\b/i.test(
-      l
-    );
-  };
-
-  const lines = text
-    .split(/\r?\n/)
-    .map(stripDecorations)
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(0, 120);
-
-  const candidateName = (() => {
-    // Prefer explicit "Name: X"
-    for (const line of lines.slice(0, 25)) {
-      const m = line.match(/^\s*(?:name)\s*[:\-]\s*(.+)\s*$/i);
-      if (m && m[1]) {
-        const candidate = stripDecorations(m[1]);
-        if (looksLikePersonName(candidate)) return candidate;
-      }
-    }
-
-    // Otherwise, first plausible name in top ~12 lines
-    for (const line of lines.slice(0, 12)) {
-      if (looksLikePersonName(line)) return stripDecorations(line);
-    }
-    return '';
-  })();
-
-  const currentRole = (() => {
-    // Prefer explicit "Title:" / "Current Role:" etc
-    for (const line of lines.slice(0, 40)) {
-      const m = line.match(/^\s*(?:title|current\s+role|role|position)\s*[:\-]\s*(.+)\s*$/i);
-      if (m && m[1] && looksLikeJobTitle(m[1])) return stripDecorations(m[1]);
-    }
-
-    // Otherwise look near the name line
-    const idx = candidateName ? lines.findIndex((l) => stripDecorations(l) === candidateName) : -1;
-    const start = idx >= 0 ? Math.max(0, idx - 1) : 0;
-    const end = idx >= 0 ? Math.min(lines.length, idx + 8) : Math.min(lines.length, 10);
-
-    for (let i = start; i < end; i += 1) {
-      const l = stripDecorations(lines[i]);
-      if (looksLikeJobTitle(l)) return l;
-    }
-
-    return (context && context.targetRole ? String(context.targetRole) : '') || '';
-  })();
+  const candidateName = extracted.name || '';
+  const currentRole =
+    extracted.role ||
+    ((context && context.targetRole ? String(context.targetRole) : '') || '');
 
   const professionalSummary =
     (v2Persona && typeof v2Persona.professional_summary === 'string' && v2Persona.professional_summary.trim()) ||

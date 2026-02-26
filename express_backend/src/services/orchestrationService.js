@@ -187,8 +187,39 @@ function _touch(record, patch) {
 }
 
 function _concatTexts(rows) {
-  return rows
-    .map((r) => String(r?.textContent || '').trim())
+  /**
+   * Combine extracted text rows into a single source blob for downstream persona generation.
+   *
+   * Bugfix / product requirement:
+   * - When multiple documents are combined, resumes tend to be much longer and can dominate the input,
+   *   causing job descriptions and performance reviews to be underweighted.
+   *
+   * Approach (minimal, explainable, non-AI):
+   * - Add explicit per-document category headers to make downstream prompt sectioning more reliable.
+   * - Cap how much text each document contributes so shorter docs (JD/review) remain influential.
+   */
+  const MAX_PER_DOCUMENT_CHARS = Number(process.env.ORCH_MAX_CHARS_PER_DOCUMENT || 12000);
+
+  const safeTrim = (s) => String(s || '').trim();
+
+  const cap = (s, max) => {
+    if (!max || !Number.isFinite(max) || max <= 0) return s;
+    return s.length > max ? s.slice(0, max) : s;
+  };
+
+  return (rows || [])
+    .map((r) => {
+      const text = safeTrim(r?.textContent || '');
+      if (!text) return '';
+
+      const category = r?.metadataJson?.category || r?.category || null;
+      const header = category ? `[[DOCUMENT_CATEGORY:${category}]]` : '[[DOCUMENT_CATEGORY:unknown]]';
+
+      // Cap AFTER trimming so we don't waste budget on leading whitespace.
+      const capped = cap(text, MAX_PER_DOCUMENT_CHARS);
+
+      return [header, capped].join('\n');
+    })
     .filter(Boolean)
     .join('\n\n-----\n\n');
 }
@@ -357,107 +388,21 @@ function _makePlaceholderPersona({ sourceText, context }) {
   if (/\baws\b/.test(lower)) maybeSkills.push('AWS');
   if (/\bpython\b/.test(lower)) maybeSkills.push('Python');
 
-  const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+  const { extractBestNameAndRoleFromDocuments } = require('../utils/nameRoleExtraction');
 
   const targetRole = context?.targetRole || null;
   const industry = context?.industry || null;
   const seniority = context?.seniority || null;
 
-  // Best-effort extraction for candidate name + current role/title from uploaded docs text.
-  // Kept local (no separate file) per product feedback.
-  const normalizeWhitespace = (s) =>
-    String(s || '')
-      .replace(/ /g, ' ')
-      .replace(/[ \t]+/g, ' ')
-      .trim();
+  // IMPORTANT:
+  // - Resume name must win when present in multi-doc uploads.
+  // - Otherwise, for single-doc PR/JD uploads, extract the person's name from that single doc text.
+  // We only have a single combined text blob here, but orchestration concatenation includes
+  // category headers. extractNameAndCurrentRole has PR label parsing + conservative fallbacks.
+  const extracted = extractBestNameAndRoleFromDocuments([{ category: null, textContent: text }]);
 
-  const stripDecorations = (line) =>
-    normalizeWhitespace(String(line || '').replace(/^[•*\-–—|]+/, '').replace(/[|•]+/g, ' '));
-
-  const isEmailOrPhoneLine = (line) => {
-    const l = String(line || '');
-    return /@/.test(l) || /\b(?:\+?\d[\d\s\-().]{7,}\d)\b/.test(l);
-  };
-
-  const isLikelySectionHeader = (line) =>
-    /^(summary|profile|experience|work experience|employment|education|skills|projects|certifications|contact|objective)$/i.test(
-      String(line || '').trim()
-    );
-
-  const looksLikePersonName = (line) => {
-    const l = stripDecorations(line);
-    if (!l || l.length > 60) return false;
-    if (isEmailOrPhoneLine(l)) return false;
-    if (/[0-9]/.test(l)) return false;
-    if (/[,:]/.test(l)) return false;
-    if (isLikelySectionHeader(l)) return false;
-
-    const tokens = l.split(/\s+/).filter(Boolean);
-    if (tokens.length < 2 || tokens.length > 5) return false;
-
-    const allowedHonorifics = new Set(['mr', 'mrs', 'ms', 'dr', 'prof']);
-    const cleanedTokens = tokens
-      .map((t) => t.replace(/\.$/, ''))
-      .filter((t) => t && !allowedHonorifics.has(t.toLowerCase()));
-
-    if (cleanedTokens.length < 2 || cleanedTokens.length > 4) return false;
-
-    return cleanedTokens.every((t) => /^[A-Za-z][A-Za-z.'-]*$/.test(t));
-  };
-
-  const looksLikeJobTitle = (line) => {
-    const l = stripDecorations(line);
-    if (!l || l.length > 100) return false;
-    if (isEmailOrPhoneLine(l)) return false;
-    if (isLikelySectionHeader(l)) return false;
-    if (/[:@]/.test(l)) return false;
-
-    return /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product|research|scientist)\b/i.test(
-      l
-    );
-  };
-
-  const lines = String(text || '')
-    .split(/\r?\n/)
-    .map(stripDecorations)
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(0, 120);
-
-  const candidateName = (() => {
-    for (const line of lines.slice(0, 25)) {
-      const m = line.match(/^\s*(?:name)\s*[:\-]\s*(.+)\s*$/i);
-      if (m && m[1]) {
-        const candidate = stripDecorations(m[1]);
-        if (looksLikePersonName(candidate)) return candidate;
-      }
-    }
-    for (const line of lines.slice(0, 12)) {
-      if (looksLikePersonName(line)) return stripDecorations(line);
-    }
-    return '';
-  })();
-
-  const currentRole = (() => {
-    for (const line of lines.slice(0, 40)) {
-      const m = line.match(/^\s*(?:title|current\s+role|role|position)\s*[:\-]\s*(.+)\s*$/i);
-      if (m && m[1] && looksLikeJobTitle(m[1])) return stripDecorations(m[1]);
-    }
-
-    const idx = candidateName ? lines.findIndex((l) => stripDecorations(l) === candidateName) : -1;
-    const start = idx >= 0 ? Math.max(0, idx - 1) : 0;
-    const end = idx >= 0 ? Math.min(lines.length, idx + 8) : Math.min(lines.length, 10);
-
-    for (let i = start; i < end; i += 1) {
-      const l = stripDecorations(lines[i]);
-      if (looksLikeJobTitle(l)) return l;
-    }
-
-    return targetRole || 'Professional';
-  })();
-
-  const roleForDisplay = currentRole || targetRole || 'Professional';
-  const nameForDisplay = candidateName || 'Professional';
+  const roleForDisplay = extracted.role || targetRole || 'Professional';
+  const nameForDisplay = extracted.name || 'Professional';
 
   const draft = {
     schemaVersion: '0.1.0',
@@ -697,6 +642,11 @@ async function generatePersonaDraftForBuild(buildId, input) {
       context
     });
 
+    // Extract stable display fields from the same source text used for persona generation.
+    // This is what the frontend should display (role/designation + optional name).
+    const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+    const extracted = extractNameAndCurrentRole(sourceText);
+
     // Persist draft (in-memory; adapter supports saveDraft)
     // Re-generate semantics:
     // - if createVersion is true, archive the PREVIOUS draft (if present) as a version
@@ -726,7 +676,15 @@ async function generatePersonaDraftForBuild(buildId, input) {
     const next = _touch(orch, {
       personaId: personaId ?? orch.personaId,
       personaDraft,
-      lastAiRunId: aiRun.id
+      lastAiRunId: aiRun.id,
+
+      // Make extracted fields available to the UI via orchestration record.
+      // Keep them on a stable "artifacts" envelope so the UI can safely expand later.
+      artifacts: {
+        ...(orch.artifacts || {}),
+        extractedName: extracted?.name || '',
+        extractedRole: extracted?.role || ''
+      }
     });
 
     return {
@@ -739,7 +697,11 @@ async function generatePersonaDraftForBuild(buildId, input) {
       persona: personaDraft,
       savedDraft,
       createdVersion,
-      orchestration: next
+      orchestration: next,
+
+      // Convenience echoes (additive; does not break existing clients).
+      extractedName: extracted?.name || '',
+      extractedRole: extracted?.role || ''
     };
   } catch (err) {
     await aiRunsRepo.updateAiRun(aiRun.id, {
