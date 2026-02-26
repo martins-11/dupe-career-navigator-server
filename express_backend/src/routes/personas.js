@@ -71,9 +71,10 @@ router.put('/:id', async (req, res) => {
     // Update metadata (title). Versioned JSON handled separately.
     const updated = await personasRepo.updatePersona(req.params.id, { title: parsed.data.title });
 
-    // If personaJson provided, create a new version.
+    // If personaJson provided (and not null), create a new version.
+    // We explicitly allow personaJson=null in the API as "no JSON update".
     let createdVersion = null;
-    if (parsed.data.personaJson) {
+    if (Object.prototype.hasOwnProperty.call(parsed.data, 'personaJson') && parsed.data.personaJson !== null) {
       createdVersion = await personasRepo.createPersonaVersion(req.params.id, {
         personaJson: parsed.data.personaJson
       });

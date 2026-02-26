@@ -20,7 +20,14 @@ const PersonaCreateRequest = z.object({
 
 const PersonaUpdateRequest = z.object({
   title: z.string().min(1).nullable().optional(),
-  personaJson: z.record(z.any()).optional()
+  /**
+   * Arbitrary persona JSON payload (draft/final).
+   *
+   * NOTE:
+   * Frontends may send `null` when a field is cleared or when only metadata (title)
+   * is being updated. We accept null and interpret it as "no personaJson update".
+   */
+  personaJson: z.record(z.any()).nullable().optional()
 });
 
 const PersonaVersionCreateRequest = z.object({
