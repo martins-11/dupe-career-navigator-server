@@ -20,6 +20,9 @@ const router = express.Router();
  * - POST /uploads/documents -> { uploadId, receivedFiles, message }
  * - POST /uploads/text      -> { uploadId, receivedFiles, message }
  *
+ * Additive behavior (non-breaking):
+ * - Responses may include `fileSummaries` with inferred category + extracted employee name (perf reviews).
+ *
  * Category tagging rules:
  * - Canonical categories: resume, job_description, performance_review
  * - Client MAY provide categories via fields (category, categoriesJson, categoryByIndexJson, categoryByOriginalnameJson).
@@ -283,7 +286,7 @@ function writeUploadToLocalDisk({ originalname, buffer }) {
  * Persist a single uploaded file (metadata + extraction + extracted_text).
  * Expects a "memory storage" file object with `.buffer`.
  *
- * Returns { doc, extraction, normalizedText }.
+ * Returns { doc, extraction, normalizedText, extractedEmployeeName }.
  */
 async function persistOneMemoryFile({ file, userId, source, category }) {
   const fileBytes = Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.alloc(0);
@@ -316,6 +319,8 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
   // Always persist an extracted_text row when we recognize the type (extraction != null),
   // even if the extracted text is empty. This guarantees "one extracted_text row per upload".
   let normalizedText = '';
+  let extractedEmployeeName = '';
+
   if (extraction) {
     const rawText = extraction.text || '';
     const hasMeaningfulText = Boolean(String(rawText).trim());
@@ -326,6 +331,17 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
     });
 
     normalizedText = hasMeaningfulText ? normalized.text : '';
+
+    // Best-effort name extraction for performance reviews
+    if (category === 'performance_review' && normalizedText.trim()) {
+      try {
+        const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+        const extracted = extractNameAndCurrentRole(normalizedText);
+        extractedEmployeeName = extracted?.name ? String(extracted.name) : '';
+      } catch (_) {
+        extractedEmployeeName = '';
+      }
+    }
 
     const warnings = Array.isArray(extraction.warnings) ? extraction.warnings : [];
 
@@ -339,6 +355,7 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
         warnings,
         normalization: normalized.stats,
         extractedTextEmpty: !hasMeaningfulText,
+        extractedEmployeeName: extractedEmployeeName || null,
         localFile: {
           storageProvider: 'local',
           storagePath: absPath
@@ -347,7 +364,7 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
     });
   }
 
-  return { doc, extraction, normalizedText };
+  return { doc, extraction, normalizedText, extractedEmployeeName };
 }
 
 /**
@@ -476,8 +493,11 @@ function handleMultiUpload({ routeName, sourceDefault }) {
       }
 
       const uploadId = uuidV4();
-
       const perFileFailures = [];
+
+      // We'll attach this additively to the final response.
+      let fileSummaries;
+
       try {
         const userId = req.body?.userId || null;
         const source = req.body?.source || sourceDefault || null;
@@ -579,6 +599,16 @@ function handleMultiUpload({ routeName, sourceDefault }) {
             });
           }
         }
+
+        fileSummaries = persisted.map((p) => ({
+          documentId: p?.doc?.id || null,
+          originalFilename: p?.doc?.originalFilename || null,
+          category: p?.doc?.category || null,
+          extractedEmployeeName: p?.extractedEmployeeName || null
+        }));
+
+        // eslint-disable-next-line no-console
+        console.info(`[uploads:${routeName}] fileSummaries`, { requestId, uploadId, fileSummaries });
       } catch (persistErr) {
         // eslint-disable-next-line no-console
         console.error(`[uploads:${routeName}] Unexpected persistence/extraction error`, {
@@ -592,7 +622,8 @@ function handleMultiUpload({ routeName, sourceDefault }) {
           uploadId,
           receivedFiles: mapFiles(files),
           message:
-            'Files received. Persistence/extraction partially failed; check server logs. (API contract preserved.)'
+            'Files received. Persistence/extraction partially failed; check server logs. (API contract preserved.)',
+          ...(Array.isArray(fileSummaries) ? { fileSummaries } : {})
         });
       }
 
@@ -602,6 +633,7 @@ function handleMultiUpload({ routeName, sourceDefault }) {
           receivedFiles: mapFiles(files),
           message:
             'Files received. Persistence/extraction partially failed; check server logs. (API contract preserved.)',
+          ...(Array.isArray(fileSummaries) ? { fileSummaries } : {}),
           warnings: [
             {
               code: 'persistence_or_extraction_failed',
@@ -615,7 +647,8 @@ function handleMultiUpload({ routeName, sourceDefault }) {
       return res.json({
         uploadId,
         receivedFiles: mapFiles(files),
-        message: 'Files received and persisted (local disk). Extracted text stored when possible.'
+        message: 'Files received and persisted (local disk). Extracted text stored when possible.',
+        ...(Array.isArray(fileSummaries) ? { fileSummaries } : {})
       });
     });
   };
