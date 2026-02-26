@@ -18,6 +18,35 @@
  * - role: string ('' when not found)  <-- IMPORTANT: role is optional/blank when missing
  */
 
+/**
+ * Pick the best subject text to use for name extraction, with resume precedence.
+ *
+ * This addresses two product requirements:
+ * 1) If a resume is present, its header is usually the most reliable source of the person's name.
+ * 2) For single-doc uploads that are NOT resumes (performance reviews / job descriptions), we should
+ *    extract the name from that single document rather than letting combined heuristics drift or
+ *    fall back to generic document labels.
+ *
+ * @param {Array<{category?: string|null, text?: string|null, textContent?: string|null}>} docs
+ * @returns {string} text to run name extraction against
+ */
+function _selectBestTextForNameExtraction(docs) {
+  const arr = Array.isArray(docs) ? docs : [];
+
+  const getText = (d) => String(d?.textContent ?? d?.text ?? '').trim();
+
+  // 1) Resume always wins if present and has text
+  const resumeDoc = arr.find((d) => String(d?.category || '').toLowerCase() === 'resume' && getText(d));
+  if (resumeDoc) return getText(resumeDoc);
+
+  // 2) If exactly one document has text, use it (single-doc uploads)
+  const withText = arr.filter((d) => getText(d));
+  if (withText.length === 1) return getText(withText[0]);
+
+  // 3) Otherwise fall back to concatenation (preserves previous behavior)
+  return withText.map(getText).filter(Boolean).join('\n\n-----\n\n');
+}
+
 // PUBLIC_INTERFACE
 function extractNameAndCurrentRole(text) {
   /**
@@ -283,6 +312,36 @@ function extractNameAndCurrentRole(text) {
   };
 }
 
+/**
+ * PUBLIC_INTERFACE
+ */
+function extractBestNameAndRoleFromDocuments(docs) {
+  /**
+   * Extract best-effort subject name + role from a set of categorized documents.
+   *
+   * Precedence:
+   * 1) If a RESUME document exists, always derive name/role from the resume text.
+   * 2) Else if exactly one document exists with text, derive from that doc (single-doc PR/JD case).
+   * 3) Else fall back to combined text.
+   *
+   * Input document shape is intentionally loose to support both:
+   * - orchestration extracted rows ({ textContent, metadataJson: {category} })
+   * - ai route payloads and other internal callers ({ text, category })
+   *
+   * @param {Array<{category?: string|null, metadataJson?: object|null, textContent?: string|null, text?: string|null}>} docs
+   * @returns {{ name: string, role: string, confidence: { name: 'high'|'medium'|'low'|'none', role: 'high'|'medium'|'low'|'none' } }}
+   */
+  const normalizedDocs = (Array.isArray(docs) ? docs : []).map((d) => ({
+    category: d?.metadataJson?.category ?? d?.category ?? null,
+    textContent: d?.textContent ?? null,
+    text: d?.text ?? null
+  }));
+
+  const bestText = _selectBestTextForNameExtraction(normalizedDocs);
+  return extractNameAndCurrentRole(bestText);
+}
+
 module.exports = {
   extractNameAndCurrentRole,
+  extractBestNameAndRoleFromDocuments
 };

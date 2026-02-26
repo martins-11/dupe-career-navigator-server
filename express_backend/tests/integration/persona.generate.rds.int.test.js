@@ -203,4 +203,61 @@ describe('Integration: POST /persona/generate + RDS verification', () => {
       await pool.end();
     }
   });
+
+  test('single-doc performance review: extracts employee name (does not fall back to doc label)', async () => {
+    const baseUrl = buildBaseUrl();
+    const personaGeneratePath = buildPersonaGeneratePath();
+
+    const perfReviewText = [
+      'Performance Review',
+      'Employee Name: Jane Q. Doe',
+      'Reviewer: John Manager',
+      '',
+      'Summary:',
+      'Jane consistently delivered high quality work and improved team velocity.'
+    ].join('\n');
+
+    const apiUrl = `${baseUrl}${personaGeneratePath}`;
+    const apiResp = await postJson(apiUrl, {
+      sourceText: perfReviewText,
+      context: { targetRole: 'Software Engineer' }
+    });
+
+    expect(apiResp.ok).toBe(true);
+    expect(apiResp.status).toBe(200);
+
+    const payload = apiResp.json;
+    expect(payload).toBeTruthy();
+    expectPersonaShape(payload.persona);
+
+    // Key regression check: should match extracted employee name (not "performance review", etc.)
+    expect(payload.persona.full_name).toBe('Jane Q. Doe');
+  });
+
+  test('multi-doc combined: resume header name wins over other doc text', async () => {
+    const baseUrl = buildBaseUrl();
+    const personaGeneratePath = buildPersonaGeneratePath();
+
+    const resumeText = ['Alex Rivera', 'Senior Software Engineer', '', 'EXPERIENCE', '...'].join('\n');
+
+    const perfReviewText = ['Performance Review', 'Employee Name: Not The Resume Name', 'Summary: ...'].join('\n');
+
+    const combined = [resumeText, perfReviewText].join('\n\n-----\n\n');
+
+    const apiUrl = `${baseUrl}${personaGeneratePath}`;
+    const apiResp = await postJson(apiUrl, {
+      sourceText: combined,
+      context: { targetRole: 'Backend Engineer' }
+    });
+
+    expect(apiResp.ok).toBe(true);
+    expect(apiResp.status).toBe(200);
+
+    const payload = apiResp.json;
+    expect(payload).toBeTruthy();
+    expectPersonaShape(payload.persona);
+
+    // Resume name must win.
+    expect(payload.persona.full_name).toBe('Alex Rivera');
+  });
 });
