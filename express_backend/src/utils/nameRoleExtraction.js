@@ -95,33 +95,68 @@ function extractNameAndCurrentRole(text) {
     /**
      * Performance review docs often contain an explicit label for the employee/reviewee.
      * We keep this strict to avoid capturing full sentences.
+     *
+     * Enhancement:
+     * - Support more common label variants: "Employee Name", "Reviewed Employee", "Team Member", etc.
+     * - Support "Last, First" format and normalize to "First Last".
      */
     const top = lines.slice(0, 120).map(stripDecorations).filter(Boolean);
 
     const clean = (s) =>
       String(s || '')
         .replace(/["“”]/g, '')
-        .replace(/[|•]+/g, ' ')
+        .replace(/[|\u2022]+/g, ' ')
         .replace(/[ \t]+/g, ' ')
         .trim();
 
+    const normalizeCommaName = (candidate) => {
+      const c = clean(candidate);
+      const m = c.match(
+        /^([A-Za-z][A-Za-z.'-]{1,30}),\s*([A-Za-z][A-Za-z.'-]{1,30})(?:\s+([A-Za-z][A-Za-z.'-]{1,30}))?$/
+      );
+      if (!m) return c;
+      // "Last, First [Middle]" -> "First [Middle] Last"
+      return [m[2], m[3], m[1]].filter(Boolean).join(' ').trim();
+    };
+
+    const isValidPersonName = (candidate) => {
+      const parts = String(candidate || '')
+        .split(/\s+/)
+        .map((p) => p.trim())
+        .filter(Boolean);
+
+      if (parts.length < 2 || parts.length > 4) return false;
+      if (!parts.every((p) => /^[A-Za-z][A-Za-z.'-]*$/.test(p))) return false;
+
+      // Guard against generic document-type labels being captured as a "name".
+      const joinedLower = parts.join(' ').toLowerCase();
+      if (joinedLower === 'job description' || joinedLower === 'performance review' || joinedLower === 'resume') {
+        return false;
+      }
+
+      return true;
+    };
+
     const patterns = [
-      /^(?:employee|associate|reviewee|name)\s*[:\-]\s*(.+)$/i,
+      // Common "key: value" labels
+      /^(?:employee|employee\s+name|associate|associate\s+name|reviewee|reviewed\s+employee|team\s+member|employee\s+being\s+reviewed|name)\s*[:\-]\s*(.+)$/i,
+      // "Review for Jane Doe"
       /^(?:review\s+for)\s*[:\-]?\s*(.+)$/i,
+      // Sometimes: "Employee - Jane Doe"
+      /^(?:employee|employee\s+name)\s*[-–—]\s*(.+)$/i,
     ];
 
     for (const line of top) {
       for (const rx of patterns) {
         const m = line.match(rx);
         if (!m || !m[1]) continue;
-        const candidate = clean(m[1]);
+
+        const candidate = normalizeCommaName(m[1]);
         if (!candidate) continue;
 
-        const parts = candidate.split(/\s+/).filter(Boolean);
-        if (parts.length < 2 || parts.length > 4) continue;
-        if (!parts.every((p) => /^[A-Za-z][A-Za-z.'-]*$/.test(p))) continue;
-
-        return candidate;
+        if (isValidPersonName(candidate)) {
+          return candidate;
+        }
       }
     }
 
