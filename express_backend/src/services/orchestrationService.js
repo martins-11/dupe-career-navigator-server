@@ -642,6 +642,11 @@ async function generatePersonaDraftForBuild(buildId, input) {
       context
     });
 
+    // Extract stable display fields from the same source text used for persona generation.
+    // This is what the frontend should display (role/designation + optional name).
+    const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+    const extracted = extractNameAndCurrentRole(sourceText);
+
     // Persist draft (in-memory; adapter supports saveDraft)
     // Re-generate semantics:
     // - if createVersion is true, archive the PREVIOUS draft (if present) as a version
@@ -671,7 +676,15 @@ async function generatePersonaDraftForBuild(buildId, input) {
     const next = _touch(orch, {
       personaId: personaId ?? orch.personaId,
       personaDraft,
-      lastAiRunId: aiRun.id
+      lastAiRunId: aiRun.id,
+
+      // Make extracted fields available to the UI via orchestration record.
+      // Keep them on a stable "artifacts" envelope so the UI can safely expand later.
+      artifacts: {
+        ...(orch.artifacts || {}),
+        extractedName: extracted?.name || '',
+        extractedRole: extracted?.role || ''
+      }
     });
 
     return {
@@ -684,7 +697,11 @@ async function generatePersonaDraftForBuild(buildId, input) {
       persona: personaDraft,
       savedDraft,
       createdVersion,
-      orchestration: next
+      orchestration: next,
+
+      // Convenience echoes (additive; does not break existing clients).
+      extractedName: extracted?.name || '',
+      extractedRole: extracted?.role || ''
     };
   } catch (err) {
     await aiRunsRepo.updateAiRun(aiRun.id, {

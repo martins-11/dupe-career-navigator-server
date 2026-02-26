@@ -8,10 +8,11 @@
  * - It only returns a ROLE when there is strong evidence (to avoid hallucinating).
  *
  * Enhancement (per bug report):
- * - Job descriptions / performance reviews often do not follow resume header patterns.
- * - For performance reviews, we additionally look for explicit review labels (Employee/Review for).
- * - For job descriptions and unknown document types, we fall back to extracting a plausible
- *   COMPANY/ORGANIZATION name and return that as `name` with low confidence.
+ * - Orchestration combines multiple documents and inserts category headers:
+ *     [[DOCUMENT_CATEGORY:resume]]
+ *     [[DOCUMENT_CATEGORY:job_description]]
+ *     [[DOCUMENT_CATEGORY:performance_review]]
+ *   We must understand these headers so "resume wins when present" is enforced even in multi-doc runs.
  *
  * Output contract:
  * - name: string ('' when not found; may be a company name fallback)
@@ -19,20 +20,77 @@
  */
 
 /**
- * Pick the best subject text to use for name extraction, with resume precedence.
+ * Parse orchestration's combined text format into category-aware blocks.
  *
- * This addresses two product requirements:
- * 1) If a resume is present, its header is usually the most reliable source of the person's name.
- * 2) For single-doc uploads that are NOT resumes (performance reviews / job descriptions), we should
- *    extract the name from that single document rather than letting combined heuristics drift or
- *    fall back to generic document labels.
+ * Orchestration emits a combined blob like:
+ *   [[DOCUMENT_CATEGORY:resume]]
+ *   ...resume text...
+ *
+ *   -----  (join delimiter)
+ *
+ *   [[DOCUMENT_CATEGORY:performance_review]]
+ *   ...text...
+ *
+ * @param {string} combinedText
+ * @returns {Array<{category: string|null, text: string}>}
+ */
+function _splitCombinedTextIntoCategoryBlocks(combinedText) {
+  const raw = String(combinedText || '');
+  if (!raw.trim()) return [];
+
+  const parts = raw
+    .split(/\n\s*-----\s*\n/g)
+    .map((p) => String(p || '').trim())
+    .filter(Boolean);
+
+  const blocks = [];
+  for (const part of parts) {
+    const m = part.match(/^\[\[DOCUMENT_CATEGORY:([a-z_]+)\]\]\s*\n?/i);
+    if (m && m[1]) {
+      const category = String(m[1]).toLowerCase();
+      const text = part.slice(m[0].length).trim();
+      blocks.push({ category, text });
+    } else {
+      blocks.push({ category: null, text: part.trim() });
+    }
+  }
+
+  return blocks.filter((b) => b.text && b.text.trim());
+}
+
+/**
+ * Select best text for extraction given a combined text blob that may contain orchestration headers.
+ *
+ * Precedence:
+ * - If a resume category block exists, use that block only.
+ * - Else if there is exactly one block, use it.
+ * - Else fall back to the full combined text.
+ *
+ * @param {string} combinedText
+ * @returns {string}
+ */
+function _selectBestTextFromCombinedOrOrchestrationText(combinedText) {
+  const blocks = _splitCombinedTextIntoCategoryBlocks(combinedText);
+  if (blocks.length === 0) return String(combinedText || '').trim();
+
+  const resumeBlock = blocks.find((b) => b.category === 'resume' && b.text.trim());
+  if (resumeBlock) return resumeBlock.text.trim();
+
+  if (blocks.length === 1) return blocks[0].text.trim();
+
+  // Multi-doc and no resume: preserve prior behavior (extract from the full combined blob).
+  return String(combinedText || '').trim();
+}
+
+/**
+ * Pick the best subject text to use for name extraction, with resume precedence,
+ * when the caller provides per-document objects.
  *
  * @param {Array<{category?: string|null, text?: string|null, textContent?: string|null}>} docs
- * @returns {string} text to run name extraction against
+ * @returns {string}
  */
 function _selectBestTextForNameExtraction(docs) {
   const arr = Array.isArray(docs) ? docs : [];
-
   const getText = (d) => String(d?.textContent ?? d?.text ?? '').trim();
 
   // 1) Resume always wins if present and has text
@@ -47,6 +105,29 @@ function _selectBestTextForNameExtraction(docs) {
   return withText.map(getText).filter(Boolean).join('\n\n-----\n\n');
 }
 
+function _looksLikeGenericDocumentLabel(candidate) {
+  const s = String(candidate || '').trim().toLowerCase();
+  if (!s) return false;
+
+  // Includes the common bad output observed in the bug report: "performance review report"
+  const banned = new Set([
+    'job description',
+    'performance review',
+    'performance review report',
+    'resume',
+    'curriculum vitae',
+    'cv',
+    'report',
+  ]);
+
+  if (banned.has(s)) return true;
+
+  // Also block label-like prefixes.
+  if (/^(performance\s+review|job\s+description|resume)\b/.test(s)) return true;
+
+  return false;
+}
+
 // PUBLIC_INTERFACE
 function extractNameAndCurrentRole(text) {
   /**
@@ -55,7 +136,9 @@ function extractNameAndCurrentRole(text) {
    * @param {string} text - Combined extracted/normalized document text.
    * @returns {{ name: string, role: string, confidence: { name: 'high'|'medium'|'low'|'none', role: 'high'|'medium'|'low'|'none' } }}
    */
-  const raw = String(text || '');
+  const selectedText = _selectBestTextFromCombinedOrOrchestrationText(text);
+
+  const raw = String(selectedText || '');
   const normalized = raw
     .replace(/\u00a0/g, ' ')
     .replace(/\r\n/g, '\n')
@@ -88,6 +171,7 @@ function extractNameAndCurrentRole(text) {
   const looksLikePersonName = (line) => {
     const l = stripDecorations(line);
     if (!l || l.length > 60) return false;
+    if (_looksLikeGenericDocumentLabel(l)) return false;
     if (isEmailOrPhoneLine(l)) return false;
     if (/[0-9]/.test(l)) return false;
     if (/[,:]/.test(l)) return false;
@@ -109,6 +193,7 @@ function extractNameAndCurrentRole(text) {
   const looksLikeJobTitle = (line) => {
     const l = stripDecorations(line);
     if (!l || l.length > 100) return false;
+    if (_looksLikeGenericDocumentLabel(l)) return false;
     if (isEmailOrPhoneLine(l)) return false;
     if (isLikelySectionHeader(l)) return false;
     if (/[:@]/.test(l)) return false;
@@ -124,16 +209,12 @@ function extractNameAndCurrentRole(text) {
     /**
      * Performance review docs often contain an explicit label for the employee/reviewee.
      * We keep this strict to avoid capturing full sentences.
-     *
-     * Enhancement:
-     * - Support more common label variants: "Employee Name", "Reviewed Employee", "Team Member", etc.
-     * - Support "Last, First" format and normalize to "First Last".
      */
     const top = lines.slice(0, 120).map(stripDecorations).filter(Boolean);
 
     const clean = (s) =>
       String(s || '')
-        .replace(/["“”]/g, '')
+        .replace(/[\"\u201c\u201d]/g, '')
         .replace(/[|\u2022]+/g, ' ')
         .replace(/[ \t]+/g, ' ')
         .trim();
@@ -149,7 +230,11 @@ function extractNameAndCurrentRole(text) {
     };
 
     const isValidPersonName = (candidate) => {
-      const parts = String(candidate || '')
+      const c = String(candidate || '').trim();
+      if (!c) return false;
+      if (_looksLikeGenericDocumentLabel(c)) return false;
+
+      const parts = c
         .split(/\s+/)
         .map((p) => p.trim())
         .filter(Boolean);
@@ -157,27 +242,15 @@ function extractNameAndCurrentRole(text) {
       if (parts.length < 2 || parts.length > 4) return false;
       if (!parts.every((p) => /^[A-Za-z][A-Za-z.'-]*$/.test(p))) return false;
 
-      // Guard against generic document-type labels being captured as a "name".
-      const joinedLower = parts.join(' ').toLowerCase();
-      if (joinedLower === 'job description' || joinedLower === 'performance review' || joinedLower === 'resume') {
-        return false;
-      }
-
       return true;
     };
 
     const patterns = [
-      // Common "key: value" labels
       /^(?:employee|employee\s+name|associate|associate\s+name|reviewee|reviewed\s+employee|team\s+member|employee\s+being\s+reviewed|name)\s*[:\-]\s*(.+)$/i,
-      // Reviewer/author labels (we still treat the value as the employee name only if it looks like a person name)
       /^(?:subject|employee\s*\/\s*reviewee|review\s+subject)\s*[:\-]\s*(.+)$/i,
-      // "Review for Jane Doe"
       /^(?:review\s+for)\s*[:\-]?\s*(.+)$/i,
-      // Sometimes: "Employee - Jane Doe"
       /^(?:employee|employee\s+name)\s*[-–—]\s*(.+)$/i,
-      // Email-style subjects: "Subject: Performance Review - Jane Doe"
       /^(?:subject)\s*[:\-]\s*(?:performance\s+review\s*[-–—:]?\s*)?(.+)$/i,
-      // Thread subjects: "Re: Performance Review for Jane Doe"
       /^(?:re)\s*[:\-]\s*(?:performance\s+review\s*(?:for)?\s*)?(.+)$/i,
     ];
 
@@ -194,9 +267,9 @@ function extractNameAndCurrentRole(text) {
         }
       }
 
-      // Additional pattern: "Performance Review for Jane Doe" (not necessarily a key/value format)
-      // Keep strict: only accept if the suffix looks like a valid 2-4 part person name.
-      const m2 = line.match(/\bperformance\s+review\b\s*(?:for)?\s+([A-Za-z][A-Za-z.'-]{1,30}(?:\s+[A-Za-z][A-Za-z.'-]{1,30}){1,3})\s*$/i);
+      const m2 = line.match(
+        /\bperformance\s+review\b\s*(?:for)?\s+([A-Za-z][A-Za-z.'-]{1,30}(?:\s+[A-Za-z][A-Za-z.'-]{1,30}){1,3})\s*$/i
+      );
       if (m2 && m2[1]) {
         const candidate = normalizeCommaName(m2[1]);
         if (candidate && isValidPersonName(candidate)) return candidate;
@@ -215,7 +288,7 @@ function extractNameAndCurrentRole(text) {
 
     const clean = (s) =>
       String(s || '')
-        .replace(/["“”]/g, '')
+        .replace(/[\"\u201c\u201d]/g, '')
         .replace(/[ \t]+/g, ' ')
         .trim();
 
@@ -234,6 +307,7 @@ function extractNameAndCurrentRole(text) {
         if (candidate.length > 80) continue;
         if (/@/.test(candidate)) continue;
         if (/[0-9]{3,}/.test(candidate)) continue;
+        if (_looksLikeGenericDocumentLabel(candidate)) continue;
 
         return candidate;
       }
@@ -244,7 +318,7 @@ function extractNameAndCurrentRole(text) {
     const m2 = firstChunk.match(/\b(?:at|with)\s+([A-Z][A-Za-z0-9&.\- ]{2,60})(?:\b|[.,\n])/);
     if (m2 && m2[1]) {
       const candidate = clean(m2[1]);
-      if (candidate && candidate.length <= 80) return candidate;
+      if (candidate && candidate.length <= 80 && !_looksLikeGenericDocumentLabel(candidate)) return candidate;
     }
 
     return '';
@@ -334,7 +408,7 @@ function extractBestNameAndRoleFromDocuments(docs) {
   const normalizedDocs = (Array.isArray(docs) ? docs : []).map((d) => ({
     category: d?.metadataJson?.category ?? d?.category ?? null,
     textContent: d?.textContent ?? null,
-    text: d?.text ?? null
+    text: d?.text ?? null,
   }));
 
   const bestText = _selectBestTextForNameExtraction(normalizedDocs);
@@ -343,5 +417,5 @@ function extractBestNameAndRoleFromDocuments(docs) {
 
 module.exports = {
   extractNameAndCurrentRole,
-  extractBestNameAndRoleFromDocuments
+  extractBestNameAndRoleFromDocuments,
 };
