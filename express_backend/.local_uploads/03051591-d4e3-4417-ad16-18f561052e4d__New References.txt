@@ -1,0 +1,165 @@
+\begin{thebibliography}{100}
+	
+	\bibitem{R1} Jebadass, J. R., Balasubramaniam, P. (2024). 
+	\href{https://www.sciencedirect.com/science/article/abs/pii/S0020025523013968}{Color image enhancement technique based on interval-valued intuitionistic fuzzy set}. 
+	Information Sciences, 653, 119811.
+	
+	\bibitem{R2} Li, G., Rana, M., Sun, J., Song, Y., Qu, J. (2020). 
+	\href{https://doi.org/10.1007/s11042-020-09586-y}{Real-time image enhancement with efficient dynamic programming}. 
+	Multimedia Tools and Applications, 79, 30883–30903.
+	
+	\bibitem{R3} Bhalla, K., Koundal, D., Sharma, B., Hu, Y. C., Zaguia, A. (2022). 
+	\href{https://www.sciencedirect.com/science/article/abs/pii/S1047320322000396}{A fuzzy convolutional neural network for enhancing multi-focus image fusion}. 
+	Journal of Visual Communication and Image Representation, 84, 103485.
+	
+	\bibitem{R4} Zhang, P. (2022). 
+	\href{https://doi.org/10.1155/2022/6797367}{Image Enhancement Method Based on Deep Learning}. 
+	Mathematical Problems in Engineering.
+	
+	\bibitem{R5} Rahman, T., Khandakar, A., Qiblawey, Y., Tahir, A., Kiranyaz, S., Kashem, S. B. A., \dots Chowdhury, M. E. (2021). 
+	\href{https://www.sciencedirect.com/science/article/pii/S001048252100113X}{Exploring the effect of image enhancement techniques on COVID-19 detection using chest X-ray images}. 
+	Computers in Biology and Medicine, 132, 104319.
+	
+	\bibitem{R6} Zhou, J., Sun, J., Zhang, W., Lin, Z. (2023). 
+	\href{https://www.sciencedirect.com/science/article/abs/pii/S0952197623001306}{Multi-view underwater image enhancement method via embedded fusion mechanism}. 
+	Engineering Applications of Artificial Intelligence, 121, 105946.
+	
+	\bibitem{R7} Ullah, Z., Farooq, M. U., Lee, S. H., An, D. (2020). 
+	\href{https://www.sciencedirect.com/science/article/abs/pii/S0306987720308689}{A hybrid image enhancement based brain MRI images classification technique}. 
+	Medical Hypotheses, 143, 109922.
+	
+	\bibitem{R8} Li, G., Yang, Y., Qu, X., Cao, D., Li, K. (2021). 
+	\href{https://www.sciencedirect.com/science/article/abs/pii/S0950705120307462}{A deep learning based image enhancement approach for autonomous driving at night}. 
+	Knowledge-Based Systems, 213, 106617.
+	
+	\bibitem{R9} Balasubramaniam, P., Ananthi, V. P. (2014). 
+	\href{https://www.sciencedirect.com/science/article/abs/pii/S1566253513001401}{Image fusion using intuitionistic fuzzy sets}. 
+	Information Fusion, 20, 21–30.
+	
+	\bibitem{R10} Ghosh, S. K., Biswas, B., Ghosh, A. (2020). 
+	\href{https://www.sciencedirect.com/science/article/pii/S1877050920309133}{A novel approach of retinal image enhancement using PSO system and measure of fuzziness}. 
+	Procedia Computer Science, 167, 1300–1311.
+	
+	\bibitem{R11} Joseph, J., Simi, V. R. (2023). 
+	\href{https://web.archive.org/web/20230314125830id_/https://assets.researchsquare.com/files/rs-1691676/v1_covered.pdf?c=1675681847}{Minimum intensity error intuitionistic fuzzy contrast enhancement transformation for magnetic resonance images}. 
+	[preprint].
+	
+	\bibitem{R12} Shyu, M. S., Leou, J. J. (1998). 
+	\href{https://www.sciencedirect.com/science/article/abs/pii/S0031320397000733}{A genetic algorithm approach to color image enhancement}. 
+	Pattern Recognition, 31(7), 871–880.
+	
+	\bibitem{R13} Jebadass, J. R., Balasubramaniam, P. (2022). 
+	\href{https://doi.org/10.1007/s00500-021-06539-x}{Low contrast enhancement technique for color images using interval-valued intuitionistic fuzzy sets with contrast limited adaptive histogram equalization}. 
+	Soft Computing, 26(10), 4949–4960.
+	
+	\bibitem{R14} Palaniappan, N., Srinivasan, R. (2009, June). 
+	\href{https://ieeexplore.ieee.org/abstract/document/5156480}{Applications of intuitionistic fuzzy sets of root type in image processing}. 
+	In NAFIPS 2009 - Annual Meeting of the North American Fuzzy Information Processing Society (pp. 1–5). IEEE.
+	
+	\bibitem{R15} Zhang, X., Yan, H. (2019). 
+	\href{https://www.researchgate.net/profile/Xuefeng-Zhang-19/publication/338157634_Image_enhancement_algorithm_usingadaptive_fractional_differential_mask_technique/links/60c744cea6fdcc2e6141029b/Image-enhancement-algorithm-using-adaptive-fractional-differential-mask-technique.pdf?_sg%5B0%5D=started_experiment_milestone&origin=journalDetail}{Image enhancement algorithm using adaptive fractional differential mask technique}. 
+	Mathematical Foundations of Computing, 2(4).
+	
+	\bibitem{R16} Shukla, A. K., Pandey, R. K., Yadav, S. (2021). 
+	\href{https://doi.org/10.1007/s11042-020-08968-6}{Adaptive fractional masks and super resolution based approach for image enhancement}. 
+	Multimedia Tools and Applications, 80(20), 30213–30236.
+	
+	\bibitem{R17} Wu, G. C., Baleanu, D., Bai, Y. R. (2019). 
+	\href{http://earsiv.cankaya.edu.tr:8080/handle/20.500.12416/5282}{Discrete fractional masks and their applications to image enhancement}. 
+	Appl. Eng. Life Soc. Sci. Part B, 261–270.
+	
+	\bibitem{R18} Soundrapandiyan, R., Satapathy, S. C., PVSSR, C. M., Nhu, N. G. (2022). 
+	\href{https://doi.org/10.1007/s11042-021-11250-y}{A comprehensive survey on image enhancement techniques with special emphasis on infrared images}. 
+	Multimedia Tools and Applications, 81(7), 9045–9077.
+	
+	\bibitem{R19} Wang, L., Liu, Z., Siu, W., Lun, D. P. (2020). 
+	\href{https://ieeexplore.ieee.org/abstract/document/8970535}{Lightening Network for Low-Light Image Enhancement}. 
+	IEEE Transactions on Image Processing, 29, 7984–7996.
+	
+	\bibitem{R20} Hao, S., Han, X., Guo, Y., Xu, X., Wang, M. (2020). 
+	\href{https://ieeexplore.ieee.org/abstract/document/7782813}{Low-Light Image Enhancement With Semi-Decoupled Decomposition}. 
+	IEEE Transactions on Multimedia, 22, 3025–3038.
+	
+	\bibitem{R21} Kodak image set (online). 
+	\href{http://r0k.us/graphics/kodak/}{Available at http://r0k.us/graphics/kodak/} (Accessed August 2010).
+	
+	\bibitem{R22} Li, J., Feng, X., Hua, Z. (2021). 
+	\href{https://ieeexplore.ieee.org/abstract/document/10026466}{Low-Light Image Enhancement via Progressive Recursive Network}. 
+	IEEE Transactions on Circuits and Systems for Video Technology, 31, 4227–4240.
+	
+	\bibitem{R23} Wei, C., Wang, W., Yang, W., Liu, J. (2018). 
+	\href{https://arxiv.org/abs/1808.04560}{Deep retinex decomposition for low-light enhancement}. 
+	arXiv preprint arXiv:1808.04560.
+	
+	\bibitem{R24} Sheet, D., Garud, H., Suveer, A., Mahadevappa, M., Chatterjee, J. (2010). 
+	\href{https://doi.org/10.1109/TCE.2010.5681130}{Brightness preserving dynamic fuzzy histogram equalization}. 
+	IEEE Transactions on Consumer Electronics, 56(4), 2475–2480.
+	
+	\bibitem{R25} G. Rajchakit, P. Chanthorn, P. Kaewmesri, R. Sriraman, C.P. Lim, 
+	\href{https://doi .org /10 .3390 /math8030422.}{Global Mittag–Leffler stability and stabilization analysis of fractional-order quaternion-valued memristive neural networks}, Mathematics 8(3) (2020) 422.
+	
+	\bibitem{R26} P. Melo-Pinto, P. Couto, H. Bustince, E. Barrenechea, M. Pagola, J. Fernandez, 
+	\href{ https://doi .org /10 .1016 /j .eswa .2012 .05 .055.}{Image segmentation using Atanassov’s intuitionistic fuzzy sets}, Expert Syst. Appl. 
+	40 (1) (2013) 15–26,
+	
+	\bibitem{R27} Li, Y., \& others (2020). 
+	\href{https://ieeexplore.ieee.org/abstract/document/9190879}{Fusion target attention mask generation network for video segmentation. }
+	In Proc. IEEE International Conference on Image Processing (ICIP), Abu Dhabi, UAE, 2020, pp. 2276–2280.
+	
+	\bibitem{R28} Ghanbari, B., Atangana, A. (2020). 
+	\href{https://doi.org/10.1016/j.physa.2019.123516}{A new application of fractional Atangana–Baleanu derivatives: designing ABC-fractional masks in image processing}. 
+	Physica A: Statistical Mechanics and its Applications, 542, 1–25.
+	
+	\bibitem{R29}  Lee, C., \& others (2012). 
+	\href{https://ieeexplore.ieee.org/abstract/document/6615961}{Contrast enhancement based on layered difference representation.} 
+	In Proc. 19th IEEE International Conference on Image Processing (ICIP), Orlando, FL, USA, pp. 965–968.
+	
+	
+	\bibitem{R30} Mittal, P., Saini, R. K., Jain, N. K. (2019).
+	\href{https://link.springer.com/chapter/10.1007/978-981-13-0589-4_50}
+	{Image enhancement using fuzzy logic techniques.} 
+	Advances in Intelligent Systems and Computing, 742, 537–546.
+
+	
+	\bibitem{R31} Fu, X., Liao, Y., Zeng, Z., Huang, Y., Zhang, X.-P. (2015). 
+	\href{https://doi.org/10.1109/TIP.2015.2474701}{A probabilistic method for image enhancement with simultaneous illumination and reflectance estimation}. 
+	IEEE Transactions on Image Processing, 24(12), 4965–4977.
+	
+	
+	\bibitem{R32}  Guo, X., Li, Y., Ling, H. (2017). 
+	\href{https://ieeexplore.ieee.org/abstract/document/9316686}{LIME: Low-Light Image Enhancement via Illumination Map Estimation}. 
+	IEEE Transactions on Image Processing, 26, 982–993.
+	
+	
+	\bibitem{R33}  Li, M., Liu, J., Yang, W., Sun, X., Guo, Z. (2018). 
+	\href{https://doi.org/10.1109/TIP.2018.2810539}{Structure-revealing low-light image enhancement via robust retinex model}. 
+	IEEE Transactions on Image Processing, 27(6), 2828–2841.
+	
+	 
+	
+	\bibitem{R34} Ying, Z., Li, G., Gao, W. (2017). 
+	\href{https://arxiv.org/abs/1711.00591}{A bio-inspired multi-exposure fusion framework for low-light image enhancement}. 
+	arXiv preprint arXiv:1711.00591.
+	
+	
+	
+	\bibitem{R35} 	Jeon, J. J., Eom, I. K. (2022). 
+	\href{https://doi.org/10.1016/j.sigpro.2022.108523}{Low-light image enhancement using inverted image normalized by atmospheric light}. 
+	Signal Processing, 196, 108523.
+	
+	
+		
+	\bibitem{R36} Ren, X., Yang, W., Cheng, W.-H., Liu, J. (2020). 
+	\href{https://doi.org/10.1109/TIP.2020.2984098}{LR3M: Robust Low-Light Enhancement via Low-Rank Regularized Retinex Model}. 
+	IEEE Transactions on Image Processing, 29, 5862–5876.
+	
+	
+	\bibitem{R37} Ma, K., \& others (2015). 
+	\href{https://ieeexplore.ieee.org/abstract/document/7120119}{Perceptual quality assessment for multi-exposure image fusion.}
+	IEEE Transactions on Image Processing, 24(11), 3345–3356.
+	 
+	
+	\bibitem{R38} \href{https://openaccess.thecvf.com/content/ACCV2024/html/Islam_LoLI-Street_Benchmarking_Low-light_Image_Enhancement_and_Beyond_ACCV_2024_paper.html}{LoLI-Street: Benchmarking low-light image enhancement and beyond. }
+	In Proc. Asian Conference on Computer Vision (ACCV), Dec. 2024, pp. 1250–1267.
+	
+\end{thebibliography}
