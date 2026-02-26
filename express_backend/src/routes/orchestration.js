@@ -29,7 +29,7 @@ router.post('/start', async (req, res) => {
    * Returns: { build, orchestration }
    */
   try {
-    const out = orchestrationService.startOrchestration(req.body || {});
+    const out = await orchestrationService.startOrchestration(req.body || {});
     return res.status(201).json(out);
   } catch (err) {
     return sendError(res, err);
@@ -83,7 +83,7 @@ router.post('/builds/:id/link-upload', async (req, res) => {
    * (they do not currently return document ids).
    */
   try {
-    const out = orchestrationService.linkUploadToBuild(req.params.id, req.body || {});
+    const out = await orchestrationService.linkUploadToBuild(req.params.id, req.body || {});
     return res.status(200).json(out);
   } catch (err) {
     return sendError(res, err);

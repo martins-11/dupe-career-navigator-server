@@ -117,7 +117,7 @@ function _looksLikeGenericDocumentLabel(candidate) {
     'resume',
     'curriculum vitae',
     'cv',
-    'report',
+    'report'
   ]);
 
   if (banned.has(s)) return true;
@@ -192,17 +192,53 @@ function extractNameAndCurrentRole(text) {
 
   const looksLikeJobTitle = (line) => {
     const l = stripDecorations(line);
-    if (!l || l.length > 100) return false;
+    if (!l || l.length > 120) return false;
     if (_looksLikeGenericDocumentLabel(l)) return false;
     if (isEmailOrPhoneLine(l)) return false;
     if (isLikelySectionHeader(l)) return false;
-    if (/[:@]/.test(l)) return false;
+    if (/[@]/.test(l)) return false;
     if (/[0-9]/.test(l)) return false;
 
     // Common role/title keywords; keep broad but not too permissive.
     return /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product|research|scientist|intern)\b/i.test(
       l
     );
+  };
+
+  const extractRoleFromJobDescriptionStyleLabels = () => {
+    /**
+     * Job descriptions commonly include explicit labels for roles:
+     * - Position Title: Senior Backend Engineer
+     * - Job Title - Staff Software Engineer
+     * - Role: Data Analyst
+     */
+    const top = lines.slice(0, 140).map(stripDecorations).filter(Boolean);
+
+    const cleanRole = (s) =>
+      String(s || '')
+        .replace(/[\\"\u201c\u201d]/g, '')
+        .replace(/[|\u2022]+/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .trim();
+
+    const patterns = [/^(?:position\s*title|job\s*title|title|role|position)\s*[:\-]\s*(.+)$/i];
+
+    for (const line of top) {
+      for (const rx of patterns) {
+        const m = line.match(rx);
+        if (!m || !m[1]) continue;
+
+        const candidate = cleanRole(m[1]);
+        if (!candidate) continue;
+
+        // Avoid grabbing full sentences.
+        if (candidate.length > 90) continue;
+
+        if (looksLikeJobTitle(candidate)) return candidate;
+      }
+    }
+
+    return '';
   };
 
   const extractPerformanceReviewName = () => {
@@ -214,7 +250,7 @@ function extractNameAndCurrentRole(text) {
 
     const clean = (s) =>
       String(s || '')
-        .replace(/[\"\u201c\u201d]/g, '')
+        .replace(/[\\"\u201c\u201d]/g, '')
         .replace(/[|\u2022]+/g, ' ')
         .replace(/[ \t]+/g, ' ')
         .trim();
@@ -251,7 +287,7 @@ function extractNameAndCurrentRole(text) {
       /^(?:review\s+for)\s*[:\-]?\s*(.+)$/i,
       /^(?:employee|employee\s+name)\s*[-–—]\s*(.+)$/i,
       /^(?:subject)\s*[:\-]\s*(?:performance\s+review\s*[-–—:]?\s*)?(.+)$/i,
-      /^(?:re)\s*[:\-]\s*(?:performance\s+review\s*(?:for)?\s*)?(.+)$/i,
+      /^(?:re)\s*[:\-]\s*(?:performance\s+review\s*(?:for)?\s*)?(.+)$/i
     ];
 
     for (const line of top) {
@@ -288,14 +324,11 @@ function extractNameAndCurrentRole(text) {
 
     const clean = (s) =>
       String(s || '')
-        .replace(/[\"\u201c\u201d]/g, '')
+        .replace(/[\\"\u201c\u201d]/g, '')
         .replace(/[ \t]+/g, ' ')
         .trim();
 
-    const labeledPatterns = [
-      /^(?:company|employer|organization|organisation|client)\s*[:\-]\s*(.+)$/i,
-      /^(?:about)\s+(.+)$/i,
-    ];
+    const labeledPatterns = [/^(?:company|employer|organization|organisation|client)\s*[:\-]\s*(.+)$/i, /^(?:about)\s+(.+)$/i];
 
     for (const line of top) {
       for (const rx of labeledPatterns) {
@@ -350,8 +383,9 @@ function extractNameAndCurrentRole(text) {
 
   const role = (() => {
     // IMPORTANT: role is optional. Only set when confident.
-    // 1) Explicit "Title/Role: X"
-    for (const line of lines.slice(0, 50)) {
+
+    // 1) Explicit "Title/Role: X" (resume-leaning labels)
+    for (const line of lines.slice(0, 60)) {
       const m = stripDecorations(line).match(/^(?:title|current\s+role|role|position)\s*[:\-]\s*(.+)$/i);
       if (m && m[1]) {
         const candidate = stripDecorations(m[1]);
@@ -359,12 +393,16 @@ function extractNameAndCurrentRole(text) {
       }
     }
 
-    // 2) Nearby line after the name header (common resume format)
+    // 2) JD-style explicit labels (Position Title / Job Title)
+    const jdRole = extractRoleFromJobDescriptionStyleLabels();
+    if (jdRole) return jdRole;
+
+    // 3) Nearby line after the name header (common resume format)
     if (resumeLikeName || reviewLikeName) {
       const knownName = resumeLikeName || reviewLikeName;
       const idx = lines.findIndex((l) => stripDecorations(l) === knownName);
       if (idx >= 0) {
-        for (const neighbor of lines.slice(idx + 1, idx + 6)) {
+        for (const neighbor of lines.slice(idx + 1, idx + 8)) {
           const candidate = stripDecorations(neighbor);
           if (looksLikeJobTitle(candidate)) return candidate;
         }
@@ -381,8 +419,8 @@ function extractNameAndCurrentRole(text) {
     role,
     confidence: {
       name: nameConfidence,
-      role: role ? 'medium' : 'none',
-    },
+      role: role ? 'medium' : 'none'
+    }
   };
 }
 
@@ -394,9 +432,10 @@ function extractBestNameAndRoleFromDocuments(docs) {
    * Extract best-effort subject name + role from a set of categorized documents.
    *
    * Precedence:
-   * 1) If a RESUME document exists, always derive name/role from the resume text.
-   * 2) Else if exactly one document exists with text, derive from that doc (single-doc PR/JD case).
-   * 3) Else fall back to combined text.
+   * 1) If a RESUME document exists, always derive NAME from the resume text.
+   * 2) ROLE is derived from resume if present, but may fall back to JD when resume does not provide a role.
+   * 3) Else if exactly one document exists with text, derive from that doc (single-doc PR/JD case).
+   * 4) Else fall back to combined text.
    *
    * Input document shape is intentionally loose to support both:
    * - orchestration extracted rows ({ textContent, metadataJson: {category} })
@@ -408,14 +447,36 @@ function extractBestNameAndRoleFromDocuments(docs) {
   const normalizedDocs = (Array.isArray(docs) ? docs : []).map((d) => ({
     category: d?.metadataJson?.category ?? d?.category ?? null,
     textContent: d?.textContent ?? null,
-    text: d?.text ?? null,
+    text: d?.text ?? null
   }));
 
-  const bestText = _selectBestTextForNameExtraction(normalizedDocs);
-  return extractNameAndCurrentRole(bestText);
+  const getText = (d) => String(d?.textContent ?? d?.text ?? '').trim();
+
+  const resumeDoc = normalizedDocs.find((d) => String(d?.category || '').toLowerCase() === 'resume' && getText(d));
+  const jdDoc = normalizedDocs.find((d) => String(d?.category || '').toLowerCase() === 'job_description' && getText(d));
+
+  const bestTextForName = _selectBestTextForNameExtraction(normalizedDocs);
+  const fromBest = extractNameAndCurrentRole(bestTextForName);
+
+  // Common real-world case: resume header provides name, but role is more reliably stated in JD.
+  if (resumeDoc && !fromBest.role && jdDoc) {
+    const fromJd = extractNameAndCurrentRole(getText(jdDoc));
+    if (fromJd?.role) {
+      return {
+        name: fromBest.name,
+        role: fromJd.role,
+        confidence: {
+          name: fromBest.confidence?.name || 'none',
+          role: fromJd.confidence?.role || 'medium'
+        }
+      };
+    }
+  }
+
+  return fromBest;
 }
 
 module.exports = {
   extractNameAndCurrentRole,
-  extractBestNameAndRoleFromDocuments,
+  extractBestNameAndRoleFromDocuments
 };
