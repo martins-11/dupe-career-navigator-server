@@ -38,6 +38,13 @@ async function httpGetJson(url) {
     err.details = parsed;
     throw err;
   }
+
+  // Some internal helpers return { rows: [...] } while the HTTP API contract is an array.
+  // Be defensive so this script verifies the actual role list either way.
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.rows)) {
+    return parsed.rows;
+  }
+
   return parsed;
 }
 
