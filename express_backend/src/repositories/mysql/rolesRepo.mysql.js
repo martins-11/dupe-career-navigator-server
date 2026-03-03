@@ -187,32 +187,37 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   const qStr = String(q || '').trim();
   if (qStr) {
-    // Use JSON_EXTRACT for JSON columns instead of CAST(... AS CHAR).
-    // This avoids subtle JSON string representation issues that can lead to empty matches.
-    where.push('(role_title LIKE ? OR JSON_EXTRACT(core_skills_json, \'$\') LIKE ?)');
+    // Robust keyword match:
+    // - Always match titles via LIKE.
+    // - For skills, prefer a simple LIKE fallback on the JSON text. This avoids relying on
+    //   MySQL JSON_* behavior/version differences that have caused empty results in practice.
     const like = `%${qStr}%`;
+    where.push('(role_title LIKE ? OR core_skills_json LIKE ?)');
     params.push(like, like);
   }
 
   if (industry) {
+    // Exact match, case-insensitive
     where.push('LOWER(industry) = LOWER(?)');
     params.push(String(industry));
   }
 
-  // Skills: use JSON_CONTAINS for exact containment in JSON array.
-  // This is both more accurate and less fragile than LIKE on serialized JSON.
+  // Skills: AND semantics. Use LIKE against serialized JSON to avoid JSON_CONTAINS incompatibilities.
+  // This is not perfect (substring match), but works reliably with the seeded data format:
+  // ["SQL","Excel",...]
   const skillsList = Array.isArray(skills) ? skills : [];
   const normalizedSkills = skillsList.map((s) => String(s).trim()).filter(Boolean);
   if (normalizedSkills.length > 0) {
     for (const s of normalizedSkills) {
-      where.push("JSON_CONTAINS(core_skills_json, JSON_QUOTE(?), '$')");
-      params.push(String(s));
+      // match the JSON string token: "SQL"
+      where.push('core_skills_json LIKE ?');
+      params.push(`%\"${String(s).replace(/"/g, '\\"')}\"%`);
     }
   }
 
-  // Salary filtering is applied in JS after fetch; we prefetch more rows to avoid missing matches.
-  const hasSalaryFilter = Number.isFinite(Number(minSalary)) || Number.isFinite(Number(maxSalary));
-  const sqlLimit = hasSalaryFilter ? Math.min(lim * 10, 2000) : lim;
+  // Salary filtering is applied in JS after fetch; prefetch more rows to avoid missing matches.
+  const hasSalaryFilter = minSalary != null || maxSalary != null;
+  const sqlLimit = hasSalaryFilter ? Math.min(lim * 50, 5000) : lim;
 
   const sql = `
     SELECT

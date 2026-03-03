@@ -38,6 +38,8 @@ router.get('/search', async (req, res) => {
       return res.json([]);
     }
 
+    const debugRolesSearch = String(process.env.DEBUG_ROLES_SEARCH || '').toLowerCase() === 'true';
+
     // Note: do not attempt to seed here. Seeding is handled by explicit scripts (scripts/seed-roles.js)
     // and by services that truly require it. Search should be read-only and deterministic.
 
@@ -66,6 +68,18 @@ router.get('/search', async (req, res) => {
         ? Number(req.query.max_salary)
         : null;
 
+    if (debugRolesSearch) {
+      // eslint-disable-next-line no-console
+      console.log('[roles.search] filters:', {
+        q,
+        industry: industry || null,
+        skills,
+        minSalary: Number.isFinite(minSalary) ? minSalary : null,
+        maxSalary: Number.isFinite(maxSalary) ? maxSalary : null,
+        limit: req.query?.limit != null ? Number(req.query.limit) : undefined
+      });
+    }
+
     let matches = await rolesRepo.searchRoles({
       q,
       industry: industry || null,
@@ -74,6 +88,11 @@ router.get('/search', async (req, res) => {
       maxSalary: Number.isFinite(maxSalary) ? maxSalary : null,
       limit: req.query?.limit != null ? Number(req.query.limit) : undefined
     });
+
+    if (debugRolesSearch) {
+      // eslint-disable-next-line no-console
+      console.log('[roles.search] resultCount:', Array.isArray(matches) ? matches.length : null);
+    }
 
     // Defensive fallback:
     // If adapter unexpectedly yields 0 but the table is populated, return an unfiltered sample
