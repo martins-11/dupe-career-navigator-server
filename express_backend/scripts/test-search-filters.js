@@ -5,7 +5,9 @@
  *
  * Runs required cases:
  * 1) keyword AND industry: q=Manager&industry=Technology
+ *    Expected: non-empty, should include roles like "Product Manager" / "Technical Program Manager"
  * 2) salary range: min_salary=100000
+ *    Expected: non-empty, should include multiple roles with salary ranges >= $100k
  *
  * Usage:
  *   node scripts/test-search-filters.js
