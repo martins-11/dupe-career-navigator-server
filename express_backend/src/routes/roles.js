@@ -30,13 +30,40 @@ router.get('/search', async (req, res) => {
    */
   try {
     const q = req.query?.q != null ? String(req.query.q).trim() : '';
+
+    // Multi-filter inputs (all optional):
     const industry = req.query?.industry != null ? String(req.query.industry).trim() : '';
-    const salaryRange = req.query?.salary_range != null ? String(req.query.salary_range).trim() : '';
+
+    // skills can be:
+    // - comma-separated string: "sql,python"
+    // - repeated query params: ?skills=sql&skills=python (Express may deliver string or array)
+    const skillsRaw = req.query?.skills;
+    const skills =
+      Array.isArray(skillsRaw)
+        ? skillsRaw.map((s) => String(s).trim()).filter(Boolean)
+        : typeof skillsRaw === 'string'
+          ? String(skillsRaw)
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : [];
+
+    const minSalary =
+      req.query?.min_salary != null && String(req.query.min_salary).trim() !== ''
+        ? Number(req.query.min_salary)
+        : null;
+
+    const maxSalary =
+      req.query?.max_salary != null && String(req.query.max_salary).trim() !== ''
+        ? Number(req.query.max_salary)
+        : null;
 
     const matches = await rolesRepo.searchRoles({
       q,
       industry: industry || null,
-      salaryRange: salaryRange || null,
+      skills,
+      minSalary: Number.isFinite(minSalary) ? minSalary : null,
+      maxSalary: Number.isFinite(maxSalary) ? maxSalary : null,
       limit: req.query?.limit != null ? Number(req.query.limit) : undefined
     });
 

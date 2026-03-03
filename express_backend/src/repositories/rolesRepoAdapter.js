@@ -39,12 +39,12 @@ async function roleExists(roleId) {
 }
 
  // PUBLIC_INTERFACE
-async function searchRoles({ q = '', industry = null, salaryRange = null, limit = 50 } = {}) {
+async function searchRoles({ q = '', industry = null, skills = [], minSalary = null, maxSalary = null, limit = 50 } = {}) {
   /** Search roles when MySQL is configured; otherwise return []. */
   const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
   const engine = getDbEngine();
   if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) return [];
-  return mysqlRepo.searchRoles({ q, industry, salaryRange, limit });
+  return mysqlRepo.searchRoles({ q, industry, skills, minSalary, maxSalary, limit });
 }
 
 module.exports = {
