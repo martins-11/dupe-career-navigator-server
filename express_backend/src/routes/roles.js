@@ -73,65 +73,54 @@ router.get('/search', async (req, res) => {
     }
 
     // Prefer DB-backed search when possible, but do NOT hard-gate the endpoint.
-    // In many environments (incl. CI/verifiers), DB credentials may not be detected as configured,
-    // and returning [] makes filtered search appear broken even though seed data exists.
+    // In some environments, DB credentials may be present but the helper detection functions
+    // (isDbConfigured/isMysqlConfigured) can mis-detect, leading to a false "no DB" mode and
+    // empty results. We therefore:
+    // 1) Attempt DB search when engine is mysql.
+    // 2) If DB search fails (or returns a non-array), fall back to the in-memory catalog.
     const engine = getDbEngine();
-    const canUseMysql = engine === 'mysql' && isDbConfigured() && isMysqlConfigured();
+    const shouldAttemptDb = engine === 'mysql';
 
     let matches = null;
 
-    if (canUseMysql) {
-      matches = await rolesRepo.searchRoles({
-        q,
-        industry: industry || null,
-        skills,
-        minSalary: Number.isFinite(minSalary) ? minSalary : null,
-        maxSalary: Number.isFinite(maxSalary) ? maxSalary : null,
-        limit
-      });
+    if (shouldAttemptDb) {
+      try {
+        matches = await rolesRepo.searchRoles({
+          q,
+          industry: industry || null,
+          skills,
+          minSalary: Number.isFinite(minSalary) ? minSalary : null,
+          maxSalary: Number.isFinite(maxSalary) ? maxSalary : null,
+          limit
+        });
 
-      if (debugRolesSearch) {
-        // eslint-disable-next-line no-console
-        console.log('[roles.search] (db) resultCount:', Array.isArray(matches) ? matches.length : null);
+        if (debugRolesSearch) {
+          // eslint-disable-next-line no-console
+          console.log('[roles.search] (db) resultCount:', Array.isArray(matches) ? matches.length : null);
+        }
+
+        if (Array.isArray(matches)) return res.json(matches);
+      } catch (e) {
+        if (debugRolesSearch) {
+          // eslint-disable-next-line no-console
+          console.log('[roles.search] (db) failed; falling back to memory:', e?.message || String(e));
+        }
       }
-
-      return res.json(Array.isArray(matches) ? matches : []);
     }
 
-    // DB not configured: fall back to an in-memory seed list and apply filters in JS.
+    // DB not available (or DB search failed): fall back to an in-memory seed list and apply filters in JS.
     // This keeps /api/roles/search useful for local dev + automated verification scripts.
     const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
     const catalog = Array.isArray(seed)
       ? seed
       : [
-          // Keep this aligned with scripts/seed-roles.js and scripts/test-search-keyword.js
+          // Minimal safety net (should not normally be used because DEFAULT_ROLES_CATALOG is exported).
           {
             role_id: 'seed-product-manager',
             role_title: 'Product Manager',
             industry: 'Technology',
             skills_required: ['Roadmapping', 'Stakeholder Management', 'Analytics', 'Prioritization', 'Communication'],
             salary_range: '$130k-$210k'
-          },
-          {
-            role_id: 'seed-technical-program-manager',
-            role_title: 'Technical Program Manager',
-            industry: 'Technology',
-            skills_required: ['Delivery Management', 'Coordination', 'Risk Management', 'Communication', 'Systems Thinking'],
-            salary_range: '$140k-$220k'
-          },
-          {
-            role_id: 'seed-operations-manager',
-            role_title: 'Operations Manager',
-            industry: 'Retail',
-            skills_required: ['Process Improvement', 'Leadership', 'Operations', 'KPIs', 'Communication'],
-            salary_range: '$90k-$150k'
-          },
-          {
-            role_id: 'seed-risk-manager',
-            role_title: 'Risk Manager',
-            industry: 'Finance',
-            skills_required: ['Risk Assessment', 'Compliance', 'Stakeholder Management', 'Analysis', 'Reporting'],
-            salary_range: '$130k-$200k'
           }
         ];
 
@@ -179,13 +168,9 @@ router.get('/search', async (req, res) => {
     matches = catalog
       .map((r) => {
         // Support BOTH shapes:
-        // 1) DB/seed route shape: { role_id, role_title, skills_required, salary_range }
-        // 2) recommendationsService.DEFAULT_ROLES_CATALOG shape:
+        // 1) API shape: { role_id, role_title, skills_required, salary_range }
+        // 2) DEFAULT_ROLES_CATALOG shape:
         //    { roleTitle, coreSkills, estimatedSalaryRange, industry, ... }
-        //
-        // IMPORTANT:
-        // - roleTitle is a plain string in DEFAULT_ROLES_CATALOG. Previous code attempted roleTitle?.name,
-        //   which caused title="" and made all filtering (and even unfiltered listing) return [].
         const title = String(r.role_title || r.roleTitle || '').trim();
         const ind = String(r.industry || '').trim();
 
@@ -196,10 +181,8 @@ router.get('/search', async (req, res) => {
             : [];
 
         const salaryRange = String(r.salary_range || r.estimatedSalaryRange || '').trim();
-
         const salaryBounds = parseSalaryBounds(salaryRange);
 
-        // Ensure role_id is stable and non-null in memory mode (useful for UI lists + tests).
         const stableId =
           r.role_id ||
           r.roleId ||

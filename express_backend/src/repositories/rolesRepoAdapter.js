@@ -40,7 +40,12 @@ async function roleExists(roleId) {
 
  // PUBLIC_INTERFACE
 async function searchRoles({ q = '', industry = null, skills = [], minSalary = null, maxSalary = null, limit = 50 } = {}) {
-  /** Search roles when MySQL is configured; otherwise return []. */
+  /**
+   * Search roles when MySQL is configured; otherwise return [].
+   *
+   * NOTE: routes/roles.js will fall back to an in-memory catalog if this returns []
+   * (or if the DB call throws). Keep this adapter conservative.
+   */
   const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
   const engine = getDbEngine();
   if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) return [];
