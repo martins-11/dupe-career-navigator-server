@@ -38,10 +38,8 @@ router.get('/search', async (req, res) => {
       return res.json([]);
     }
 
-    // Ensure seed exists (mirrors recommendations behavior). This is safe if already seeded.
-    await recommendationsService.getRoleRecommendationsFromFinalPersona({ pivot: true }).catch(() => {
-      // ignore: this call requires a Final Persona; we only want the side-effect seeding attempt.
-    });
+    // Note: do not attempt to seed here. Seeding is handled by explicit scripts (scripts/seed-roles.js)
+    // and by services that truly require it. Search should be read-only and deterministic.
 
     const q = req.query?.q != null ? String(req.query.q).trim() : '';
 

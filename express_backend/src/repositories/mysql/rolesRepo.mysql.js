@@ -165,10 +165,10 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
    * Search roles in MySQL with dynamic AND-based multi-filter logic.
    *
    * Optional query inputs:
-   * - q: keyword, matched against role_title OR core_skills_json via LIKE
+   * - q: keyword, matched against role_title OR core_skills_json (JSON-aware) via LIKE
    * - industry: exact match (case-insensitive)
-   * - skills: list of required skills (must all exist in core_skills_json array)
-   * - minSalary/maxSalary: numeric filters applied against estimated_salary_range
+   * - skills: list of required skills (must all exist in core_skills_json JSON array)
+   * - minSalary/maxSalary: numeric filters applied against estimated_salary_range (parsed best-effort)
    *
    * IMPORTANT:
    * - Missing filters are ignored (no-op), not treated as null constraints.
@@ -187,7 +187,9 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   const qStr = String(q || '').trim();
   if (qStr) {
-    where.push('(role_title LIKE ? OR CAST(core_skills_json AS CHAR) LIKE ?)');
+    // Use JSON_EXTRACT for JSON columns instead of CAST(... AS CHAR).
+    // This avoids subtle JSON string representation issues that can lead to empty matches.
+    where.push('(role_title LIKE ? OR JSON_EXTRACT(core_skills_json, \'$\') LIKE ?)');
     const like = `%${qStr}%`;
     params.push(like, like);
   }
@@ -197,15 +199,14 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     params.push(String(industry));
   }
 
-  // Skills filtering is tricky to do portably in MySQL when stored as JSON text.
-  // We apply a best-effort SQL prefilter (LIKE) and enforce exact containment in JS.
+  // Skills: use JSON_CONTAINS for exact containment in JSON array.
+  // This is both more accurate and less fragile than LIKE on serialized JSON.
   const skillsList = Array.isArray(skills) ? skills : [];
   const normalizedSkills = skillsList.map((s) => String(s).trim()).filter(Boolean);
   if (normalizedSkills.length > 0) {
     for (const s of normalizedSkills) {
-      // JSON array items will be quoted; matching '"skill"' reduces false positives.
-      where.push('CAST(core_skills_json AS CHAR) LIKE ?');
-      params.push(`%"${String(s).replace(/"/g, '\\"')}"%`);
+      where.push("JSON_CONTAINS(core_skills_json, JSON_QUOTE(?), '$')");
+      params.push(String(s));
     }
   }
 
@@ -250,7 +251,6 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
       industry: r.industry,
       skills_required: parsedSkills,
       salary_range: r.salary_range,
-      // Keep metadata explicit and easy to inspect in logs.
       match_metadata: {
         matchedFilters
       },
@@ -260,7 +260,8 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     };
   });
 
-  // Enforce exact skills containment in JS (case-insensitive)
+  // Defensive: even though SQL uses JSON_CONTAINS, keep a JS containment check to avoid surprises
+  // if core_skills_json contains mixed casing or unexpected non-string elements.
   let filtered = rows;
   if (normalizedSkills.length > 0) {
     filtered = filtered.filter((r) => _roleSkillsContainAll(r.skills_required, normalizedSkills));
@@ -270,9 +271,7 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
   if (minS != null) {
     filtered = filtered.filter((r) => {
       const { min, max } = r._internal.salaryBounds || { min: null, max: null };
-      // Keep rows with unknown bounds out of salary-filtered results.
       if (min == null && max == null) return false;
-      // If max exists, ensure role can pay at least minS.
       const roleMax = max != null ? max : min;
       return roleMax != null && roleMax >= minS;
     });
@@ -282,15 +281,12 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     filtered = filtered.filter((r) => {
       const { min, max } = r._internal.salaryBounds || { min: null, max: null };
       if (min == null && max == null) return false;
-      // Ensure role minimum is not above the user's max constraint.
       const roleMin = min != null ? min : max;
       return roleMin != null && roleMin <= maxS;
     });
   }
 
-  // Return up to requested limit after post-filtering.
   return filtered.slice(0, lim).map((r) => {
-    // Strip internal fields
     const { _internal, ...publicRow } = r;
     return publicRow;
   });
