@@ -17,6 +17,7 @@
     "smoke:bedrock": "node scripts/test-bedrock.js",
     "seed:roles": "node scripts/seed-roles.js",
     "verify:roles": "node scripts/verify-roles.js",
+    "verify:roles-search": "node scripts/verify-roles-search.js",
     "test": "NODE_ENV=test jest --runInBand",
     "test:integration": "NODE_ENV=test jest --runInBand --testPathPatterns=tests/integration"
   },

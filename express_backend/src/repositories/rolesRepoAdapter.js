@@ -29,8 +29,28 @@ async function bulkInsertRoles(roles) {
   return mysqlRepo.bulkInsertRoles(roles);
 }
 
+// PUBLIC_INTERFACE
+async function roleExists(roleId) {
+  /** Return true if role exists when MySQL is configured; otherwise false. */
+  const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
+  const engine = getDbEngine();
+  if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) return false;
+  return mysqlRepo._roleExists(roleId);
+}
+
+ // PUBLIC_INTERFACE
+async function searchRoles({ q = '', industry = null, salaryRange = null, limit = 50 } = {}) {
+  /** Search roles when MySQL is configured; otherwise return []. */
+  const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
+  const engine = getDbEngine();
+  if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) return [];
+  return mysqlRepo.searchRoles({ q, industry, salaryRange, limit });
+}
+
 module.exports = {
   countRoles,
   listRoles,
-  bulkInsertRoles
+  bulkInsertRoles,
+  roleExists,
+  searchRoles
 };

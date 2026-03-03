@@ -93,8 +93,88 @@ async function bulkInsertRoles(roles) {
   return { inserted };
 }
 
+async function _roleExists(roleId) {
+  const res = await dbQuery(
+    `
+    SELECT role_id
+    FROM roles
+    WHERE role_id = ?
+    LIMIT 1
+    `,
+    [roleId]
+  );
+  return Boolean(res.rows && res.rows[0] && res.rows[0].role_id);
+}
+
+// PUBLIC_INTERFACE
+async function searchRoles({ q = '', industry = null, salaryRange = null, limit = 50 } = {}) {
+  /**
+   * Search roles in MySQL.
+   *
+   * Matching:
+   * - role_title LIKE %q%
+   * - OR core_skills_json LIKE %q% (simple JSON text match; pragmatic for Phase 1)
+   *
+   * Optional filters:
+   * - industry (case-insensitive exact match)
+   * - salaryRange (case-insensitive exact match; stored as estimated_salary_range)
+   *
+   * Output keys required by user instructions:
+   * - role_id, role_title, industry, skills_required, salary_range
+   */
+  const lim = Math.max(1, Math.min(Number(limit) || 50, 200));
+
+  const where = [];
+  const params = [];
+
+  const qStr = String(q || '').trim();
+  if (qStr) {
+    // Use a single LIKE string for both title and skills JSON.
+    where.push('(role_title LIKE ? OR CAST(core_skills_json AS CHAR) LIKE ?)');
+    const like = `%${qStr}%`;
+    params.push(like, like);
+  }
+
+  if (industry) {
+    where.push('LOWER(industry) = LOWER(?)');
+    params.push(String(industry));
+  }
+
+  if (salaryRange) {
+    where.push('LOWER(estimated_salary_range) = LOWER(?)');
+    params.push(String(salaryRange));
+  }
+
+  const sql = `
+    SELECT
+      role_id,
+      role_title,
+      industry,
+      core_skills_json as skills_required,
+      estimated_salary_range as salary_range
+    FROM roles
+    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    ORDER BY role_title ASC
+    LIMIT ?
+  `;
+
+  params.push(lim);
+
+  const res = await dbQuery(sql, params);
+
+  return (res.rows || []).map((r) => ({
+    role_id: r.role_id,
+    role_title: r.role_title,
+    industry: r.industry,
+    skills_required: _jsonParseIfNeeded(r.skills_required) || [],
+    salary_range: r.salary_range
+  }));
+}
+
 module.exports = {
   countRoles,
   listRoles,
-  bulkInsertRoles
+  bulkInsertRoles,
+  searchRoles,
+  _roleExists
 };

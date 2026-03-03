@@ -7,6 +7,9 @@ const {
   PersonaVersionCreateRequest
 } = require('../models/personas');
 const personasRepo = require('../repositories/personasRepoAdapter');
+const rolesRepo = require('../repositories/rolesRepoAdapter');
+const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
+const { PersonaTargetRoleSelectRequest } = require('../models/targets');
 
 const router = express.Router();
 
@@ -133,6 +136,52 @@ router.get('/:id/versions/latest', async (req, res) => {
     if (!latest) return res.status(404).json({ error: 'persona_version_not_found' });
 
     return res.json(latest);
+  } catch (err) {
+    return handleRepoError(res, err);
+  }
+});
+
+// PUBLIC_INTERFACE
+router.post('/target-role', async (req, res) => {
+  /**
+   * Persist the user's selected target future role.
+   *
+   * Body:
+   * { "user_id": "uuid", "role_id": "uuid", "time_horizon": "Near" }
+   *
+   * Validation:
+   * - role_id must exist in roles table.
+   *
+   * Persistence:
+   * - Writes to user_targets table (DB-optional; if DB not configured, returns 503).
+   */
+  const parsed = PersonaTargetRoleSelectRequest.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
+  }
+
+  try {
+    // Ensure roles table is populated at least with seed data (best-effort).
+    // If DB isn't configured, rolesRepo.searchRoles/listRoles will be [] which is fine; we then 503 for persistence.
+    const roleExists = await rolesRepo.roleExists(parsed.data.role_id);
+    if (!roleExists) {
+      return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles table.' });
+    }
+
+    const saved = await userTargetsRepo.upsertUserTargetRole({
+      userId: parsed.data.user_id,
+      roleId: parsed.data.role_id,
+      timeHorizon: parsed.data.time_horizon
+    });
+
+    if (!saved) {
+      return res.status(503).json({ error: 'db_unavailable', message: 'Database not configured for persistence.' });
+    }
+
+    return res.status(201).json({
+      status: 'ok',
+      target: saved
+    });
   } catch (err) {
     return handleRepoError(res, err);
   }
