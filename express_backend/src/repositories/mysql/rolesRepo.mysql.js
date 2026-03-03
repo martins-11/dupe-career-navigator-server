@@ -33,7 +33,7 @@ async function listRoles({ limit = 1000 } = {}) {
   /** List roles from the catalog table. */
   const lim = Math.max(1, Math.min(Number(limit) || 1000, 5000));
 
-  const res = await dbQuery(
+  const res = await connection.dbQuery(
     `
     SELECT
       role_id as roleId,
@@ -94,7 +94,7 @@ async function bulkInsertRoles(roles) {
 }
 
 async function _roleExists(roleId) {
-  const res = await dbQuery(
+  const res = await connection.dbQuery(
     `
     SELECT role_id
     FROM roles
