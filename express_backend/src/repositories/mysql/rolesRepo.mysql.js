@@ -231,7 +231,13 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   if (qStr) {
     const like = `%${qStr}%`;
-    where.push('(LOWER(role_title) LIKE LOWER(?) OR LOWER(core_skills_json) LIKE LOWER(?))');
+
+    // core_skills_json is a MySQL JSON column. Applying LOWER()/LIKE directly to JSON can yield
+    // non-matching behavior depending on MySQL version/collation. Cast to CHAR so string
+    // operations behave predictably.
+    where.push(
+      '(LOWER(role_title) LIKE LOWER(?) OR LOWER(CAST(core_skills_json AS CHAR(10000))) LIKE LOWER(?))'
+    );
     params.push(like, like);
   }
 
@@ -257,43 +263,51 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
   //
   // We store salary as a string (e.g. "$130k-$210k"). For filtering we extract an approximate
   // numeric *upper bound* in dollars:
-  //  - If the range contains '-', we use the right-hand side (max).
-  //  - Otherwise we use the first numeric token.
-  //  - If the token has 'k' suffix we multiply by 1000.
+  //  - Normalize: remove '$', ',', spaces, and lowercase.
+  //  - If the range contains '-', take the right-hand side (max).
+  //  - If it ends in 'k', strip it and multiply by 1000.
   //
-  // This is intentionally best-effort and designed to work with our seeded formats.
-  // We still keep JS-side filtering afterwards as a secondary safety net.
-  const salaryUpperExpr = `
+  // Note: We keep JS-side salary filtering as a defensive secondary check.
+  const salaryCleanExpr = `
+    LOWER(
+      REPLACE(
+        REPLACE(
+          REPLACE(TRIM(estimated_salary_range), '$', ''),
+        ',', ''),
+      ' ', '')
+    )
+  `;
+
+  const salaryUpperTokenExpr = `
     (
       CASE
         WHEN estimated_salary_range IS NULL OR TRIM(estimated_salary_range) = '' THEN NULL
-        ELSE
-          (
-            CASE
-              WHEN INSTR(LOWER(estimated_salary_range), '-') > 0
-                THEN SUBSTRING_INDEX(LOWER(REPLACE(REPLACE(REPLACE(estimated_salary_range,'$',''),',',''),' ','')),'-',-1)
-              ELSE
-                LOWER(REPLACE(REPLACE(REPLACE(estimated_salary_range,'$',''),',',''),' ','')) 
-            END
-          )
+        WHEN INSTR(${salaryCleanExpr}, '-') > 0 THEN SUBSTRING_INDEX(${salaryCleanExpr}, '-', -1)
+        ELSE ${salaryCleanExpr}
       END
     )
   `;
 
-  // Convert extracted token into numeric dollars.
   const salaryUpperDollarsExpr = `
     (
       CASE
-        WHEN ${salaryUpperExpr} IS NULL THEN NULL
-        WHEN RIGHT(${salaryUpperExpr}, 1) = 'k'
-          THEN CAST(REPLACE(${salaryUpperExpr}, 'k', '') AS DECIMAL(12,2)) * 1000
-        ELSE CAST(${salaryUpperExpr} AS DECIMAL(12,2))
+        WHEN ${salaryUpperTokenExpr} IS NULL OR ${salaryUpperTokenExpr} = '' THEN NULL
+        WHEN RIGHT(${salaryUpperTokenExpr}, 1) = 'k'
+          THEN CAST(REPLACE(${salaryUpperTokenExpr}, 'k', '') AS DECIMAL(12,2)) * 1000
+        ELSE CAST(${salaryUpperTokenExpr} AS DECIMAL(12,2))
       END
     )
   `;
 
-  const minS = Number.isFinite(Number(minSalary)) ? Number(minSalary) : null;
-  const maxS = Number.isFinite(Number(maxSalary)) ? Number(maxSalary) : null;
+  // Normalize salary bounds:
+  // - treat missing/empty as null
+  // - treat <= 0 as "not provided" (important because some upstream layers default
+  //   missing max_salary to 0, which would otherwise create an impossible predicate)
+  const minSRaw = Number.isFinite(Number(minSalary)) ? Number(minSalary) : null;
+  const maxSRaw = Number.isFinite(Number(maxSalary)) ? Number(maxSalary) : null;
+
+  const minS = minSRaw != null && minSRaw > 0 ? minSRaw : null;
+  const maxS = maxSRaw != null && maxSRaw > 0 ? maxSRaw : null;
 
   if (minS != null) {
     where.push(`${salaryUpperDollarsExpr} >= ?`);
