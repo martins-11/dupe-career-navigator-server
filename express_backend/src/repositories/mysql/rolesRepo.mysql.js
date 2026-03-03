@@ -184,7 +184,7 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     (minSalary != null && Number.isFinite(Number(minSalary))) ||
     (maxSalary != null && Number.isFinite(Number(maxSalary)));
 
-  // 2) Standardize: unfiltered path must be dead-simple and reliable.
+  // Standardize: unfiltered path must be dead-simple and reliable.
   if (!hasFilters) {
     const query = `
       SELECT
@@ -232,11 +232,15 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
   }
 
   // Skills: AND semantics (best-effort LIKE match against serialized JSON).
+  //
+  // IMPORTANT:
+  // MySQL JSON text contains normal quotes around string items, e.g. ["SQL","Excel"].
+  // Therefore a working match token is %"SQL"% (not %\"SQL\"%).
   if (normalizedSkills.length > 0) {
     for (const s of normalizedSkills) {
       where.push('LOWER(core_skills_json) LIKE LOWER(?)');
-      // Match JSON string token "Skill" (quoted) within the serialized json.
-      params.push(`%\\\\\\\"${String(s).replace(/\\\"/g, '\\\\\\\\\\\"')}\\\\\\\"%`);
+      const token = `"${String(s).replace(/"/g, '').trim()}"`;
+      params.push(`%${token}%`);
     }
   }
 
@@ -259,13 +263,13 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   params.push(sqlLimit);
 
-  // 1) Debugging trace: log SQL + params before execution.
+  // Debugging trace: log SQL + params before execution.
   // eslint-disable-next-line no-console
   console.log('SQL Query:', query, 'Params:', params);
 
   const results = await connection.dbQuery(query, params);
 
-  // 1) Debugging trace: log raw DB results.
+  // Debugging trace: log raw DB results.
   // eslint-disable-next-line no-console
   console.log('Raw DB Results:', results);
 

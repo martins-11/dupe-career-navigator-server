@@ -83,6 +83,14 @@ router.get('/search', async (req, res) => {
 
     let matches = null;
 
+    if (debugRolesSearch) {
+      // eslint-disable-next-line no-console
+      console.log('[roles.search] repoSelection:', {
+        engine,
+        shouldAttemptDb
+      });
+    }
+
     if (shouldAttemptDb) {
       try {
         matches = await rolesRepo.searchRoles({
