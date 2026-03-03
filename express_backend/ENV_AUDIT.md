@@ -1,25 +1,40 @@
-# Backend env audit (Express)
+# Backend `.env` audit (required keys)
 
-Current `.env` in `career-navigator-server/express_backend` contains:
+This file records which required environment variable keys are missing/empty in the current backend `.env`, without exposing any secret values.
 
-- ✅ PORT
-- ✅ NODE_ENV
-- ✅ HOST
-- ✅ TRUST_PROXY
-- ✅ CORS/URL keys: BACKEND_URL, FRONTEND_URL, WS_URL, SITE_URL, ALLOWED_*
+## Required keys checked
 
-Missing (recommended/required for full production feature set):
+- PORT
+- DB_HOST
+- DB_USER
+- DB_PASSWORD
+- DB_NAME
+- CLAUDE_API_KEY
+- AWS_ACCESS_KEY_ID
+- AWS_SECRET_ACCESS_KEY
+- AWS_REGION
+- JWT_SECRET
 
-- DB_*:
-  - DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_SSL
-- Auth:
-  - JWT_SECRET
-- AI:
-  - CLAUDE_API_KEY (if/when Claude is called directly)
-- AWS:
-  - AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, (optional) AWS_SESSION_TOKEN
-  - (optional, if used) AWS_BEDROCK_MODEL_ID
+## Findings (from current `.env`)
 
-Notes:
-- The backend can still run in scaffold/memory mode without DB/AWS/Claude credentials.
-- Add the missing keys to `.env` when enabling those features; see `.env.example`.
+### Present and non-empty
+- PORT
+
+### Missing (not defined)
+- DB_HOST
+- DB_USER
+- DB_PASSWORD
+- DB_NAME
+- CLAUDE_API_KEY
+- AWS_ACCESS_KEY_ID
+- AWS_SECRET_ACCESS_KEY
+- AWS_REGION
+- JWT_SECRET
+
+### Present but empty
+- (none)
+
+## Notes
+
+- This audit intentionally does **not** print any `.env` values.
+- Add the missing keys to `.env` (or your deployment env) to enable DB connectivity, JWT signing, and external AI/cloud integrations.
