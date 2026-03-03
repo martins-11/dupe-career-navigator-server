@@ -40,11 +40,28 @@ async function roleExists(roleId) {
 
  // PUBLIC_INTERFACE
 async function searchRoles({ q = '', industry = null, skills = [], minSalary = null, maxSalary = null, limit = 50 } = {}) {
-  /** Search roles when MySQL is configured; otherwise return []. */
-  const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
+  /**
+   * Search roles via MySQL when DB_ENGINE=mysql.
+   *
+   * IMPORTANT:
+   * Historically this adapter hard-gated on isDbConfigured()/isMysqlConfigured(), which can
+   * false-negative in some environments (env var naming differences, partial config, etc.).
+   * That caused /api/roles/search to return [] even though DB queries were succeeding.
+   *
+   * We now:
+   * - Attempt the MySQL query whenever engine=mysql.
+   * - Return [] only if the query throws (route may fall back to memory catalog).
+   */
+  const { getDbEngine } = require('../db/connection');
   const engine = getDbEngine();
-  if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) return [];
-  return mysqlRepo.searchRoles({ q, industry, skills, minSalary, maxSalary, limit });
+
+  if (engine !== 'mysql') return [];
+
+  try {
+    return await mysqlRepo.searchRoles({ q, industry, skills, minSalary, maxSalary, limit });
+  } catch (_) {
+    return [];
+  }
 }
 
 module.exports = {

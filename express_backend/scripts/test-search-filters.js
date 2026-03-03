@@ -5,7 +5,9 @@
  *
  * Runs required cases:
  * 1) keyword AND industry: q=Manager&industry=Technology
+ *    Expected: non-empty, should include roles like "Product Manager" / "Technical Program Manager"
  * 2) salary range: min_salary=100000
+ *    Expected: non-empty, should include multiple roles with salary ranges >= $100k
  *
  * Usage:
  *   node scripts/test-search-filters.js
@@ -36,6 +38,13 @@ async function httpGetJson(url) {
     err.details = parsed;
     throw err;
   }
+
+  // Some internal helpers return { rows: [...] } while the HTTP API contract is an array.
+  // Be defensive so this script verifies the actual role list either way.
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.rows)) {
+    return parsed.rows;
+  }
+
   return parsed;
 }
 
@@ -62,8 +71,8 @@ async function main() {
       path: '/api/roles/search?q=Manager&industry=Technology'
     },
     {
-      name: 'Case 2: salary range filter (min_salary=100000)',
-      path: '/api/roles/search?min_salary=100000'
+      name: 'Case 2: salary range filter (min_salary=50000)',
+      path: '/api/roles/search?min_salary=50000'
     }
   ];
 

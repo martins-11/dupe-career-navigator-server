@@ -1,6 +1,6 @@
 'use strict';
 
-const { dbQuery } = require('../../db/connection');
+const connection = require('../../db/connection');
 const { uuidV4 } = require('../../utils/uuid');
 
 function _jsonParseIfNeeded(v) {
@@ -19,7 +19,7 @@ function _jsonParseIfNeeded(v) {
 // PUBLIC_INTERFACE
 async function countRoles() {
   /** Returns the number of roles in the roles table. */
-  const res = await dbQuery(
+  const res = await connection.dbQuery(
     `
     SELECT COUNT(*) as cnt
     FROM roles
@@ -33,7 +33,7 @@ async function listRoles({ limit = 1000 } = {}) {
   /** List roles from the catalog table. */
   const lim = Math.max(1, Math.min(Number(limit) || 1000, 5000));
 
-  const res = await dbQuery(
+  const res = await connection.dbQuery(
     `
     SELECT
       role_id as roleId,
@@ -69,7 +69,7 @@ async function bulkInsertRoles(roles) {
 
   for (const r of list) {
     const roleId = r.roleId || uuidV4();
-    await dbQuery(
+    await connection.dbQuery(
       `
       INSERT INTO roles (
         role_id, role_title, industry, core_skills_json, seniority_levels_json, estimated_salary_range, created_at, updated_at
@@ -94,7 +94,7 @@ async function bulkInsertRoles(roles) {
 }
 
 async function _roleExists(roleId) {
-  const res = await dbQuery(
+  const res = await connection.dbQuery(
     `
     SELECT role_id
     FROM roles
@@ -121,7 +121,9 @@ function _parseSalaryRangeToBounds(s) {
   const tokens = raw.match(/(\d+(\.\d+)?)(\s*[kmb])?/g) || [];
   const values = tokens
     .map((t) => {
-      const m = String(t).trim().match(/^(\d+(\.\d+)?)(\s*[kmb])?$/);
+      const m = String(t)
+        .trim()
+        .match(/^(\d+(\.\d+)?)(\s*[kmb])?$/);
       if (!m) return null;
       const num = Number(m[1]);
       if (!Number.isFinite(num)) return null;
@@ -146,9 +148,7 @@ function _parseSalaryRangeToBounds(s) {
  */
 function _roleSkillsContainAll(roleSkills, requiredSkills) {
   const roleSet = new Set(
-    (Array.isArray(roleSkills) ? roleSkills : [])
-      .map((s) => String(s).trim().toLowerCase())
-      .filter(Boolean)
+    (Array.isArray(roleSkills) ? roleSkills : []).map((s) => String(s).trim().toLowerCase()).filter(Boolean)
   );
 
   for (const req of requiredSkills) {
@@ -164,56 +164,151 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
   /**
    * Search roles in MySQL with dynamic AND-based multi-filter logic.
    *
-   * Optional query inputs:
-   * - q: keyword, matched against role_title OR core_skills_json via LIKE
-   * - industry: exact match (case-insensitive)
-   * - skills: list of required skills (must all exist in core_skills_json array)
-   * - minSalary/maxSalary: numeric filters applied against estimated_salary_range
+   * Diagnostic requirements (Day 1):
+   * - Log SQL query + params.
+   * - Log raw DB results.
    *
-   * IMPORTANT:
-   * - Missing filters are ignored (no-op), not treated as null constraints.
-   * - SQL is built dynamically to include only provided filters.
-   *
-   * Output keys required by user instructions:
-   * - role_id, role_title, industry, skills_required, salary_range
-   *
-   * Additional response metadata:
-   * - match_metadata: { matchedFilters: string[] }
+   * Standardization requirement:
+   * - If q and all filters are empty, run a simple `SELECT * FROM roles LIMIT 10` path.
    */
   const lim = Math.max(1, Math.min(Number(limit) || 50, 200));
+
+  const qStr = String(q || '').trim();
+
+  // IMPORTANT:
+  // Express routes often pass `industry || null`, but if an empty string sneaks through,
+  // it must be treated as "no filter". Otherwise we generate:
+  //   WHERE LOWER(industry) = LOWER('')
+  // which matches nothing and makes filtered searches always return [].
+  const industryNorm =
+    typeof industry === 'string' ? (industry.trim() ? industry.trim() : null) : industry != null ? String(industry) : null;
+
+  const skillsList = Array.isArray(skills) ? skills : [];
+  const normalizedSkills = skillsList.map((s) => String(s).trim()).filter(Boolean);
+
+  const hasFilters =
+    Boolean(qStr) ||
+    Boolean(industryNorm) ||
+    normalizedSkills.length > 0 ||
+    (minSalary != null && Number.isFinite(Number(minSalary))) ||
+    (maxSalary != null && Number.isFinite(Number(maxSalary)));
+
+  // Standardize: unfiltered path must be dead-simple and reliable.
+  if (!hasFilters) {
+    const query = `
+      SELECT
+        role_id,
+        role_title,
+        industry,
+        core_skills_json as skills_required,
+        estimated_salary_range as salary_range
+      FROM roles
+      ORDER BY role_title ASC
+      LIMIT 10
+    `;
+    const params = [];
+
+    // eslint-disable-next-line no-console
+    console.log('SQL Query:', query, 'Params:', params);
+
+    const res = await connection.dbQuery(query, params);
+
+    // eslint-disable-next-line no-console
+    console.log('Raw DB Results:', res);
+
+    return (res.rows || []).map((r) => ({
+      role_id: r.role_id,
+      role_title: r.role_title,
+      industry: r.industry,
+      skills_required: _jsonParseIfNeeded(r.skills_required) || [],
+      salary_range: r.salary_range,
+      match_metadata: { matchedFilters: [] }
+    }));
+  }
 
   const where = [];
   const params = [];
 
-  const qStr = String(q || '').trim();
   if (qStr) {
-    where.push('(role_title LIKE ? OR CAST(core_skills_json AS CHAR) LIKE ?)');
     const like = `%${qStr}%`;
+    where.push('(LOWER(role_title) LIKE LOWER(?) OR LOWER(core_skills_json) LIKE LOWER(?))');
     params.push(like, like);
   }
 
-  if (industry) {
+  if (industryNorm) {
     where.push('LOWER(industry) = LOWER(?)');
-    params.push(String(industry));
+    params.push(String(industryNorm));
   }
 
-  // Skills filtering is tricky to do portably in MySQL when stored as JSON text.
-  // We apply a best-effort SQL prefilter (LIKE) and enforce exact containment in JS.
-  const skillsList = Array.isArray(skills) ? skills : [];
-  const normalizedSkills = skillsList.map((s) => String(s).trim()).filter(Boolean);
+  // Skills: AND semantics (best-effort LIKE match against serialized JSON).
+  //
+  // IMPORTANT:
+  // MySQL JSON text contains normal quotes around string items, e.g. ["SQL","Excel"].
+  // Therefore a working match token is %"SQL"% (not %\"SQL\"%).
   if (normalizedSkills.length > 0) {
     for (const s of normalizedSkills) {
-      // JSON array items will be quoted; matching '"skill"' reduces false positives.
-      where.push('CAST(core_skills_json AS CHAR) LIKE ?');
-      params.push(`%"${String(s).replace(/"/g, '\\"')}"%`);
+      where.push('LOWER(core_skills_json) LIKE LOWER(?)');
+      const token = `"${String(s).replace(/"/g, '').trim()}"`;
+      params.push(`%${token}%`);
     }
   }
 
-  // Salary filtering is applied in JS after fetch; we prefetch more rows to avoid missing matches.
-  const hasSalaryFilter = Number.isFinite(Number(minSalary)) || Number.isFinite(Number(maxSalary));
-  const sqlLimit = hasSalaryFilter ? Math.min(lim * 10, 2000) : lim;
+  // Salary filtering (best-effort) in SQL:
+  //
+  // We store salary as a string (e.g. "$130k-$210k"). For filtering we extract an approximate
+  // numeric *upper bound* in dollars:
+  //  - If the range contains '-', we use the right-hand side (max).
+  //  - Otherwise we use the first numeric token.
+  //  - If the token has 'k' suffix we multiply by 1000.
+  //
+  // This is intentionally best-effort and designed to work with our seeded formats.
+  // We still keep JS-side filtering afterwards as a secondary safety net.
+  const salaryUpperExpr = `
+    (
+      CASE
+        WHEN estimated_salary_range IS NULL OR TRIM(estimated_salary_range) = '' THEN NULL
+        ELSE
+          (
+            CASE
+              WHEN INSTR(LOWER(estimated_salary_range), '-') > 0
+                THEN SUBSTRING_INDEX(LOWER(REPLACE(REPLACE(REPLACE(estimated_salary_range,'$',''),',',''),' ','')),'-',-1)
+              ELSE
+                LOWER(REPLACE(REPLACE(REPLACE(estimated_salary_range,'$',''),',',''),' ','')) 
+            END
+          )
+      END
+    )
+  `;
 
-  const sql = `
+  // Convert extracted token into numeric dollars.
+  const salaryUpperDollarsExpr = `
+    (
+      CASE
+        WHEN ${salaryUpperExpr} IS NULL THEN NULL
+        WHEN RIGHT(${salaryUpperExpr}, 1) = 'k'
+          THEN CAST(REPLACE(${salaryUpperExpr}, 'k', '') AS DECIMAL(12,2)) * 1000
+        ELSE CAST(${salaryUpperExpr} AS DECIMAL(12,2))
+      END
+    )
+  `;
+
+  const minS = Number.isFinite(Number(minSalary)) ? Number(minSalary) : null;
+  const maxS = Number.isFinite(Number(maxSalary)) ? Number(maxSalary) : null;
+
+  if (minS != null) {
+    where.push(`${salaryUpperDollarsExpr} >= ?`);
+    params.push(minS);
+  }
+
+  if (maxS != null) {
+    where.push(`${salaryUpperDollarsExpr} <= ?`);
+    params.push(maxS);
+  }
+
+  // With SQL-side salary filtering, we don't need to massively prefetch anymore.
+  const sqlLimit = lim;
+
+  const query = `
     SELECT
       role_id,
       role_title,
@@ -228,12 +323,17 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   params.push(sqlLimit);
 
-  const res = await dbQuery(sql, params);
+  // Debugging trace: log SQL + params before execution.
+  // eslint-disable-next-line no-console
+  console.log('SQL Query:', query, 'Params:', params);
 
-  const minS = Number.isFinite(Number(minSalary)) ? Number(minSalary) : null;
-  const maxS = Number.isFinite(Number(maxSalary)) ? Number(maxSalary) : null;
+  const results = await connection.dbQuery(query, params);
 
-  const rows = (res.rows || []).map((r) => {
+  // Debugging trace: log raw DB results.
+  // eslint-disable-next-line no-console
+  console.log('Raw DB Results:', results);
+
+  const rows = (results.rows || []).map((r) => {
     const parsedSkills = _jsonParseIfNeeded(r.skills_required) || [];
     const salaryBounds = _parseSalaryRangeToBounds(r.salary_range);
 
@@ -250,7 +350,6 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
       industry: r.industry,
       skills_required: parsedSkills,
       salary_range: r.salary_range,
-      // Keep metadata explicit and easy to inspect in logs.
       match_metadata: {
         matchedFilters
       },
@@ -260,7 +359,7 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     };
   });
 
-  // Enforce exact skills containment in JS (case-insensitive)
+  // Defensive skills containment check.
   let filtered = rows;
   if (normalizedSkills.length > 0) {
     filtered = filtered.filter((r) => _roleSkillsContainAll(r.skills_required, normalizedSkills));
@@ -270,9 +369,7 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
   if (minS != null) {
     filtered = filtered.filter((r) => {
       const { min, max } = r._internal.salaryBounds || { min: null, max: null };
-      // Keep rows with unknown bounds out of salary-filtered results.
       if (min == null && max == null) return false;
-      // If max exists, ensure role can pay at least minS.
       const roleMax = max != null ? max : min;
       return roleMax != null && roleMax >= minS;
     });
@@ -282,15 +379,12 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     filtered = filtered.filter((r) => {
       const { min, max } = r._internal.salaryBounds || { min: null, max: null };
       if (min == null && max == null) return false;
-      // Ensure role minimum is not above the user's max constraint.
       const roleMin = min != null ? min : max;
       return roleMin != null && roleMin <= maxS;
     });
   }
 
-  // Return up to requested limit after post-filtering.
   return filtered.slice(0, lim).map((r) => {
-    // Strip internal fields
     const { _internal, ...publicRow } = r;
     return publicRow;
   });
