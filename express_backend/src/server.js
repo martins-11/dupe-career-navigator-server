@@ -33,6 +33,11 @@ const aiRouter = require('./routes/ai');
 const orchestrationRouter = require('./routes/orchestration');
 const docsRouter = require('./routes/docs');
 
+const recommendationsRouter = require('./routes/recommendations');
+const pathsRouter = require('./routes/paths');
+const planRouter = require('./routes/plan');
+const profileRouter = require('./routes/profile');
+
 const app = express();
 
 app.set('trust proxy', String(process.env.TRUST_PROXY).toLowerCase() === 'true');
@@ -58,6 +63,11 @@ app.use('/ai', aiRouter);
 app.use('/orchestration', orchestrationRouter);
 app.use('/documents', documentsRouter);
 app.use('/personas', personasRouter);
+
+app.use('/api/recommendations', recommendationsRouter);
+app.use('/api/paths', pathsRouter);
+app.use('/api/plan', planRouter);
+app.use('/api/profile', profileRouter);
 
 app.use('/docs', docsRouter);
 
