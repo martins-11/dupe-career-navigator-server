@@ -37,6 +37,7 @@ const recommendationsRouter = require('./routes/recommendations');
 const pathsRouter = require('./routes/paths');
 const planRouter = require('./routes/plan');
 const profileRouter = require('./routes/profile');
+const rolesRouter = require('./routes/roles');
 
 const app = express();
 
@@ -79,6 +80,7 @@ app.use('/api/recommendations', recommendationsRouter);
 app.use('/api/paths', pathsRouter);
 app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
+app.use('/api/roles', rolesRouter);
 
 app.use('/docs', docsRouter);
 

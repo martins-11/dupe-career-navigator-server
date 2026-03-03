@@ -1,0 +1,13 @@
+{
+  "timestampUtc": "2026-03-03T00:00:00Z",
+  "script": "scripts/test-bedrock.js",
+  "ok": true,
+  "region": "us-east-2",
+  "modelId": "arn:aws:bedrock:us-east-2:461029538476:inference-profile/global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "latencyMs": 1874,
+  "httpStatusCode": 200,
+  "notes": [
+    "Response body contained assistant text: \"Hello! How can I help you today?\"",
+    "Node emitted an AWS SDK deprecation warning about Node 18 support ending in Jan 2026; not a functional failure."
+  ]
+}

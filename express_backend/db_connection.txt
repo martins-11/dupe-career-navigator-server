@@ -1,0 +1,23 @@
+# NOTE: Do NOT commit real credentials to git.
+# This file is used during development/ops to copy/paste a known-good MySQL CLI connection command.
+#
+# Provided connection details (from instructions attachment):
+# Host: db-career-navigator-dt3.cejofalfd7i.2.us-east-2.rds.amazonaws.com
+# User: admin
+# Password: Bot5vvgVPfqAF2e93UF4
+# Database: career_navigator_dev
+# Port: 3306
+#
+# CLI connection command (no space after -p):
+mysql -h db-career-navigator-dt3.cejofalfd7i.2.us-east-2.rds.amazonaws.com -P 3306 -u admin -pBot5vvgVPfqAF2e93UF4 career_navigator_dev
+
+# Sanity query (from instructions):
+mysql -h db-career-navigator-dt3.cejofalfd7i.2.us-east-2.rds.amazonaws.com -u admin -pBot5vvgVPfqAF2e93UF4 career_navigator_dev -e "SELECT role_title, industry FROM roles LIMIT 5;"
+
+# Captured output (2026-03-03)
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ERROR 2005 (HY000): Unknown MySQL server host 'db-career-navigator-dt3.cejofalfd7i.2.us-east-2.rds.amazonaws.com' (-2)
+
+# Additional DNS check output:
+# python -c "import socket; print(socket.gethostbyname('<host>'))"
+DNS_ERROR: [Errno -2] Name or service not known

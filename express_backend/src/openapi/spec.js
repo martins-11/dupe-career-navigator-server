@@ -43,7 +43,8 @@ const openapiDefinition = {
     { name: 'Recommendations', description: 'Role recommendations and comparisons (placeholder endpoints).' },
     { name: 'Paths', description: 'Career path exploration endpoints (placeholder endpoints).' },
     { name: 'Plan', description: 'Planning/milestones endpoints (placeholder endpoints).' },
-    { name: 'Profile', description: 'Profile scoring endpoints (placeholder endpoints).' }
+    { name: 'Profile', description: 'Profile scoring endpoints (placeholder endpoints).' },
+    { name: 'Roles', description: 'Roles catalog search and selection endpoints.' }
   ],
   servers: [
     {
@@ -824,6 +825,42 @@ const openapiDefinition = {
           scoring: { type: 'object', additionalProperties: true }
         },
         required: ['status', 'scoring']
+      },
+
+      RoleCatalogItem: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          role_id: { type: 'string', format: 'uuid' },
+          role_title: { type: 'string' },
+          industry: { type: 'string', nullable: true },
+          skills_required: { type: 'array', items: { type: 'string' } },
+          salary_range: { type: 'string', nullable: true }
+        },
+        required: ['role_id', 'role_title', 'industry', 'skills_required', 'salary_range']
+      },
+      RolesSearchResponse: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/RoleCatalogItem' }
+      },
+      PersonaTargetRoleSelectRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          user_id: { type: 'string', format: 'uuid' },
+          role_id: { type: 'string', format: 'uuid' },
+          time_horizon: { type: 'string', enum: ['Near', 'Mid', 'Far'] }
+        },
+        required: ['user_id', 'role_id', 'time_horizon']
+      },
+      PersonaTargetRoleSelectResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['ok'] },
+          target: { type: 'object', additionalProperties: true }
+        },
+        required: ['status', 'target']
       }
     },
     parameters: {
@@ -2006,6 +2043,72 @@ const openapiDefinition = {
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/ProfileScoringResponse' } }
             }
+          }
+        }
+      }
+    },
+
+    '/api/roles/search': {
+      get: {
+        tags: ['Roles'],
+        summary: 'Search roles catalog',
+        description:
+          'Search roles by query string and optional filters (industry, salary_range). Returns [] with 200 when no roles match.',
+        parameters: [
+          { name: 'q', in: 'query', required: false, schema: { type: 'string' } },
+          { name: 'industry', in: 'query', required: false, schema: { type: 'string' } },
+          { name: 'salary_range', in: 'query', required: false, schema: { type: 'string' } },
+          { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200 } }
+        ],
+        responses: {
+          200: {
+            description: 'Roles search results',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/RolesSearchResponse' } }
+            }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/personas/target-role': {
+      post: {
+        tags: ['Roles'],
+        summary: 'Persist target future role selection',
+        description:
+          'Validates that role_id exists in the roles catalog and persists it as the user’s target future role selection.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/PersonaTargetRoleSelectRequest' } }
+          }
+        },
+        responses: {
+          201: {
+            description: 'Selection persisted',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/PersonaTargetRoleSelectResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Role not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
       }
