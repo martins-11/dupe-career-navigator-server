@@ -20,6 +20,7 @@ const REQUIRED_TABLES = [
   'persona_versions',
   'persona_drafts',
   'persona_final',
+  'roles',
 ];
 
 function _formatList(arr) {
