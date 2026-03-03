@@ -178,19 +178,36 @@ router.get('/search', async (req, res) => {
 
     matches = catalog
       .map((r) => {
-        const title = String(r.role_title || r.roleTitle || '').trim();
+        // Support BOTH shapes:
+        // 1) DB/seed route shape: { role_id, role_title, skills_required, salary_range }
+        // 2) recommendationsService.DEFAULT_ROLES_CATALOG shape:
+        //    { roleTitle, coreSkills, estimatedSalaryRange, industry, ... }
+        const title = String(r.role_title || r.roleTitle || r.roleTitle?.name || '').trim();
         const ind = String(r.industry || '').trim();
+
         const skillsReq = Array.isArray(r.skills_required)
           ? r.skills_required
           : Array.isArray(r.coreSkills)
             ? r.coreSkills
             : [];
-        const salaryRange = String(r.salary_range || r.estimatedSalaryRange || '').trim();
+
+        const salaryRange = String(r.salary_range || r.estimatedSalaryRange || r.estimatedSalaryRange?.range || '').trim();
 
         const salaryBounds = parseSalaryBounds(salaryRange);
 
+        // Ensure role_id is stable and non-null in memory mode (useful for UI lists + tests).
+        const stableId =
+          r.role_id ||
+          r.roleId ||
+          (title
+            ? `seed-${title
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/(^-|-$)/g, '')}`
+            : null);
+
         return {
-          role_id: r.role_id || r.roleId || null,
+          role_id: stableId,
           role_title: title,
           industry: ind,
           skills_required: skillsReq,
