@@ -4,30 +4,78 @@ This file records which required environment variable keys are missing/empty in 
 
 ## Required keys checked
 
+### Service / URLs
+- BACKEND_URL
+- FRONTEND_URL
+- WS_URL
+- SITE_URL
+
+### CORS / proxy
+- ALLOWED_ORIGINS
+- ALLOWED_HEADERS
+- ALLOWED_METHODS
+- CORS_MAX_AGE
+- COOKIE_DOMAIN
+- TRUST_PROXY
+
+### Runtime / server
+- NODE_ENV
+- REQUEST_TIMEOUT_MS
+- RATE_LIMIT_WINDOW_S
+- RATE_LIMIT_MAX
+- HOST
 - PORT
+
+### Auth
+- JWT_SECRET
+
+### Database (MySQL via DB_* used by this deployment)
+- DB_ENGINE
 - DB_HOST
+- DB_PORT
+- DB_NAME
 - DB_USERNAME
 - DB_PASSWORD
-- DB_NAME
+
+### AWS / Bedrock
 - AWS_ACCESS_KEY_ID
 - AWS_SECRET_ACCESS_KEY
 - AWS_REGION
-- JWT_SECRET
+- BEDROCK_MODEL_ID
 
 ## Findings (from current `.env`)
 
 ### Present and non-empty
+- BACKEND_URL
+- FRONTEND_URL
+- WS_URL
+- SITE_URL
+- ALLOWED_ORIGINS
+- ALLOWED_HEADERS
+- ALLOWED_METHODS
+- CORS_MAX_AGE
+- COOKIE_DOMAIN
+- TRUST_PROXY
+- HOST
+- NODE_ENV
+- REQUEST_TIMEOUT_MS
+- RATE_LIMIT_WINDOW_S
+- RATE_LIMIT_MAX
 - PORT
-
-### Missing (not defined)
+- JWT_SECRET
+- DB_ENGINE
 - DB_HOST
+- DB_PORT
+- DB_NAME
 - DB_USERNAME
 - DB_PASSWORD
-- DB_NAME
 - AWS_ACCESS_KEY_ID
 - AWS_SECRET_ACCESS_KEY
 - AWS_REGION
-- JWT_SECRET
+- BEDROCK_MODEL_ID
+
+### Missing (not defined)
+- (none)
 
 ### Present but empty
 - (none)
@@ -35,4 +83,4 @@ This file records which required environment variable keys are missing/empty in 
 ## Notes
 
 - This audit intentionally does **not** print any `.env` values.
-- Add the missing keys to `.env` (or your deployment env) to enable DB connectivity, JWT signing, and external AI/cloud integrations.
+- DB connectivity is driven by `src/db/connection.js` and supports both `DB_*` and `MYSQL_*` variable sets. Current `.env` uses `DB_*`.
