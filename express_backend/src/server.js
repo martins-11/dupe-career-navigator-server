@@ -56,11 +56,22 @@ app.get('/', (req, res) => {
 });
 
 app.use('/health', healthRouter);
+
+/**
+ * Route mounts (verification note):
+ * The following 5 base routers are required and must remain mounted (non-404 reachability):
+ * - /uploads        (e.g., POST /uploads/documents)
+ * - /extraction     (e.g., POST /extraction/normalize)
+ * - /builds         (e.g., POST /builds)
+ * - /ai             (e.g., POST /ai/personas/generate)
+ * - /orchestration  (e.g., POST /orchestration/start)
+ */
 app.use('/uploads', uploadsRouter);
 app.use('/extraction', extractionRouter);
 app.use('/builds', buildsRouter);
 app.use('/ai', aiRouter);
 app.use('/orchestration', orchestrationRouter);
+
 app.use('/documents', documentsRouter);
 app.use('/personas', personasRouter);
 
