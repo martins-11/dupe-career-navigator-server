@@ -15,6 +15,147 @@ const router = express.Router();
  * This is part of the "Future Role Selection (Targeted Search)" feature.
  */
 
+/**
+ * Normalizes a display string for stable sorting/deduping.
+ * - trims whitespace
+ * - collapses internal whitespace
+ */
+function _normalizeLabel(v) {
+  if (v == null) return '';
+  return String(v)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _sortCaseInsensitive(a, b) {
+  return String(a).localeCompare(String(b), undefined, { sensitivity: 'base' });
+}
+
+async function _loadRolesForFilterOptions() {
+  /**
+   * Loads the roles source of truth to derive filter options.
+   *
+   * Preference order:
+   * 1) DB-backed catalog (MySQL) if reachable and listRoles works
+   * 2) In-memory DEFAULT_ROLES_CATALOG (seed catalog)
+   *
+   * Returns a unified array of role objects that may be in either shape:
+   * - DB listRoles shape: { roleId, roleTitle, industry, coreSkills, ... }
+   * - Seed shape: { roleTitle, industry, coreSkills, ... }
+   */
+  const engine = getDbEngine();
+  const shouldAttemptDb = engine === 'mysql';
+
+  if (shouldAttemptDb) {
+    try {
+      // listRoles is already guarded by config checks in the adapter.
+      // If it returns [], we fall back to seed catalog.
+      const dbRoles = await rolesRepo.listRoles({ limit: 5000 });
+      if (Array.isArray(dbRoles) && dbRoles.length > 0) return dbRoles;
+    } catch (_) {
+      // Fall through to memory catalog
+    }
+  }
+
+  const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
+  return Array.isArray(seed) ? seed : [];
+}
+
+// PUBLIC_INTERFACE
+router.get('/industries', async (req, res) => {
+  /**
+   * Return distinct industry values for the Explore filters UI.
+   *
+   * Response: { industries: string[] }
+   *
+   * Notes:
+   * - Values are derived from the currently available role catalog (DB when available, otherwise seed catalog).
+   * - Empty/NULL industries are excluded.
+   */
+  try {
+    const roles = await _loadRolesForFilterOptions();
+    const set = new Map(); // key: lowercased, value: original label
+
+    for (const r of roles) {
+      const label = _normalizeLabel(r?.industry);
+      if (!label) continue;
+      const key = label.toLowerCase();
+      if (!set.has(key)) set.set(key, label);
+    }
+
+    const industries = Array.from(set.values()).sort(_sortCaseInsensitive);
+    return res.json({ industries });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// PUBLIC_INTERFACE
+router.get('/skills', async (req, res) => {
+  /**
+   * Return distinct skill values for the Explore filters UI.
+   *
+   * Response: { skills: string[] }
+   *
+   * Notes:
+   * - Values are derived from the currently available role catalog (DB when available, otherwise seed catalog).
+   * - Skills are taken from:
+   *   - DB listRoles shape: coreSkills (array)
+   *   - Seed shape: coreSkills (array)
+   * - Empty skills are excluded.
+   */
+  try {
+    const roles = await _loadRolesForFilterOptions();
+    const set = new Map(); // key: lowercased, value: original label
+
+    for (const r of roles) {
+      const skills = Array.isArray(r?.coreSkills) ? r.coreSkills : Array.isArray(r?.skills_required) ? r.skills_required : [];
+      for (const s of skills) {
+        const label = _normalizeLabel(s);
+        if (!label) continue;
+        const key = label.toLowerCase();
+        if (!set.has(key)) set.set(key, label);
+      }
+    }
+
+    const skills = Array.from(set.values()).sort(_sortCaseInsensitive);
+    return res.json({ skills });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// PUBLIC_INTERFACE
+router.get('/job-titles', async (req, res) => {
+  /**
+   * (Optional) Return distinct job title values for the Explore filters UI.
+   *
+   * Response: { jobTitles: string[] }
+   *
+   * Notes:
+   * - Derived from role titles in the available catalog:
+   *   - DB listRoles shape: roleTitle
+   *   - Search/API shape: role_title
+   *   - Seed shape: roleTitle
+   */
+  try {
+    const roles = await _loadRolesForFilterOptions();
+    const set = new Map(); // key: lowercased, value: original label
+
+    for (const r of roles) {
+      const label = _normalizeLabel(r?.roleTitle ?? r?.role_title ?? r?.title);
+      if (!label) continue;
+      const key = label.toLowerCase();
+      if (!set.has(key)) set.set(key, label);
+    }
+
+    const jobTitles = Array.from(set.values()).sort(_sortCaseInsensitive);
+    return res.json({ jobTitles });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
 // PUBLIC_INTERFACE
 router.get('/search', async (req, res) => {
   /**
