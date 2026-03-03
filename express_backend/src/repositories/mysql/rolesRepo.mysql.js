@@ -1,6 +1,6 @@
 'use strict';
 
-const { dbQuery } = require('../../db/connection');
+const connection = require('../../db/connection');
 const { uuidV4 } = require('../../utils/uuid');
 
 function _jsonParseIfNeeded(v) {
@@ -19,7 +19,7 @@ function _jsonParseIfNeeded(v) {
 // PUBLIC_INTERFACE
 async function countRoles() {
   /** Returns the number of roles in the roles table. */
-  const res = await dbQuery(
+  const res = await connection.dbQuery(
     `
     SELECT COUNT(*) as cnt
     FROM roles
@@ -69,7 +69,7 @@ async function bulkInsertRoles(roles) {
 
   for (const r of list) {
     const roleId = r.roleId || uuidV4();
-    await dbQuery(
+    await connection.dbQuery(
       `
       INSERT INTO roles (
         role_id, role_title, industry, core_skills_json, seniority_levels_json, estimated_salary_range, created_at, updated_at
@@ -232,7 +232,7 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   params.push(sqlLimit);
 
-  const res = await dbQuery(sql, params);
+  const res = await connection.dbQuery(sql, params);
 
   const minS = Number.isFinite(Number(minSalary)) ? Number(minSalary) : null;
   const maxS = Number.isFinite(Number(maxSalary)) ? Number(maxSalary) : null;
