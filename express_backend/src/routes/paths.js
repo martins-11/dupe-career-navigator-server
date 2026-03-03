@@ -3,6 +3,8 @@
 const express = require('express');
 const { sendError } = require('../utils/errors');
 const orchestrationService = require('../services/orchestrationService');
+const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
+const personasRepo = require('../repositories/personasRepoAdapter');
 
 const { enforceResponse, PathsMultiverseResponseSchema } = require('../schemas/holisticPersonaSchemas');
 
@@ -124,13 +126,35 @@ router.get('/multiverse', async (req, res) => {
    */
   try {
     const buildId = req.query?.buildId ? String(req.query.buildId).trim() : null;
+    const useLatest = String(req.query?.useLatest || '').toLowerCase() === 'true';
+
+    if (useLatest) {
+      const latest = await holisticPersonaRepo.getLatestPathsMultiverse({
+        userId: req.query?.userId ? String(req.query.userId).trim() : null,
+        personaId: req.query?.personaId ? String(req.query.personaId).trim() : null,
+        buildId
+      });
+
+      if (latest?.paths && Array.isArray(latest.paths)) {
+        const payload = enforceResponse(PathsMultiverseResponseSchema, { paths: latest.paths });
+        return res.json(payload);
+      }
+    }
 
     let paths;
+    let personaId = req.query?.personaId ? String(req.query.personaId).trim() : null;
+
     if (buildId) {
       const orch = orchestrationService.getOrchestration(buildId);
       const persona = orch?.personaDraft || orch?.personaFinal || null;
       if (persona) {
         paths = _buildPathsFromPersonaDraft(persona);
+        personaId = personaId || orch?.personaId || null;
+      } else if (orch?.personaId) {
+        personaId = personaId || orch.personaId;
+        const [draft, finalBlob] = await Promise.all([personasRepo.getDraft(personaId), personasRepo.getFinal(personaId)]);
+        const dbPersona = (finalBlob && finalBlob.finalJson) || (draft && draft.draftJson) || null;
+        if (dbPersona) paths = _buildPathsFromPersonaDraft(dbPersona);
       }
     }
 
@@ -156,6 +180,18 @@ router.get('/multiverse', async (req, res) => {
           metadata: { theme: 'management' }
         }
       ];
+    }
+
+    // Best-effort persist
+    try {
+      await holisticPersonaRepo.upsertPathsMultiverse({
+        userId: req.query?.userId ? String(req.query.userId).trim() : null,
+        personaId,
+        buildId,
+        paths
+      });
+    } catch (_) {
+      // ignore persistence failure
     }
 
     const payload = enforceResponse(PathsMultiverseResponseSchema, { paths });

@@ -3,6 +3,8 @@
 const express = require('express');
 const { sendError } = require('../utils/errors');
 const orchestrationService = require('../services/orchestrationService');
+const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
+const personasRepo = require('../repositories/personasRepoAdapter');
 
 const {
   parseWithZod,
@@ -116,13 +118,38 @@ router.put('/scoring', async (req, res) => {
     const parsed = parseWithZod(ProfileScoringRequestSchema, req.body || {});
     if (!parsed.ok) throw parsed.error;
 
-    const { scoring: incomingScoring, buildId, override } = parsed.data;
+    const { scoring: incomingScoring, buildId, override, userId, personaId } = parsed.data;
+    const useLatest = Boolean(parsed.data?.scoring?.useLatest);
+
+    if (useLatest) {
+      const latest = await holisticPersonaRepo.getLatestProfileScoring({
+        userId: userId ?? null,
+        personaId: personaId ?? null,
+        buildId: buildId ?? null
+      });
+
+      if (latest?.scoring && typeof latest.scoring === 'object') {
+        const payload = enforceResponse(ProfileScoringResponseSchema, {
+          status: 'ok',
+          scoring: latest.scoring
+        });
+        return res.json(payload);
+      }
+    }
 
     let computed = null;
+
     if (buildId) {
       const orch = orchestrationService.getOrchestration(buildId);
       const persona = orch?.personaFinal || orch?.personaDraft || null;
-      if (persona) computed = _computeSubscoresFromPersona(persona);
+      if (persona) {
+        computed = _computeSubscoresFromPersona(persona);
+      } else if (orch?.personaId) {
+        // DB-backed fallback
+        const [draft, finalBlob] = await Promise.all([personasRepo.getDraft(orch.personaId), personasRepo.getFinal(orch.personaId)]);
+        const dbPersona = (finalBlob && finalBlob.finalJson) || (draft && draft.draftJson) || null;
+        if (dbPersona) computed = _computeSubscoresFromPersona(dbPersona);
+      }
     }
 
     const next = {
@@ -143,8 +170,19 @@ router.put('/scoring', async (req, res) => {
     next.overrideApplied = applied.applied;
     next.overrideReason = applied.reason;
 
-    // Ensure deterministic default if nothing could be computed and no incoming overall was provided.
     if (next.overall == null) next.overall = 0;
+
+    // Best-effort persist
+    try {
+      await holisticPersonaRepo.upsertProfileScoring({
+        userId: userId ?? null,
+        personaId: personaId ?? null,
+        buildId: buildId ?? null,
+        scoring: next
+      });
+    } catch (_) {
+      // ignore persistence failure
+    }
 
     const payload = enforceResponse(ProfileScoringResponseSchema, {
       status: 'ok',

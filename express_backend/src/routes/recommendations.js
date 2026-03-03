@@ -4,6 +4,8 @@ const express = require('express');
 const { sendError } = require('../utils/errors');
 const orchestrationService = require('../services/orchestrationService');
 const personaService = require('../services/personaService');
+const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
+const personasRepo = require('../repositories/personasRepoAdapter');
 
 const {
   parseWithZod,
@@ -137,12 +139,26 @@ router.get('/roles', async (req, res) => {
     let inferredTags = [];
 
     // 1) If buildId provided, try to use orchestration artifacts (draft/final) as persona context.
+    // If orchestration memory is empty (e.g., server restart), fall back to DB-backed persona draft/final
+    // using a personaId stored on the orchestration record if present in DB elsewhere.
+    let personaId = null;
+
     if (buildId) {
       const orch = orchestrationService.getOrchestration(buildId);
+
       if (orch?.personaDraft) {
         inferredTags = _inferRoleTagsFromPersonaDraft(orch.personaDraft);
+        personaId = orch.personaId || null;
       } else if (orch?.personaFinal) {
         inferredTags = _inferRoleTagsFromPersonaDraft(orch.personaFinal);
+        personaId = orch.personaId || null;
+      } else if (orch?.personaId) {
+        personaId = orch.personaId;
+
+        // Load DB-backed draft/final for the personaId.
+        const [draft, finalBlob] = await Promise.all([personasRepo.getDraft(personaId), personasRepo.getFinal(personaId)]);
+        const persona = (finalBlob && finalBlob.finalJson) || (draft && draft.draftJson) || null;
+        if (persona) inferredTags = _inferRoleTagsFromPersonaDraft(persona);
       }
     }
 
@@ -153,7 +169,36 @@ router.get('/roles', async (req, res) => {
       if (gen?.persona) inferredTags = _inferRoleTagsFromPersonaDraft(gen.persona);
     }
 
+    const useLatest = String(req.query?.useLatest || '').toLowerCase() === 'true';
+
+    // If client explicitly requests the latest persisted result, try it first.
+    if (useLatest) {
+      const latest = await holisticPersonaRepo.getLatestRecommendationsRoles({
+        userId: req.query?.userId ? String(req.query.userId).trim() : null,
+        personaId: req.query?.personaId ? String(req.query.personaId).trim() : null,
+        buildId
+      });
+
+      if (latest?.roles && Array.isArray(latest.roles)) {
+        const payload = enforceResponse(RecommendationsRolesResponseSchema, { roles: latest.roles });
+        return res.json(payload);
+      }
+    }
+
     const roles = _rankCatalogByTags(BASE_ROLE_CATALOG, inferredTags);
+
+    // Best-effort persist so refresh/reload can reuse.
+    try {
+      await holisticPersonaRepo.upsertRecommendationsRoles({
+        userId: req.query?.userId ? String(req.query.userId).trim() : null,
+        personaId: req.query?.personaId ? String(req.query.personaId).trim() : null,
+        buildId,
+        inferredTags,
+        roles
+      });
+    } catch (_) {
+      // Do not fail the endpoint on persistence issues; API remains usable.
+    }
 
     const payload = enforceResponse(RecommendationsRolesResponseSchema, { roles });
     return res.json(payload);
@@ -214,18 +259,36 @@ router.post('/compare', async (req, res) => {
         ? `Compared ${left.title} vs ${right.title} based on role tags and descriptions.`
         : `Compared ${left.title} vs ${right.title}: roles have similar tag profiles; differences are likely organization-specific.`;
 
+    const comparison = {
+      summary,
+      differences: differences.length
+        ? differences
+        : ['Day-to-day responsibilities vary by organization.', 'Skill emphasis depends on team/product maturity.']
+    };
+
+    // Best-effort persist (buildId optional; callers can pass it via body.context.buildId).
+    const buildId =
+      parsed.data.context && typeof parsed.data.context === 'object' && parsed.data.context
+        ? String(parsed.data.context.buildId || '').trim() || null
+        : null;
+
+    try {
+      await holisticPersonaRepo.createRecommendationsCompare({
+        userId: parsed.data.context?.userId ?? null,
+        personaId: parsed.data.context?.personaId ?? null,
+        buildId,
+        leftRoleId,
+        rightRoleId,
+        comparison
+      });
+    } catch (_) {
+      // ignore persistence failures
+    }
+
     const payload = enforceResponse(RoleCompareResponseSchema, {
       leftRoleId,
       rightRoleId,
-      comparison: {
-        summary,
-        differences: differences.length
-          ? differences
-          : [
-              'Day-to-day responsibilities vary by organization.',
-              'Skill emphasis depends on team/product maturity.'
-            ]
-      }
+      comparison
     });
 
     return res.json(payload);

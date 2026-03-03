@@ -3,6 +3,8 @@
 const express = require('express');
 const { sendError } = require('../utils/errors');
 const orchestrationService = require('../services/orchestrationService');
+const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
+const personasRepo = require('../repositories/personasRepoAdapter');
 
 const {
   parseWithZod,
@@ -105,19 +107,62 @@ router.post('/milestones', async (req, res) => {
     const goal = _safeString(parsed.data.goal, 'Career growth plan');
     const timeframeWeeks = Number(parsed.data.timeframeWeeks || 12);
 
-    const buildId =
-      parsed.data.context && typeof parsed.data.context === 'object' && parsed.data.context
-        ? String(parsed.data.context.buildId || '').trim()
-        : null;
+    const contextObj =
+      parsed.data.context && typeof parsed.data.context === 'object' && parsed.data.context ? parsed.data.context : null;
+
+    const buildId = contextObj ? String(contextObj.buildId || '').trim() || null : null;
+    const personaId = contextObj ? String(contextObj.personaId || '').trim() || null : null;
+    const userId = contextObj ? String(contextObj.userId || '').trim() || null : null;
+    const useLatest = contextObj ? Boolean(contextObj.useLatest) : false;
+
+    if (useLatest) {
+      const latest = await holisticPersonaRepo.getLatestPlanMilestones({ userId, personaId, buildId });
+      if (latest?.milestones && Array.isArray(latest.milestones)) {
+        const payload = enforceResponse(PlanMilestonesResponseSchema, {
+          goal: latest.goal || goal,
+          timeframeWeeks: latest.timeframeWeeks || timeframeWeeks,
+          milestones: latest.milestones
+        });
+        return res.status(200).json(payload);
+      }
+    }
 
     let focus = 'general';
+    let effectivePersonaId = personaId;
+
     if (buildId) {
       const orch = orchestrationService.getOrchestration(buildId);
       const persona = orch?.personaDraft || orch?.personaFinal || null;
-      if (persona) focus = _inferFocusFromPersona(persona);
+      if (persona) {
+        focus = _inferFocusFromPersona(persona);
+        effectivePersonaId = effectivePersonaId || orch?.personaId || null;
+      } else if (orch?.personaId) {
+        effectivePersonaId = effectivePersonaId || orch.personaId;
+        const [draft, finalBlob] = await Promise.all([
+          personasRepo.getDraft(effectivePersonaId),
+          personasRepo.getFinal(effectivePersonaId)
+        ]);
+        const dbPersona = (finalBlob && finalBlob.finalJson) || (draft && draft.draftJson) || null;
+        if (dbPersona) focus = _inferFocusFromPersona(dbPersona);
+      }
     }
 
     const milestones = _makeMilestones({ goal, timeframeWeeks, focus });
+
+    // Best-effort persist
+    try {
+      await holisticPersonaRepo.upsertPlanMilestones({
+        userId,
+        personaId: effectivePersonaId,
+        buildId,
+        goal,
+        timeframeWeeks,
+        focus,
+        milestones
+      });
+    } catch (_) {
+      // ignore persistence failure
+    }
 
     const payload = enforceResponse(PlanMilestonesResponseSchema, {
       goal,
