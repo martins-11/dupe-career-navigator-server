@@ -174,12 +174,21 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
   const lim = Math.max(1, Math.min(Number(limit) || 50, 200));
 
   const qStr = String(q || '').trim();
+
+  // IMPORTANT:
+  // Express routes often pass `industry || null`, but if an empty string sneaks through,
+  // it must be treated as "no filter". Otherwise we generate:
+  //   WHERE LOWER(industry) = LOWER('')
+  // which matches nothing and makes filtered searches always return [].
+  const industryNorm =
+    typeof industry === 'string' ? (industry.trim() ? industry.trim() : null) : industry != null ? String(industry) : null;
+
   const skillsList = Array.isArray(skills) ? skills : [];
   const normalizedSkills = skillsList.map((s) => String(s).trim()).filter(Boolean);
 
   const hasFilters =
     Boolean(qStr) ||
-    Boolean(industry) ||
+    Boolean(industryNorm) ||
     normalizedSkills.length > 0 ||
     (minSalary != null && Number.isFinite(Number(minSalary))) ||
     (maxSalary != null && Number.isFinite(Number(maxSalary)));
@@ -226,9 +235,9 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     params.push(like, like);
   }
 
-  if (industry) {
+  if (industryNorm) {
     where.push('LOWER(industry) = LOWER(?)');
-    params.push(String(industry));
+    params.push(String(industryNorm));
   }
 
   // Skills: AND semantics (best-effort LIKE match against serialized JSON).
