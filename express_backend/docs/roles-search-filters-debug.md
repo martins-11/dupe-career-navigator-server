@@ -9,6 +9,8 @@
 In some environments it also returned `[]` for the unfiltered query.
 
 ## Root cause
+The MySQL repo uses `dbQuery()` which returns a normalized object shape `{ rows: [...] }`. The `/api/roles/search` route previously assumed the repo returned a plain array and used `results.length`, producing `0` even when `rows` was non-empty, and then falling back to memory (which can be empty).
+
 When the DB is not configured/reachable, the route falls back to an in-memory catalog using:
 
 - `recommendationsService.DEFAULT_ROLES_CATALOG`

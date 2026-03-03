@@ -102,12 +102,36 @@ router.get('/search', async (req, res) => {
           limit
         });
 
+        // Some repo implementations return an array; others return a DB-driver shaped
+        // object like { rows: [...] }. Normalize to an array so count/sample/response
+        // always reflect the actual rows returned.
+        const underlyingRowCount = Array.isArray(matches?.rows)
+          ? matches.rows.length
+          : Array.isArray(matches)
+            ? matches.length
+            : null;
+
+        const rows = Array.isArray(matches)
+          ? matches
+          : Array.isArray(matches?.rows)
+            ? matches.rows
+            : [];
+
+        const computedCount = rows.length;
+
         if (debugRolesSearch) {
           // eslint-disable-next-line no-console
-          console.log('[roles.search] (db) resultCount:', Array.isArray(matches) ? matches.length : null);
+          console.log('[roles.search] (db) counts:', {
+            computedCount,
+            underlyingRowCount,
+            shape: Array.isArray(matches) ? 'array' : matches && typeof matches === 'object' ? 'object' : typeof matches
+          });
         }
 
-        if (Array.isArray(matches)) return res.json(matches);
+        // Return DB-derived rows in all cases (empty or non-empty) once we successfully
+        // executed the DB search. This avoids incorrectly falling back to memory when
+        // the DB returned results in a non-array shape.
+        return res.json(rows);
       } catch (e) {
         if (debugRolesSearch) {
           // eslint-disable-next-line no-console
