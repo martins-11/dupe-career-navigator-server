@@ -16,7 +16,11 @@
 
 require('dotenv').config();
 
-const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:3001';
+const API_BASE_URL =
+  process.env.API_BASE_URL ||
+  // When running in Kavia, the backend is often exposed via a hosted URL.
+  process.env.KAVIA_BACKEND_URL ||
+  'http://localhost:3001';
 
 async function httpGetJson(url) {
   const res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
