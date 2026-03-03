@@ -231,7 +231,13 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   if (qStr) {
     const like = `%${qStr}%`;
-    where.push('(LOWER(role_title) LIKE LOWER(?) OR LOWER(core_skills_json) LIKE LOWER(?))');
+
+    // core_skills_json is a MySQL JSON column. Applying LOWER()/LIKE directly to JSON can yield
+    // non-matching behavior depending on MySQL version/collation. Cast to CHAR so string
+    // operations behave predictably.
+    where.push(
+      '(LOWER(role_title) LIKE LOWER(?) OR LOWER(CAST(core_skills_json AS CHAR(10000))) LIKE LOWER(?))'
+    );
     params.push(like, like);
   }
 
