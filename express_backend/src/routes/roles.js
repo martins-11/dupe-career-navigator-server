@@ -18,15 +18,17 @@ const router = express.Router();
 // PUBLIC_INTERFACE
 router.get('/search', async (req, res) => {
   /**
-   * Search roles with optional filtering.
+   * Search roles with optional filtering (unified query handling).
    *
-   * Query params (all optional; combined with AND logic):
+   * Query params (all optional; combined with AND logic; empty values ignored):
    * - q: string Search string matched against role_title and skills.
    * - industry: string Exact match on industry (case-insensitive).
    * - skills: string|string[] Comma-separated or repeated params; must all be present in core_skills_json.
    * - min_salary / max_salary: numbers Filter against estimated_salary_range (best-effort parsing).
+   * - limit: number Max number of results to return (default: 10; max: 200).
+   * - user_id: string If provided and DB-backed, result rows include is_targetable=false when role already exists in user_targets for that user.
    *
-   * Response: Array<{ role_id, role_title, industry, skills_required, salary_range, match_metadata }>
+   * Response: Array<{ role_id, role_title, industry, skills_required, salary_range, match_metadata, is_targetable }>
    *
    * Empty state requirement:
    * - If no matches, return 200 with [] (NOT an error).
@@ -36,6 +38,8 @@ router.get('/search', async (req, res) => {
 
     const q = req.query?.q != null ? String(req.query.q).trim() : '';
     const industry = req.query?.industry != null ? String(req.query.industry).trim() : '';
+
+    const userId = req.query?.user_id != null ? String(req.query.user_id).trim() : '';
 
     const skillsRaw = req.query?.skills;
     const skills =
@@ -56,9 +60,10 @@ router.get('/search', async (req, res) => {
     const maxSalaryParsed = maxSalaryRaw !== '' ? Number(maxSalaryRaw) : null;
     const maxSalary = Number.isFinite(maxSalaryParsed) ? maxSalaryParsed : null;
 
+    // Integration requirement: default limit=10, overrideable via query param.
     const limitRaw = req.query?.limit != null ? Number(req.query.limit) : undefined;
     const limit =
-      Number.isFinite(limitRaw) && limitRaw != null ? Math.max(1, Math.min(Number(limitRaw), 200)) : undefined;
+      Number.isFinite(limitRaw) && limitRaw != null ? Math.max(1, Math.min(Number(limitRaw), 200)) : 10;
 
     if (debugRolesSearch) {
       // eslint-disable-next-line no-console
@@ -68,20 +73,18 @@ router.get('/search', async (req, res) => {
         skills,
         minSalary: Number.isFinite(minSalary) ? minSalary : null,
         maxSalary: Number.isFinite(maxSalary) ? maxSalary : null,
-        limit
+        limit,
+        userId: userId || null
       });
     }
 
     // Prefer DB-backed search when possible, but do NOT hard-gate the endpoint.
-    // In some environments, DB credentials may be present but the helper detection functions
-    // (isDbConfigured/isMysqlConfigured) can mis-detect, leading to a false "no DB" mode and
-    // empty results. We therefore:
+    // In some environments, DB credentials may be present but helper detection functions
+    // can mis-detect, leading to a false "no DB" mode and empty results. We therefore:
     // 1) Attempt DB search when engine is mysql.
-    // 2) If DB search fails (or returns a non-array), fall back to the in-memory catalog.
+    // 2) If DB search fails, fall back to the in-memory catalog.
     const engine = getDbEngine();
     const shouldAttemptDb = engine === 'mysql';
-
-    let matches = null;
 
     if (debugRolesSearch) {
       // eslint-disable-next-line no-console
@@ -90,6 +93,42 @@ router.get('/search', async (req, res) => {
         shouldAttemptDb
       });
     }
+
+    // Helper: annotate rows with is_targetable if userId provided and DB is reachable.
+    const annotateTargetableIfPossible = async (rows) => {
+      const list = Array.isArray(rows) ? rows : [];
+      const cleanUserId = String(userId || '').trim();
+      if (!cleanUserId) {
+        // Still standardize integration-ready output: include is_targetable=true when no user context.
+        return list.map((r) => ({ ...r, is_targetable: true }));
+      }
+
+      // If DB isn't configured, we cannot check user_targets reliably.
+      if (!isDbConfigured() || !isMysqlConfigured()) {
+        return list.map((r) => ({ ...r, is_targetable: true }));
+      }
+
+      // Query user_targets for this user and compute a role_id set.
+      const roleIds = list.map((r) => r?.role_id).filter(Boolean);
+      if (roleIds.length === 0) return list.map((r) => ({ ...r, is_targetable: true }));
+
+      const placeholders = roleIds.map(() => '?').join(',');
+      const sql = `
+        SELECT role_id
+        FROM user_targets
+        WHERE user_id = ?
+          AND role_id IN (${placeholders})
+      `;
+      const params = [cleanUserId, ...roleIds];
+
+      const res = await dbQuery(sql, params);
+      const existing = new Set((res.rows || []).map((r) => r.role_id));
+
+      return list.map((r) => ({
+        ...r,
+        is_targetable: !existing.has(r.role_id)
+      }));
+    };
 
     if (shouldAttemptDb) {
       try {
@@ -103,22 +142,22 @@ router.get('/search', async (req, res) => {
         });
 
         // Normalize repo result into an array.
-        // - Some layers return an array of rows.
-        // - Others return a dbQuery()-style envelope: { rows: [...] }.
-        // The HTTP contract for this endpoint is ALWAYS an array of role rows.
         const rows = Array.isArray(dbResult) ? dbResult : Array.isArray(dbResult?.rows) ? dbResult.rows : [];
 
         if (debugRolesSearch) {
           // eslint-disable-next-line no-console
           console.log('[roles.search] (db) normalized:', {
-            inputShape: Array.isArray(dbResult) ? 'array' : dbResult && typeof dbResult === 'object' ? 'object' : typeof dbResult,
+            inputShape: Array.isArray(dbResult)
+              ? 'array'
+              : dbResult && typeof dbResult === 'object'
+                ? 'object'
+                : typeof dbResult,
             rowCount: rows.length
           });
         }
 
-        // Important: do NOT fall back to memory just because the shape is unexpected.
-        // If the DB query executed successfully, return what we have (including []).
-        return res.json(rows);
+        const annotated = await annotateTargetableIfPossible(rows.slice(0, limit));
+        return res.json(annotated);
       } catch (e) {
         if (debugRolesSearch) {
           // eslint-disable-next-line no-console
@@ -128,8 +167,6 @@ router.get('/search', async (req, res) => {
     }
 
     // DB not available (or DB search failed): fall back to exported in-memory catalog.
-    // IMPORTANT: do not downgrade to a single-item safety net because verification scripts
-    // expect multiple matches (and some filters won't match the single item).
     const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
     const catalog = Array.isArray(seed) ? seed : [];
 
@@ -174,7 +211,7 @@ router.get('/search', async (req, res) => {
 
     const requiredSkills = (Array.isArray(skills) ? skills : []).map((s) => String(s).trim()).filter(Boolean);
 
-    matches = catalog
+    let matches = catalog
       .map((r) => {
         // Support BOTH shapes:
         // 1) API shape: { role_id, role_title, skills_required, salary_range }
@@ -263,8 +300,9 @@ router.get('/search', async (req, res) => {
       console.log('[roles.search] (memory) resultCount:', Array.isArray(matches) ? matches.length : null);
     }
 
-    const lim = limit ?? 50;
-    return res.json(Array.isArray(matches) ? matches.slice(0, lim) : []);
+    // Standardize integration output for memory mode: include is_targetable (true).
+    matches = (Array.isArray(matches) ? matches : []).slice(0, limit).map((r) => ({ ...r, is_targetable: true }));
+    return res.json(matches);
   } catch (err) {
     return sendError(res, err);
   }

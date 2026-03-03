@@ -18,6 +18,7 @@
     "seed:roles": "node scripts/seed-roles.js",
     "verify:roles": "node scripts/verify-roles.js",
     "verify:roles-search": "node scripts/verify-roles-search.js",
+    "verify:day2-integration": "node scripts/verify-day2-integration.js",
     "test": "NODE_ENV=test jest --runInBand",
     "test:integration": "NODE_ENV=test jest --runInBand --testPathPatterns=tests/integration"
   },
