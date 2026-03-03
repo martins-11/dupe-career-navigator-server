@@ -1,0 +1,8 @@
+# NOTE: Do NOT commit real credentials to git.
+# Fill these values from the user-provided RDS MySQL credentials.
+#
+# Recommended CLI form (no space after -p):
+# mysql -h <host> -P <port> -u <user> -p<password> <database>
+#
+# Example (template):
+mysql -h <DB_HOST> -P <DB_PORT> -u <DB_USER> -p<DB_PASSWORD> <DB_NAME>
