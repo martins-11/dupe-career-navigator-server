@@ -62,7 +62,12 @@ async function createBuild(input) {
    * - creates workflow record and starts simulation
    * - creates build record in persistence adapter
    *
-   * @param {{ personaId?: string|null, documentId?: string|null, mode?: string|null }} input
+   * Degraded mode:
+   * - If input.forceMemory=true, skips DB-backed adapters and persists in memory only.
+   *   This is used by the /builds route to avoid crashing when DB is configured
+   *   but temporarily unreachable.
+   *
+   * @param {{ personaId?: string|null, documentId?: string|null, mode?: string|null, forceMemory?: boolean }} input
    * @returns {Promise<BuildRecord>}
    */
   const wf = workflowService.createWorkflow({
@@ -74,7 +79,22 @@ async function createBuild(input) {
   // Start workflow simulation (in-memory).
   workflowService.startWorkflow(wf.id);
 
-  // Persist build record (memory by default; Postgres when configured).
+  // Persist build record (memory by default; DB-backed when configured), but allow forced memory.
+  if (input && input.forceMemory) {
+    const memRepo = require('../repositories/memory/buildsMemoryRepo');
+    await memRepo.createBuild({
+      id: wf.id,
+      personaId: wf.personaId,
+      documentId: wf.documentId,
+      status: wf.status,
+      progress: wf.progress,
+      message: wf.message,
+      currentStep: wf.currentStep,
+      steps: wf.steps ?? _defaultSteps()
+    });
+    return wf;
+  }
+
   await buildsRepo.createBuild({
     id: wf.id, // note: memory repo ignores provided id; postgres scaffold uses generated id; keep stable by updating after create if needed
     personaId: wf.personaId,

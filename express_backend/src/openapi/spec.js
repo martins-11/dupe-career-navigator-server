@@ -37,7 +37,13 @@ const openapiDefinition = {
     { name: 'Uploads', description: 'Multi-file upload endpoints (placeholder; no persistence yet).' },
     { name: 'Extraction', description: 'PDF/TXT text extraction and text normalization (placeholders).' },
     { name: 'AI', description: 'AI persona generation (placeholder endpoints; safe without DB credentials).' },
-    { name: 'Personas', description: 'Persona CRUD and version history.' }
+    { name: 'Personas', description: 'Persona CRUD and version history.' },
+
+    // Career Navigator /api endpoints
+    { name: 'Recommendations', description: 'Role recommendations and comparisons (placeholder endpoints).' },
+    { name: 'Paths', description: 'Career path exploration endpoints (placeholder endpoints).' },
+    { name: 'Plan', description: 'Planning/milestones endpoints (placeholder endpoints).' },
+    { name: 'Profile', description: 'Profile scoring endpoints (placeholder endpoints).' }
   ],
   servers: [
     {
@@ -701,6 +707,123 @@ const openapiDefinition = {
           }
         },
         required: ['build', 'orchestration', 'results']
+      },
+
+      // --- /api/* placeholder endpoint schemas (Career Navigator) ---
+      RecommendedRole: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1, description: 'Role identifier (stable string id).' },
+          title: { type: 'string', minLength: 1, description: 'Human-readable role title.' },
+          description: { type: 'string', nullable: true },
+          tags: { type: 'array', nullable: true, items: { type: 'string' } }
+        },
+        required: ['id', 'title']
+      },
+      RecommendationsRolesResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          roles: { type: 'array', items: { $ref: '#/components/schemas/RecommendedRole' } }
+        },
+        required: ['roles']
+      },
+      RoleCompareRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          leftRoleId: { type: 'string', minLength: 1 },
+          rightRoleId: { type: 'string', minLength: 1 },
+          context: { type: 'object', nullable: true, additionalProperties: true }
+        },
+        required: ['leftRoleId', 'rightRoleId']
+      },
+      RoleCompareResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          leftRoleId: { type: 'string' },
+          rightRoleId: { type: 'string' },
+          comparison: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              summary: { type: 'string' },
+              differences: { type: 'array', items: { type: 'string' } }
+            },
+            required: ['summary', 'differences']
+          }
+        },
+        required: ['leftRoleId', 'rightRoleId', 'comparison']
+      },
+
+      CareerPath: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1 },
+          title: { type: 'string', minLength: 1 },
+          steps: { type: 'array', items: { type: 'string', minLength: 1 } }
+        },
+        required: ['id', 'title', 'steps']
+      },
+      PathsMultiverseResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          paths: { type: 'array', items: { $ref: '#/components/schemas/CareerPath' } }
+        },
+        required: ['paths']
+      },
+
+      PlanMilestonesRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          goal: { type: 'string', nullable: true },
+          timeframeWeeks: { type: 'integer', nullable: true, minimum: 1 },
+          context: { type: 'object', nullable: true, additionalProperties: true }
+        }
+      },
+      PlanMilestone: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1 },
+          title: { type: 'string', minLength: 1 },
+          description: { type: 'string', nullable: true },
+          order: { type: 'integer', minimum: 1 }
+        },
+        required: ['id', 'title', 'order']
+      },
+      PlanMilestonesResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          goal: { type: 'string' },
+          timeframeWeeks: { type: 'integer' },
+          milestones: { type: 'array', items: { $ref: '#/components/schemas/PlanMilestone' } }
+        },
+        required: ['goal', 'timeframeWeeks', 'milestones']
+      },
+
+      ProfileScoringRequest: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          userId: { type: 'string', nullable: true, description: 'Optional user identifier.' },
+          scoring: { type: 'object', nullable: true, additionalProperties: true }
+        }
+      },
+      ProfileScoringResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['ok'] },
+          scoring: { type: 'object', additionalProperties: true }
+        },
+        required: ['status', 'scoring']
       }
     },
     parameters: {
@@ -1774,6 +1897,115 @@ const openapiDefinition = {
           503: {
             description: 'DB unavailable (not configured yet)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    // ----------------------------
+    // Career Navigator /api routes
+    // ----------------------------
+
+    '/api/recommendations/roles': {
+      get: {
+        tags: ['Recommendations'],
+        summary: 'List recommended roles (placeholder)',
+        description: 'Returns a curated list of recommended roles. Safe placeholder: no DB and no external AI calls.',
+        responses: {
+          200: {
+            description: 'Recommended roles',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/RecommendationsRolesResponse' } }
+            }
+          }
+        }
+      }
+    },
+
+    '/api/recommendations/compare': {
+      post: {
+        tags: ['Recommendations'],
+        summary: 'Compare two roles (placeholder)',
+        description:
+          'Compares two roles based on role ids. Safe placeholder: deterministic output; future versions may be AI-backed.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/RoleCompareRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Comparison result',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/RoleCompareResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/paths/multiverse': {
+      get: {
+        tags: ['Paths'],
+        summary: 'List possible career paths (placeholder)',
+        description: 'Returns a deterministic set of example career paths.',
+        responses: {
+          200: {
+            description: 'Career paths',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/PathsMultiverseResponse' } }
+            }
+          }
+        }
+      }
+    },
+
+    '/api/plan/milestones': {
+      post: {
+        tags: ['Plan'],
+        summary: 'Derive plan milestones (placeholder)',
+        description:
+          'Derives a milestone plan from an optional goal/timeframe. Safe placeholder: no DB and no external AI calls.',
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/PlanMilestonesRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Derived milestones',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/PlanMilestonesResponse' } }
+            }
+          }
+        }
+      }
+    },
+
+    '/api/profile/scoring': {
+      put: {
+        tags: ['Profile'],
+        summary: 'Update profile scoring (placeholder)',
+        description:
+          'Updates profile scoring inputs/results. Safe placeholder endpoint that echoes scoring with a default overall score.',
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/ProfileScoringRequest' } }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Updated scoring',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/ProfileScoringResponse' } }
+            }
           }
         }
       }

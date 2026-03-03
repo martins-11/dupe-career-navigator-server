@@ -21,6 +21,7 @@ function _repo() {
 // PUBLIC_INTERFACE
 function isDbConfiguredPublic() {
   /** Returns true if configured DB engine appears configured. */
+  const { isDbConfigured } = require('../db/connection');
   return isDbConfigured();
 }
 
