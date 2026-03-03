@@ -6,10 +6,9 @@ This file records which required environment variable keys are missing/empty in 
 
 - PORT
 - DB_HOST
-- DB_USER
+- DB_USERNAME
 - DB_PASSWORD
 - DB_NAME
-- CLAUDE_API_KEY
 - AWS_ACCESS_KEY_ID
 - AWS_SECRET_ACCESS_KEY
 - AWS_REGION
@@ -22,10 +21,9 @@ This file records which required environment variable keys are missing/empty in 
 
 ### Missing (not defined)
 - DB_HOST
-- DB_USER
+- DB_USERNAME
 - DB_PASSWORD
 - DB_NAME
-- CLAUDE_API_KEY
 - AWS_ACCESS_KEY_ID
 - AWS_SECRET_ACCESS_KEY
 - AWS_REGION

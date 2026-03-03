@@ -92,7 +92,7 @@ function _mysqlConfigFromEnv() {
   const portRaw = _firstNonEmpty(process.env.MYSQL_PORT, process.env.DB_PORT);
   const port = portRaw ? Number(portRaw) : undefined;
 
-  const user = _firstNonEmpty(process.env.MYSQL_USER, process.env.DB_USERNAME);
+  const user = _firstNonEmpty(process.env.MYSQL_USER, process.env.DB_USERNAME, process.env.DB_USER);
   const password = _firstNonEmpty(process.env.MYSQL_PASSWORD, process.env.DB_PASSWORD);
   const database = _firstNonEmpty(process.env.MYSQL_DATABASE, process.env.DB_NAME);
 
