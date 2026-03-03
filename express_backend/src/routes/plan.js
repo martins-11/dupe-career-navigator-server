@@ -1,33 +1,134 @@
 'use strict';
 
 const express = require('express');
+const { sendError } = require('../utils/errors');
+const orchestrationService = require('../services/orchestrationService');
+
+const {
+  parseWithZod,
+  enforceResponse,
+  PlanMilestonesRequestSchema,
+  PlanMilestonesResponseSchema
+} = require('../schemas/holisticPersonaSchemas');
 
 const router = express.Router();
 
-/**
- * Plan APIs (boilerplate).
- */
+function _safeString(v, fallback) {
+  const s = v == null ? '' : String(v).trim();
+  return s ? s : fallback;
+}
+
+function _inferFocusFromPersona(persona) {
+  const competencies = Array.isArray(persona?.core_competencies) ? persona.core_competencies : [];
+  const stack = persona?.technical_stack || {};
+  const blob = [...competencies, ...(stack.languages || []), ...(stack.frameworks || []), ...(stack.cloud_and_devops || [])]
+    .map((s) => String(s).trim())
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  if (/\bdata\b|\banalytics\b|\bsql\b|\bpython\b/.test(blob)) return 'data';
+  if (/\breact\b|\bfrontend\b|\bui\b/.test(blob)) return 'frontend';
+  if (/\bbackend\b|\bnode\b|\bexpress\b|\bapi\b|\bsystems\b/.test(blob)) return 'backend';
+  if (/\bcloud\b|\baws\b|\bdevops\b|\bkubernetes\b|\bdocker\b/.test(blob)) return 'cloud';
+  return 'general';
+}
+
+function _makeMilestones({ goal, timeframeWeeks, focus }) {
+  /**
+   * Deterministic milestone planner (strategic path planning):
+   * - Uses timeframe to adjust granularity.
+   * - Uses focus to tailor milestones.
+   */
+  const weeks = timeframeWeeks;
+  const phaseCount = weeks <= 8 ? 3 : weeks <= 16 ? 4 : 5;
+
+  const base = [
+    { key: 'baseline', title: 'Assess current strengths & gaps', desc: 'Inventory skills, projects, and feedback; define target outcomes.' },
+    { key: 'build', title: 'Build targeted proof (projects/impact)', desc: 'Ship 1–2 scoped deliverables aligned to the goal.' },
+    { key: 'signal', title: 'Strengthen professional signal', desc: 'Update resume/LinkedIn, write concise stories, gather references.' },
+    { key: 'market', title: 'Practice & apply strategically', desc: 'Interview practice, application pipeline, and iteration from feedback.' },
+    { key: 'advance', title: 'Lock in next-step growth loop', desc: 'Create a 90-day plan for the new role and define success metrics.' }
+  ];
+
+  const focusOverrides = {
+    data: [
+      { key: 'baseline', title: 'Assess analytics + SQL depth', desc: 'Identify key gaps in SQL, modeling, and stakeholder communication.' },
+      { key: 'build', title: 'Build analytics portfolio', desc: 'Create dashboards/analysis writeups; focus on decision impact.' }
+    ],
+    frontend: [
+      { key: 'baseline', title: 'Assess product UI delivery skills', desc: 'Audit UI fundamentals, accessibility, and component architecture.' },
+      { key: 'build', title: 'Ship polished UI case studies', desc: 'Deliver a small app with strong UX, performance, and testing.' }
+    ],
+    backend: [
+      { key: 'baseline', title: 'Assess backend/system design', desc: 'Review APIs, data modeling, and reliability fundamentals.' },
+      { key: 'build', title: 'Ship a backend service', desc: 'Build a small service with auth, persistence, observability, and tests.' }
+    ],
+    cloud: [
+      { key: 'baseline', title: 'Assess cloud + ops readiness', desc: 'Review deployment, infra basics, monitoring, and incident response.' },
+      { key: 'build', title: 'Ship an infra-backed project', desc: 'Deploy something production-like with CI/CD, logs, and alerts.' }
+    ]
+  };
+
+  const use = base.slice(0, phaseCount);
+
+  // Apply focus overrides for the first two phases where it matters most.
+  const overrides = focusOverrides[focus] || [];
+  for (const o of overrides) {
+    const idx = use.findIndex((m) => m.key === o.key);
+    if (idx >= 0) use[idx] = { ...use[idx], ...o };
+  }
+
+  return use.map((m, i) => ({
+    id: `m${i + 1}`,
+    title: m.title,
+    description: m.desc,
+    order: i + 1
+  }));
+}
 
 // PUBLIC_INTERFACE
 router.post('/milestones', async (req, res) => {
   /**
-   * Create/derive milestones for a plan (placeholder).
+   * Strategic path planning: derive milestones for a goal/timeframe.
    *
-   * Body: { goal?: string, timeframeWeeks?: number, context?: object }
-   * Response: { milestones: Array<{ id: string, title: string, description?: string, order: number }> }
+   * Body (validated):
+   * { goal?: string, timeframeWeeks?: number, context?: object }
+   *
+   * Optional context fields supported (additive):
+   * - buildId: UUID; if present and orchestration has persona draft/final, planner tailors milestones.
    */
-  const goal = (req.body?.goal && String(req.body.goal).trim()) || 'Career growth plan';
-  const timeframeWeeks = Number(req.body?.timeframeWeeks || 12);
+  try {
+    const parsed = parseWithZod(PlanMilestonesRequestSchema, req.body || {});
+    if (!parsed.ok) throw parsed.error;
 
-  return res.status(200).json({
-    goal,
-    timeframeWeeks,
-    milestones: [
-      { id: 'm1', title: 'Assess current skills', description: 'Identify strengths and gaps.', order: 1 },
-      { id: 'm2', title: 'Build targeted projects', description: 'Ship 1–2 portfolio items.', order: 2 },
-      { id: 'm3', title: 'Interview preparation', description: 'Practice, iterate, apply.', order: 3 }
-    ]
-  });
+    const goal = _safeString(parsed.data.goal, 'Career growth plan');
+    const timeframeWeeks = Number(parsed.data.timeframeWeeks || 12);
+
+    const buildId =
+      parsed.data.context && typeof parsed.data.context === 'object' && parsed.data.context
+        ? String(parsed.data.context.buildId || '').trim()
+        : null;
+
+    let focus = 'general';
+    if (buildId) {
+      const orch = orchestrationService.getOrchestration(buildId);
+      const persona = orch?.personaDraft || orch?.personaFinal || null;
+      if (persona) focus = _inferFocusFromPersona(persona);
+    }
+
+    const milestones = _makeMilestones({ goal, timeframeWeeks, focus });
+
+    const payload = enforceResponse(PlanMilestonesResponseSchema, {
+      goal,
+      timeframeWeeks,
+      milestones
+    });
+
+    return res.status(200).json(payload);
+  } catch (err) {
+    return sendError(res, err);
+  }
 });
 
 module.exports = router;
