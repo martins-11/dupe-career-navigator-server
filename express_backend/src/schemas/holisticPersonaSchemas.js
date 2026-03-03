@@ -51,18 +51,27 @@ function enforceResponse(schema, payload) {
 // /api/recommendations/roles
 // -----------------------------
 
+/**
+ * Phase 1 response payload per role (per user instructions):
+ * - role_id
+ * - role_title
+ * - industry
+ * - match_reason
+ * - estimated_salary_range
+ */
 const RecommendedRoleSchema = z
   .object({
-    id: z.string().min(1),
-    title: z.string().min(1),
-    description: z.string().nullable().optional(),
-    tags: z.array(z.string()).optional()
+    role_id: z.string().min(1),
+    role_title: z.string().min(1),
+    industry: z.string().nullable().optional(),
+    match_reason: z.string().min(1),
+    estimated_salary_range: z.string().nullable().optional()
   })
   .strict();
 
 const RecommendationsRolesResponseSchema = z
   .object({
-    roles: z.array(RecommendedRoleSchema)
+    roles: z.array(RecommendedRoleSchema).min(5)
   })
   .strict();
 

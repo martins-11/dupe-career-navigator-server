@@ -15,6 +15,7 @@
     "validate:nonsense": "node scripts/validate-nonsense-input.js",
     "smoke:db": "node scripts/test-db.js",
     "smoke:bedrock": "node scripts/test-bedrock.js",
+    "seed:roles": "node scripts/seed-roles.js",
     "test": "NODE_ENV=test jest --runInBand",
     "test:integration": "NODE_ENV=test jest --runInBand --testPathPatterns=tests/integration"
   },
