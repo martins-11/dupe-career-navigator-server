@@ -253,9 +253,60 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     }
   }
 
-  // Salary filtering is applied in JS after fetch; prefetch more rows to avoid missing matches.
-  const hasSalaryFilter = minSalary != null || maxSalary != null;
-  const sqlLimit = hasSalaryFilter ? Math.min(lim * 50, 5000) : lim;
+  // Salary filtering (best-effort) in SQL:
+  //
+  // We store salary as a string (e.g. "$130k-$210k"). For filtering we extract an approximate
+  // numeric *upper bound* in dollars:
+  //  - If the range contains '-', we use the right-hand side (max).
+  //  - Otherwise we use the first numeric token.
+  //  - If the token has 'k' suffix we multiply by 1000.
+  //
+  // This is intentionally best-effort and designed to work with our seeded formats.
+  // We still keep JS-side filtering afterwards as a secondary safety net.
+  const salaryUpperExpr = `
+    (
+      CASE
+        WHEN estimated_salary_range IS NULL OR TRIM(estimated_salary_range) = '' THEN NULL
+        ELSE
+          (
+            CASE
+              WHEN INSTR(LOWER(estimated_salary_range), '-') > 0
+                THEN SUBSTRING_INDEX(LOWER(REPLACE(REPLACE(REPLACE(estimated_salary_range,'$',''),',',''),' ','')),'-',-1)
+              ELSE
+                LOWER(REPLACE(REPLACE(REPLACE(estimated_salary_range,'$',''),',',''),' ','')) 
+            END
+          )
+      END
+    )
+  `;
+
+  // Convert extracted token into numeric dollars.
+  const salaryUpperDollarsExpr = `
+    (
+      CASE
+        WHEN ${salaryUpperExpr} IS NULL THEN NULL
+        WHEN RIGHT(${salaryUpperExpr}, 1) = 'k'
+          THEN CAST(REPLACE(${salaryUpperExpr}, 'k', '') AS DECIMAL(12,2)) * 1000
+        ELSE CAST(${salaryUpperExpr} AS DECIMAL(12,2))
+      END
+    )
+  `;
+
+  const minS = Number.isFinite(Number(minSalary)) ? Number(minSalary) : null;
+  const maxS = Number.isFinite(Number(maxSalary)) ? Number(maxSalary) : null;
+
+  if (minS != null) {
+    where.push(`${salaryUpperDollarsExpr} >= ?`);
+    params.push(minS);
+  }
+
+  if (maxS != null) {
+    where.push(`${salaryUpperDollarsExpr} <= ?`);
+    params.push(maxS);
+  }
+
+  // With SQL-side salary filtering, we don't need to massively prefetch anymore.
+  const sqlLimit = lim;
 
   const query = `
     SELECT
@@ -281,9 +332,6 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
   // Debugging trace: log raw DB results.
   // eslint-disable-next-line no-console
   console.log('Raw DB Results:', results);
-
-  const minS = Number.isFinite(Number(minSalary)) ? Number(minSalary) : null;
-  const maxS = Number.isFinite(Number(maxSalary)) ? Number(maxSalary) : null;
 
   const rows = (results.rows || []).map((r) => {
     const parsedSkills = _jsonParseIfNeeded(r.skills_required) || [];

@@ -93,7 +93,7 @@ router.get('/search', async (req, res) => {
 
     if (shouldAttemptDb) {
       try {
-        matches = await rolesRepo.searchRoles({
+        const dbResult = await rolesRepo.searchRoles({
           q,
           industry: industry || null,
           skills,
@@ -102,35 +102,22 @@ router.get('/search', async (req, res) => {
           limit
         });
 
-        // Some repo implementations return an array; others return a DB-driver shaped
-        // object like { rows: [...] }. Normalize to an array so count/sample/response
-        // always reflect the actual rows returned.
-        const underlyingRowCount = Array.isArray(matches?.rows)
-          ? matches.rows.length
-          : Array.isArray(matches)
-            ? matches.length
-            : null;
-
-        const rows = Array.isArray(matches)
-          ? matches
-          : Array.isArray(matches?.rows)
-            ? matches.rows
-            : [];
-
-        const computedCount = rows.length;
+        // Normalize repo result into an array.
+        // - Some layers return an array of rows.
+        // - Others return a dbQuery()-style envelope: { rows: [...] }.
+        // The HTTP contract for this endpoint is ALWAYS an array of role rows.
+        const rows = Array.isArray(dbResult) ? dbResult : Array.isArray(dbResult?.rows) ? dbResult.rows : [];
 
         if (debugRolesSearch) {
           // eslint-disable-next-line no-console
-          console.log('[roles.search] (db) counts:', {
-            computedCount,
-            underlyingRowCount,
-            shape: Array.isArray(matches) ? 'array' : matches && typeof matches === 'object' ? 'object' : typeof matches
+          console.log('[roles.search] (db) normalized:', {
+            inputShape: Array.isArray(dbResult) ? 'array' : dbResult && typeof dbResult === 'object' ? 'object' : typeof dbResult,
+            rowCount: rows.length
           });
         }
 
-        // Return DB-derived rows in all cases (empty or non-empty) once we successfully
-        // executed the DB search. This avoids incorrectly falling back to memory when
-        // the DB returned results in a non-array shape.
+        // Important: do NOT fall back to memory just because the shape is unexpected.
+        // If the DB query executed successfully, return what we have (including []).
         return res.json(rows);
       } catch (e) {
         if (debugRolesSearch) {
