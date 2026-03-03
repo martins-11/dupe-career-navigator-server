@@ -32,6 +32,27 @@ function _titleIncludesPivot(currentRoleTitle, candidateRoleTitle) {
   return !(cand.includes(cur) || cur.includes(cand));
 }
 
+function _roleTitleTokens(title) {
+  const t = _normStr(title);
+  if (!t) return [];
+  return t
+    .split(/[^a-z0-9]+/g)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    // Remove ultra-common generic words to reduce false positives.
+    .filter((x) => !['and', 'of', 'the', 'a', 'an', 'to', 'for', 'in', 'on', 'with'].includes(x));
+}
+
+function _roleTitleOverlapCount(a, b) {
+  const at = new Set(_roleTitleTokens(a));
+  const bt = new Set(_roleTitleTokens(b));
+  let cnt = 0;
+  for (const tok of at) {
+    if (bt.has(tok)) cnt += 1;
+  }
+  return cnt;
+}
+
 function _seniorityRank(s) {
   const v = _normStr(s);
   if (!v) return 2;
@@ -75,11 +96,17 @@ function _matchesProgression({ personaCurrentRole, personaSeniority, roleTitle, 
   return false;
 }
 
-function _buildMatchReason({ overlapSkills }) {
+function _buildMatchReason({ overlapSkills, industryMatched, titleAligned, progressionOk }) {
   const skills = overlapSkills.slice(0, 2);
-  if (skills.length === 0) return 'Recommended based on your validated skills.';
-  if (skills.length === 1) return `Matches your ${skills[0]} skill.`;
-  return `Matches your ${skills[0]} and ${skills[1]} skills.`;
+
+  // Prefer a concrete single reason string as requested (e.g., "Matches your skill: X").
+  if (skills.length >= 1) return `Matches your skill: ${skills[0]}`;
+
+  if (industryMatched) return 'Matches your industry.';
+  if (titleAligned) return 'Aligns with your current role title.';
+  if (progressionOk) return 'Matches your current level or a logical next step.';
+
+  return 'Recommended based on your Final Persona.';
 }
 
 async function _ensureSeededIfEmpty() {
@@ -272,8 +299,15 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
       const overlap = roleSkills.filter((s) => personaSkills.includes(s));
       const overlapCount = overlap.length;
 
-      const industryOk = pivot ? true : !_normStr(personaIndustry) || _normStr(r.industry) === _normStr(personaIndustry);
+      // FINAL PERSONA: industry filter/priority
+      const industryMatched =
+        pivot ? true : !_normStr(personaIndustry) || _normStr(r.industry) === _normStr(personaIndustry);
 
+      // FINAL PERSONA: role title alignment (direct match based on title tokens)
+      const titleOverlap = _roleTitleOverlapCount(personaCurrentRole, r.roleTitle);
+      const titleAligned = titleOverlap >= 1;
+
+      // FINAL PERSONA: seniority / next logical step
       const progressionOk = _matchesProgression({
         personaCurrentRole,
         personaSeniority,
@@ -281,27 +315,33 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
         roleSeniorityLevels: r.seniorityLevels
       });
 
-      // Extra tiny boost for not being a "hard pivot" in title-space when pivot is false.
-      const titleSimilarityBoost = pivot ? 0 : _titleIncludesPivot(personaCurrentRole, r.roleTitle) ? 0 : 1;
-
-      // Primary scoring emphasizes skill overlap; progression and industry are filters/boosts.
-      const score = overlapCount * 10 + (progressionOk ? 4 : -10) + (industryOk ? 3 : -20) + titleSimilarityBoost;
+      // Direct-match scoring: skills dominate, then industry, then title/progression.
+      const score =
+        overlapCount * 10 +
+        (industryMatched ? 5 : -50) +
+        (titleAligned ? 3 : 0) +
+        (progressionOk ? 2 : -5);
 
       return {
         role: r,
         score,
         overlap,
         overlapCount,
-        industryOk,
+        industryMatched,
+        titleAligned,
         progressionOk
       };
     })
-    // Hard filters for Phase 1:
-    .filter((x) => x.overlapCount >= 3)
-    .filter((x) => (pivot ? true : x.industryOk))
-    .filter((x) => x.progressionOk);
+    // Direct-match-only hard filters:
+    // - Skills: must match at least 2 validated skills (persona.validated_skills)
+    // - Industry: must match persona.industry (unless pivot=true)
+    // - Role Title / Seniority: must align with current title OR match progression
+    .filter((x) => x.overlapCount >= 2)
+    .filter((x) => (pivot ? true : x.industryMatched))
+    .filter((x) => x.titleAligned || x.progressionOk);
 
-  // If filtering is too strict (e.g., narrow persona skills), relax progression first (but keep overlap>=3).
+  // Fallback: if too strict, allow progression OR title alignment to be the only "role title/seniority" gate,
+  // but keep skills+industry rules intact. (Still direct-match based on Final Persona.)
   const fallbackPool =
     scored.length >= 5
       ? scored
@@ -310,12 +350,27 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
             const roleSkills = _uniqNorm(r.coreSkills || []);
             const overlap = roleSkills.filter((s) => personaSkills.includes(s));
             const overlapCount = overlap.length;
-            const industryOk = pivot ? true : !_normStr(personaIndustry) || _normStr(r.industry) === _normStr(personaIndustry);
-            const score = overlapCount * 10 + (industryOk ? 2 : -20);
-            return { role: r, score, overlap, overlapCount, industryOk, progressionOk: false };
+
+            const industryMatched =
+              pivot ? true : !_normStr(personaIndustry) || _normStr(r.industry) === _normStr(personaIndustry);
+
+            const titleOverlap = _roleTitleOverlapCount(personaCurrentRole, r.roleTitle);
+            const titleAligned = titleOverlap >= 1;
+
+            const progressionOk = _matchesProgression({
+              personaCurrentRole,
+              personaSeniority,
+              roleTitle: r.roleTitle,
+              roleSeniorityLevels: r.seniorityLevels
+            });
+
+            const score = overlapCount * 10 + (industryMatched ? 5 : -50) + (titleAligned ? 2 : 0) + (progressionOk ? 1 : 0);
+
+            return { role: r, score, overlap, overlapCount, industryMatched, titleAligned, progressionOk };
           })
-          .filter((x) => x.overlapCount >= 3)
-          .filter((x) => (pivot ? true : x.industryOk));
+          .filter((x) => x.overlapCount >= 2)
+          .filter((x) => (pivot ? true : x.industryMatched))
+          .filter((x) => x.titleAligned || x.progressionOk);
 
   const top = [...fallbackPool].sort((a, b) => b.score - a.score).slice(0, 5);
 
@@ -323,7 +378,12 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
     role_id: x.role.roleId,
     role_title: x.role.roleTitle,
     industry: x.role.industry,
-    match_reason: _buildMatchReason({ overlapSkills: x.overlap }),
+    match_reason: _buildMatchReason({
+      overlapSkills: x.overlap,
+      industryMatched: x.industryMatched,
+      titleAligned: x.titleAligned,
+      progressionOk: x.progressionOk
+    }),
     estimated_salary_range: x.role.estimatedSalaryRange || null
   }));
 
