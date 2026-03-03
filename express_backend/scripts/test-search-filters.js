@@ -64,8 +64,8 @@ async function main() {
       path: '/api/roles/search?q=Manager&industry=Technology'
     },
     {
-      name: 'Case 2: salary range filter (min_salary=100000)',
-      path: '/api/roles/search?min_salary=100000'
+      name: 'Case 2: salary range filter (min_salary=50000)',
+      path: '/api/roles/search?min_salary=50000'
     }
   ];
 

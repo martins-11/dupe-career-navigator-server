@@ -108,21 +108,11 @@ router.get('/search', async (req, res) => {
       }
     }
 
-    // DB not available (or DB search failed): fall back to an in-memory seed list and apply filters in JS.
-    // This keeps /api/roles/search useful for local dev + automated verification scripts.
+    // DB not available (or DB search failed): fall back to exported in-memory catalog.
+    // IMPORTANT: do not downgrade to a single-item safety net because verification scripts
+    // expect multiple matches (and some filters won't match the single item).
     const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
-    const catalog = Array.isArray(seed)
-      ? seed
-      : [
-          // Minimal safety net (should not normally be used because DEFAULT_ROLES_CATALOG is exported).
-          {
-            role_id: 'seed-product-manager',
-            role_title: 'Product Manager',
-            industry: 'Technology',
-            skills_required: ['Roadmapping', 'Stakeholder Management', 'Analytics', 'Prioritization', 'Communication'],
-            salary_range: '$130k-$210k'
-          }
-        ];
+    const catalog = Array.isArray(seed) ? seed : [];
 
     const qNorm = String(q || '').trim().toLowerCase();
     const industryNorm = String(industry || '').trim().toLowerCase();
