@@ -182,7 +182,11 @@ router.get('/search', async (req, res) => {
         // 1) DB/seed route shape: { role_id, role_title, skills_required, salary_range }
         // 2) recommendationsService.DEFAULT_ROLES_CATALOG shape:
         //    { roleTitle, coreSkills, estimatedSalaryRange, industry, ... }
-        const title = String(r.role_title || r.roleTitle || r.roleTitle?.name || '').trim();
+        //
+        // IMPORTANT:
+        // - roleTitle is a plain string in DEFAULT_ROLES_CATALOG. Previous code attempted roleTitle?.name,
+        //   which caused title="" and made all filtering (and even unfiltered listing) return [].
+        const title = String(r.role_title || r.roleTitle || '').trim();
         const ind = String(r.industry || '').trim();
 
         const skillsReq = Array.isArray(r.skills_required)
@@ -191,7 +195,7 @@ router.get('/search', async (req, res) => {
             ? r.coreSkills
             : [];
 
-        const salaryRange = String(r.salary_range || r.estimatedSalaryRange || r.estimatedSalaryRange?.range || '').trim();
+        const salaryRange = String(r.salary_range || r.estimatedSalaryRange || '').trim();
 
         const salaryBounds = parseSalaryBounds(salaryRange);
 
