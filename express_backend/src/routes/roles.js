@@ -58,15 +58,13 @@ router.get('/search', async (req, res) => {
               .filter(Boolean)
           : [];
 
-    const minSalary =
-      req.query?.min_salary != null && String(req.query.min_salary).trim() !== ''
-        ? Number(req.query.min_salary)
-        : null;
+    const minSalaryRaw = req.query?.min_salary != null ? String(req.query.min_salary).trim() : '';
+    const minSalaryParsed = minSalaryRaw !== '' ? Number(minSalaryRaw) : null;
+    const minSalary = Number.isFinite(minSalaryParsed) ? minSalaryParsed : null;
 
-    const maxSalary =
-      req.query?.max_salary != null && String(req.query.max_salary).trim() !== ''
-        ? Number(req.query.max_salary)
-        : null;
+    const maxSalaryRaw = req.query?.max_salary != null ? String(req.query.max_salary).trim() : '';
+    const maxSalaryParsed = maxSalaryRaw !== '' ? Number(maxSalaryRaw) : null;
+    const maxSalary = Number.isFinite(maxSalaryParsed) ? maxSalaryParsed : null;
 
     if (debugRolesSearch) {
       // eslint-disable-next-line no-console

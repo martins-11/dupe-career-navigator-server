@@ -121,7 +121,9 @@ function _parseSalaryRangeToBounds(s) {
   const tokens = raw.match(/(\d+(\.\d+)?)(\s*[kmb])?/g) || [];
   const values = tokens
     .map((t) => {
-      const m = String(t).trim().match(/^(\d+(\.\d+)?)(\s*[kmb])?$/);
+      const m = String(t)
+        .trim()
+        .match(/^(\d+(\.\d+)?)(\s*[kmb])?$/);
       if (!m) return null;
       const num = Number(m[1]);
       if (!Number.isFinite(num)) return null;
@@ -146,9 +148,7 @@ function _parseSalaryRangeToBounds(s) {
  */
 function _roleSkillsContainAll(roleSkills, requiredSkills) {
   const roleSet = new Set(
-    (Array.isArray(roleSkills) ? roleSkills : [])
-      .map((s) => String(s).trim().toLowerCase())
-      .filter(Boolean)
+    (Array.isArray(roleSkills) ? roleSkills : []).map((s) => String(s).trim().toLowerCase()).filter(Boolean)
   );
 
   for (const req of requiredSkills) {
@@ -187,12 +187,11 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   const qStr = String(q || '').trim();
   if (qStr) {
-    // Robust keyword match:
-    // - Always match titles via LIKE.
-    // - For skills, prefer a simple LIKE fallback on the JSON text. This avoids relying on
-    //   MySQL JSON_* behavior/version differences that have caused empty results in practice.
+    // IMPORTANT: use case-insensitive matching.
+    // This avoids MySQL collation differences making LIKE behave case-sensitively, which caused
+    // seeded roles such as "Product Manager" to not match q=Manager in verification scripts.
     const like = `%${qStr}%`;
-    where.push('(role_title LIKE ? OR core_skills_json LIKE ?)');
+    where.push('(LOWER(role_title) LIKE LOWER(?) OR LOWER(core_skills_json) LIKE LOWER(?))');
     params.push(like, like);
   }
 
@@ -202,16 +201,15 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     params.push(String(industry));
   }
 
-  // Skills: AND semantics. Use LIKE against serialized JSON to avoid JSON_CONTAINS incompatibilities.
-  // This is not perfect (substring match), but works reliably with the seeded data format:
-  // ["SQL","Excel",...]
+  // Skills: AND semantics.
+  // Use a quoted-token LIKE match against serialized JSON to avoid JSON_CONTAINS incompatibilities.
+  // Make it case-insensitive for determinism across collations.
   const skillsList = Array.isArray(skills) ? skills : [];
   const normalizedSkills = skillsList.map((s) => String(s).trim()).filter(Boolean);
   if (normalizedSkills.length > 0) {
     for (const s of normalizedSkills) {
-      // match the JSON string token: "SQL"
-      where.push('core_skills_json LIKE ?');
-      params.push(`%\"${String(s).replace(/"/g, '\\"')}\"%`);
+      where.push('LOWER(core_skills_json) LIKE LOWER(?)');
+      params.push(`%\\\"${String(s).replace(/\"/g, '\\\\\"')}\\\"%`);
     }
   }
 
@@ -265,8 +263,8 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     };
   });
 
-  // Defensive: even though SQL uses JSON_CONTAINS, keep a JS containment check to avoid surprises
-  // if core_skills_json contains mixed casing or unexpected non-string elements.
+  // Defensive: keep a JS containment check to avoid surprises if core_skills_json contains mixed casing
+  // or unexpected non-string elements.
   let filtered = rows;
   if (normalizedSkills.length > 0) {
     filtered = filtered.filter((r) => _roleSkillsContainAll(r.skills_required, normalizedSkills));
