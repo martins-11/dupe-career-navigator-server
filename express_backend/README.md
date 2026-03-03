@@ -17,8 +17,10 @@ Express backend scaffold for the Professional Persona Builder.
 
 ## Run
 
+From **this directory** (`career-navigator-server/express_backend`):
+
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -60,11 +62,18 @@ BASE_URL=http://localhost:3001 MAX_WAIT_SECONDS=60 POLL_INTERVAL_SECONDS=1 bash 
 
 See `.env.example` for the expected PostgreSQL environment variables.
 
-## Migrations (placeholder)
+## Database scripts (migrate / check / verify)
 
-Once DB credentials are available:
+From **this directory** (`career-navigator-server/express_backend`):
 
 ```bash
+npm ci
 npm run db:migrate
 npm run db:check
+npm run db:verify
 ```
+
+Notes:
+- These scripts load environment variables from `express_backend/.env`.
+- If you see `Cannot find module 'dotenv'`, it means dependencies were not installed in this folder—run `npm ci` here.
+- If you see `getaddrinfo ENOTFOUND ...` or connection errors, `dotenv` is working and the failure is due to DB hostname/network/credentials (not a missing dependency).
