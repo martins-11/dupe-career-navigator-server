@@ -244,7 +244,13 @@ router.get('/autocomplete', async (req, res) => {
  * - Use Amazon Bedrock (Claude 3 Haiku) to generate 5 targeted roles based on provided user skills/persona.
  * - Return strict JSON (array) to prevent frontend crashes on HTML error pages.
  *
+ * HARDENING (per user_input_ref step 01.01):
+ * - Coerce req.query.q via String(...).trim() to avoid `trim is not a function`.
+ * - If query is empty, return default "Trending Roles" and do not call Bedrock.
+ * - Only JSON.parse Bedrock output when it is a string.
+ *
  * Query params:
+ * - q: string (optional) Search query entered in Explore.
  * - skills: string|string[] (optional) Comma-separated or repeated params (preferred minimal input).
  * - user_skills_json: string (optional) JSON array of user skills. Supports:
  *    - ["React","Node.js",...]
@@ -257,6 +263,16 @@ router.get('/autocomplete', async (req, res) => {
 router.get('/search', async (req, res) => {
   try {
     const debugRolesSearch = String(process.env.DEBUG_ROLES_SEARCH || '').toLowerCase() === 'true';
+
+    // Coerce q to a string before trimming (prevents `trim is not a function` crashes).
+    const searchQuery = String(req.query?.q || '').trim();
+
+    // If the query is empty, return default "Trending Roles" and skip Bedrock entirely.
+    if (!searchQuery) {
+      const trending = recommendationsService?.DEFAULT_ROLES_CATALOG;
+      const rolesArray = Array.isArray(trending) ? trending : [];
+      return res.json(rolesArray.slice(0, 5));
+    }
 
     // Build a minimal userPersona object from query params (since this is a GET route).
     const skillsRaw = req.query?.skills;
@@ -289,6 +305,7 @@ router.get('/search', async (req, res) => {
     const includeThreeTwo = includeThreeTwoRaw !== 'false';
 
     const userPersona = {
+      query: searchQuery,
       // For prompt: prioritize explicit skills list; otherwise use validated_skills_json; else user_skills_json as strings.
       skills:
         skills.length > 0 ? skills
@@ -302,6 +319,7 @@ router.get('/search', async (req, res) => {
     if (debugRolesSearch) {
       // eslint-disable-next-line no-console
       console.log('[roles.search] bedrockMode:', {
+        searchQueryPreview: searchQuery.slice(0, 80),
         skillsCount: Array.isArray(userPersona.skills) ? userPersona.skills.length : null,
         hasUserSkillsJson: Array.isArray(userSkillsJson),
         includeThreeTwo
@@ -309,10 +327,12 @@ router.get('/search', async (req, res) => {
     }
 
     // Call Bedrock to generate roles. Service is expected to return strict JSON, but we defensively
-    // handle cases where `roles` might be a JSON string (per user_input_ref).
+    // handle cases where `roles` might be a JSON string.
     const bedrockResult = await bedrockService.generateTargetedRoles(userPersona);
 
     let { roles, prompt, modelId } = bedrockResult || {};
+
+    // Only JSON.parse Bedrock output when it is a string.
     if (typeof roles === 'string') {
       try {
         roles = JSON.parse(roles);
@@ -350,7 +370,7 @@ router.get('/search', async (req, res) => {
           includeThreeTwo &&
           Array.isArray(scoringUserSkills) &&
           scoringUserSkills.some(
-            (s) => s && typeof s === "object" && (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null)
+            (s) => s && typeof s === 'object' && (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null)
           );
 
         return rolesArray.map((r) => {
