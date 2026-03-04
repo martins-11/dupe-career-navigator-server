@@ -18,6 +18,17 @@ const {
 
 const router = express.Router();
 
+// PUBLIC_INTERFACE
+function getInitialRecommendationsHandler() {
+  /**
+   * Return the shared handler function for initial recommendations.
+   *
+   * This is exported so server.js can mount the endpoint directly as a safety net
+   * in case router mounting/prefixes drift across environments.
+   */
+  return handleInitialRecommendations;
+}
+
 /**
  * Recommendations APIs.
  *
@@ -269,3 +280,4 @@ router.post('/compare', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.getInitialRecommendationsHandler = getInitialRecommendationsHandler;
