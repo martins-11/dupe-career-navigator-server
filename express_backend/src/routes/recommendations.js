@@ -32,36 +32,107 @@ router.get('/roles', async (req, res) => {
   /**
    * Phase 1: Return recommended roles based solely on the latest Final Persona stored in DB.
    *
+   * IMPORTANT HARDENING (guest state):
+   * - Frontend may call this endpoint before a persona is created/selected (personaId missing).
+   * - In that case, we MUST NOT 400/500; instead return a safe deterministic recommendation list.
+   * - If a session/default persona exists on the request (middleware-added), prefer that over the generic fallback.
+   *
    * Query params (additive):
-   * - personaId: UUID (optional; scaffold may ignore due to current persona_final schema)
-   * - userId: UUID (optional; scaffold may ignore due to current persona_final schema)
+   * - personaId: UUID (optional)
+   * - userId: UUID (optional)
    * - pivot: boolean (default false) - if true, do NOT filter to persona industry
    *
    * Response (validated):
    * { roles: Array<{ role_id, role_title, industry, match_reason, estimated_salary_range }> }
    */
   try {
-    const personaId = req.query?.personaId ? String(req.query.personaId).trim() : null;
+    const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
     const userId = req.query?.userId ? String(req.query.userId).trim() : null;
     const pivot = String(req.query?.pivot || '').toLowerCase() === 'true';
 
-    const { recommendations } = await recommendationsService.getRoleRecommendationsFromFinalPersona({
-      personaId,
-      userId,
-      pivot
-    });
+    /**
+     * Guest-state fallback strategy:
+     * 1) Prefer explicitly provided personaId.
+     * 2) Else, try to find a "default persona id" attached to the request by upstream middleware.
+     *    We support multiple non-breaking shapes (session may not be configured in all envs):
+     *    - req.session?.personaId
+     *    - req.session?.defaultPersonaId
+     *    - req.context?.personaId
+     *    - req.context?.defaultPersonaId
+     * 3) Else, return deterministic "trending roles" based on DEFAULT_ROLES_CATALOG.
+     */
+    const fallbackPersonaId =
+      String(req.session?.personaId || req.session?.defaultPersonaId || req.context?.personaId || req.context?.defaultPersonaId || '').trim() ||
+      null;
+
+    const resolvedPersonaId = personaIdRaw || fallbackPersonaId;
+
+    let recommendations = [];
+
+    // If we truly have no persona id available, immediately return deterministic guest recommendations.
+    // (Do not attempt DB lookups, and do not treat as an error.)
+    if (!resolvedPersonaId) {
+      const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
+      const seedArr = Array.isArray(seed) ? seed : [];
+      recommendations = seedArr.slice(0, 5).map((r, idx) => ({
+        role_id: `guest_${idx + 1}`,
+        role_title: r?.roleTitle || 'Role',
+        industry: r?.industry || null,
+        match_reason: 'Sign in or create a persona to get personalized recommendations.',
+        estimated_salary_range: r?.estimatedSalaryRange || null
+      }));
+
+      const payload = enforceResponse(RecommendationsRolesResponseSchema, { roles: recommendations });
+      return res.json(payload);
+    }
+
+    try {
+      // Primary behavior: use Final Persona when available.
+      const result = await recommendationsService.getRoleRecommendationsFromFinalPersona({
+        personaId: resolvedPersonaId,
+        userId,
+        pivot
+      });
+      recommendations = Array.isArray(result?.recommendations) ? result.recommendations : [];
+    } catch (err) {
+      // If persona resolution fails (e.g., missing final persona), return deterministic fallback instead of failing.
+      // We only swallow persona-not-found / DB-not-ready style conditions; other errors still surface.
+      const code = err?.code || '';
+      const httpStatus = err?.httpStatus;
+
+      const isGuestLike =
+        code === 'final_persona_not_found' ||
+        httpStatus === 404 ||
+        code === 'DB_NOT_CONFIGURED' ||
+        httpStatus === 503;
+
+      if (!isGuestLike) throw err;
+
+      const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
+      const seedArr = Array.isArray(seed) ? seed : [];
+      recommendations = seedArr.slice(0, 5).map((r, idx) => ({
+        role_id: `guest_${idx + 1}`,
+        role_title: r?.roleTitle || 'Role',
+        industry: r?.industry || null,
+        match_reason: 'Sign in or create a persona to get personalized recommendations.',
+        estimated_salary_range: r?.estimatedSalaryRange || null
+      }));
+    }
 
     // Best-effort persist latest computed roles (for refresh/reload). We keep this non-blocking.
-    try {
-      await holisticPersonaRepo.upsertRecommendationsRoles({
-        userId,
-        personaId,
-        buildId: null,
-        inferredTags: [],
-        roles: recommendations
-      });
-    } catch (_) {
-      // ignore persistence failures
+    // Only persist when we have some identity to attach it to.
+    if (userId || resolvedPersonaId) {
+      try {
+        await holisticPersonaRepo.upsertRecommendationsRoles({
+          userId,
+          personaId: resolvedPersonaId,
+          buildId: null,
+          inferredTags: [],
+          roles: recommendations
+        });
+      } catch (_) {
+        // ignore persistence failures
+      }
     }
 
     const payload = enforceResponse(RecommendationsRolesResponseSchema, { roles: recommendations });
