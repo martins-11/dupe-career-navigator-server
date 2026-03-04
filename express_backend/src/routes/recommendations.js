@@ -5,6 +5,8 @@ const { sendError } = require('../utils/errors');
 const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
 
 const recommendationsService = require('../services/recommendationsService');
+const bedrockService = require('../services/bedrockService');
+const personasRepo = require('../repositories/personasRepoAdapter');
 
 const {
   parseWithZod,
@@ -26,6 +28,65 @@ const router = express.Router();
  * - Return at least 5 recommended roles with:
  *   role_id, role_title, industry, match_reason, estimated_salary_range
  */
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/recommendations/initial
+ *
+ * Post-persona initial recommendations (exactly 5 India-market roles).
+ *
+ * Triggered by the frontend when "Finalized Persona" is reached, to populate a RecommendationGrid.
+ *
+ * Query params (optional):
+ * - personaId: string (used to load the finalized persona; best-effort)
+ *
+ * Response:
+ * { roles: Array<{ role_id, role_title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }> }
+ */
+router.get('/initial', async (req, res) => {
+  try {
+    const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
+
+    // Load finalized persona as the source of truth.
+    // We support a few non-breaking fallback ids used in earlier scaffolding.
+    const candidatePersonaIds = [personaIdRaw, 'active', 'latest', 'Rossini'].filter(Boolean);
+
+    let finalWrap = null;
+    for (const pid of candidatePersonaIds) {
+      try {
+        // personasRepo.getFinal returns wrapper { personaId, finalJson } in current adapter.
+        // If it returns raw JSON, bedrockService handles that too.
+        // eslint-disable-next-line no-await-in-loop
+        finalWrap = await personasRepo.getFinal(pid);
+        if (finalWrap) break;
+      } catch (_) {
+        // try next
+      }
+    }
+
+    const finalPersona = finalWrap?.finalJson || finalWrap || null;
+
+    const result = await bedrockService.getInitialRecommendations(finalPersona, {});
+    const roles = Array.isArray(result?.roles) ? result.roles : [];
+
+    // Best-effort persist for refresh/reload.
+    try {
+      await holisticPersonaRepo.upsertRecommendationsRoles({
+        userId: null,
+        personaId: personaIdRaw || finalWrap?.personaId || null,
+        buildId: null,
+        inferredTags: [],
+        roles
+      });
+    } catch (_) {
+      // ignore persistence failures
+    }
+
+    return res.json({ roles });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
 
 // PUBLIC_INTERFACE
 router.get('/roles', async (req, res) => {

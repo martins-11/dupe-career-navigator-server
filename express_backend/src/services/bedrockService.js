@@ -465,7 +465,264 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
   }
 }
 
+/**
+ * Convert a salary range string into a UI-friendly "₹xx–₹yy LPA" string when possible.
+ * If it is already an INR/LPA string, return as-is.
+ */
+function _normalizeToIndiaLpaRange(salaryRange) {
+  const s = _normStr(salaryRange);
+  if (!s) return '';
+
+  // If already INR/LPA-ish, keep it.
+  if (/(₹|inr|lpa|lakhs)/i.test(s)) return s;
+
+  // Common "$130k-$210k" style: approximate conversion to LPA.
+  // NOTE: This is best-effort; prompt asks Bedrock to output INR LPA directly.
+  const tokens = s.toLowerCase().match(/(\d+(\.\d+)?)(\s*[kmb])?/g) || [];
+  const vals = tokens
+    .map((t) => {
+      const m = String(t)
+        .trim()
+        .match(/^(\d+(\.\d+)?)(\s*[kmb])?$/);
+      if (!m) return null;
+      const num = Number(m[1]);
+      if (!Number.isFinite(num)) return null;
+      const suffix = (m[3] || '').trim();
+      const mult = suffix === 'k' ? 1000 : suffix === 'm' ? 1000000 : suffix === 'b' ? 1000000000 : 1;
+      return num * mult;
+    })
+    .filter((v) => Number.isFinite(v));
+
+  if (vals.length === 0) return s;
+
+  // USD -> INR -> LPA (very rough).
+  const usdToInrRaw = Number(process.env.USD_TO_INR || 83);
+  const usdToInr = Number.isFinite(usdToInrRaw) && usdToInrRaw > 0 ? usdToInrRaw : 83;
+
+  const toLpa = (usd) => Math.max(1, Math.round(((usd * usdToInr) / 100000) * 10) / 10); // 1 decimal
+  const min = toLpa(Math.min(...vals));
+  const max = toLpa(Math.max(...vals));
+  return `₹${min}–₹${max} LPA`;
+}
+
+function _validateAndNormalizeInitialRecommendations(parsed) {
+  if (!Array.isArray(parsed)) {
+    const err = new Error('Bedrock initial recommendations did not return a JSON array.');
+    err.code = 'bedrock_invalid_json_shape';
+    throw err;
+  }
+
+  const out = [];
+  const seen = new Set();
+
+  for (const r of parsed) {
+    if (!r || typeof r !== 'object') continue;
+
+    const title = _normStr(r.title);
+    const industry = _normStr(r.industry);
+    const salaryLpa = _normStr(r.salary_lpa_range || r.salary_range);
+    const experienceRange = _normStr(r.experience_range);
+    const description = _normStr(r.description);
+    const keyResponsibilities = _asStringArray(r.key_responsibilities);
+    const requiredSkills = _asStringArray(r.required_skills);
+
+    if (!title || !industry) continue;
+
+    // Enforce the "exactly 3 responsibilities" rule (truncate if longer).
+    const responsibilities =
+      keyResponsibilities.length >= 3 ? keyResponsibilities.slice(0, 3) : keyResponsibilities;
+
+    // Enforce 5–8 skills (truncate if longer; skip if too short)
+    if (requiredSkills.length < 5) continue;
+    const skills = requiredSkills.slice(0, 8);
+
+    const key = title.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({
+      role_id: `bedrock-rec-${title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '')}`,
+      role_title: title,
+      industry,
+      salary_lpa_range: _normalizeToIndiaLpaRange(salaryLpa),
+      experience_range: experienceRange,
+      description,
+      key_responsibilities: responsibilities,
+      required_skills: skills,
+      match_metadata: { source: 'bedrock_initial_recommendations' }
+    });
+  }
+
+  return out;
+}
+
+function _buildInitialRecommendationsPrompt(finalPersona) {
+  const personaObj =
+    finalPersona && typeof finalPersona === 'object'
+      ? finalPersona.finalJson && typeof finalPersona.finalJson === 'object'
+        ? finalPersona.finalJson
+        : finalPersona
+      : {};
+
+  const profs = _extractPersonaProficiencies(personaObj);
+  const profInline =
+    profs.length > 0
+      ? profs
+          .slice(0, 24)
+          .map((s) => `${s.name}:${s.proficiency}%`)
+          .join(', ')
+      : 'N/A';
+
+  const validatedSkills =
+    _asStringArray(personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || []).slice(0, 30);
+  const validatedInline = validatedSkills.length ? validatedSkills.join(', ') : 'N/A';
+
+  const personaIndustry =
+    _normStr(personaObj?.industry || personaObj?.profile?.industry || personaObj?.domain || '') || 'N/A';
+  const personaHeadline =
+    _normStr(personaObj?.profile?.headline || personaObj?.current_role || personaObj?.currentRole || personaObj?.title || '') || 'N/A';
+  const personaSeniority =
+    _normStr(personaObj?.seniority_level || personaObj?.seniorityLevel || personaObj?.seniority || personaObj?.profile?.seniority || '') ||
+    'N/A';
+
+  return [
+    'You are a Market Intelligence Expert for the Indian tech job market.',
+    'You deeply understand in-demand roles in India, realistic compensation bands in ₹ LPA, and technical responsibilities.',
+    '',
+    'CONTEXT (FinalizedPersona):',
+    `- Current role/headline: ${personaHeadline}`,
+    `- Seniority: ${personaSeniority}`,
+    `- Industry: ${personaIndustry}`,
+    `- Validated skills: [${validatedInline}]`,
+    `- Skill proficiencies (name:percent): [${profInline}]`,
+    '',
+    'TASK:',
+    'Return EXACTLY 5 realistic India-market job roles that best fit this persona today.',
+    '',
+    'OUTPUT FORMAT:',
+    'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
+    'Each element MUST be an object with EXACTLY these keys:',
+    '- "title": string',
+    '- "industry": string',
+    '- "salary_lpa_range": string (REALISTIC for India; use ₹ and LPA, e.g., "₹18–₹30 LPA")',
+    '- "experience_range": string (e.g., "3–5 years")',
+    '- "description": string (2–3 sentences, specific and technical)',
+    '- "key_responsibilities": array of strings (EXACTLY 3 items; specific and technical)',
+    '- "required_skills": array of strings (5–8 items; concrete skills that can be compared to persona skills)',
+    '',
+    'QUALITY RULES:',
+    '- Compensation MUST be realistic for India in ₹ LPA.',
+    '- Responsibilities must be specific (systems, tools, outcomes), not generic filler.',
+    '- Avoid duplicates and avoid overly niche titles.',
+  ].join('\n');
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * Generate initial post-persona recommendations (exactly 5 India-market roles).
+ *
+ * This is used immediately after the "Finalized Persona" step to render the RecommendationGrid.
+ *
+ * @param {object} finalPersona - Final persona JSON (or wrapper object that contains finalJson).
+ * @param {object} [options]
+ * @param {string} [options.modelId] - Override Bedrock model id / inference profile id.
+ * @returns {Promise<{ roles: Array, usedFallback: boolean, modelId: string, prompt: string, error?: object }>}
+ */
+async function getInitialRecommendations(finalPersona, options = {}) {
+  const modelId = options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID;
+
+  const prompt = _buildInitialRecommendationsPrompt(finalPersona);
+
+  const body = {
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 1100,
+    temperature: 0.2,
+    messages: [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: prompt }]
+      }
+    ]
+  };
+
+  try {
+    const client = _getBedrockClient();
+    const cmd = new InvokeModelCommand({
+      modelId,
+      contentType: 'application/json',
+      accept: 'application/json',
+      body: Buffer.from(JSON.stringify(body))
+    });
+
+    const resp = await client.send(cmd);
+    const jsonStr = Buffer.from(resp.body).toString('utf-8');
+    const bedrockJson = JSON.parse(jsonStr);
+
+    const rawText = _extractClaudeText(bedrockJson);
+    const extracted = _extractFirstJsonArray(rawText);
+    if (!extracted) {
+      const err = new Error('Could not extract a JSON array from Bedrock output (initial recommendations).');
+      err.code = 'bedrock_no_json_array';
+      err.details = { rawText: rawText.slice(0, 5000) };
+      throw err;
+    }
+
+    const parsed = JSON.parse(extracted);
+    const roles = _validateAndNormalizeInitialRecommendations(parsed);
+
+    if (roles.length < 5) {
+      const err = new Error(`Bedrock returned ${roles.length} valid initial recommendations; expected 5.`);
+      err.code = 'bedrock_insufficient_roles';
+      throw err;
+    }
+
+    return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
+  } catch (err) {
+    // Deterministic fallback: use the existing safe generator and map into the required UI shape.
+    const safe = await generateTargetedRolesSafe({ persona: finalPersona, skills: [], user_skills: [] }, { modelId });
+    const roles = (Array.isArray(safe?.roles) ? safe.roles : []).slice(0, 5).map((r) => ({
+      role_id: r.role_id,
+      role_title: r.role_title,
+      industry: r.industry,
+      salary_lpa_range: _normalizeToIndiaLpaRange(r.salary_range),
+      experience_range: r.experience_range || '',
+      description: r.description || '',
+      key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
+      required_skills: Array.isArray(r.required_skills) ? r.required_skills.slice(0, 8) : Array.isArray(r.skills_required) ? r.skills_required.slice(0, 8) : [],
+      match_metadata: { source: 'fallback_initial_recommendations', usedFallback: true }
+    }));
+
+    // Ensure exactly 5.
+    const padded = [...roles];
+    while (padded.length < 5) {
+      padded.push({
+        role_id: `fallback-rec-${padded.length + 1}`,
+        role_title: 'Software Engineer',
+        industry: 'Technology',
+        salary_lpa_range: '₹12–₹22 LPA',
+        experience_range: '2–4 years',
+        description: 'Builds and maintains product features across backend services and APIs. Works closely with product and QA to ship reliable releases.',
+        key_responsibilities: ['Build and maintain APIs and backend services', 'Write tests and improve reliability in production', 'Collaborate with cross-functional teams to deliver features'],
+        required_skills: ['JavaScript', 'Node.js', 'REST APIs', 'SQL', 'Git'],
+        match_metadata: { source: 'fallback_initial_recommendations', padded: true }
+      });
+    }
+
+    return {
+      roles: padded.slice(0, 5),
+      usedFallback: true,
+      modelId,
+      prompt,
+      error: { code: err?.code || 'BEDROCK_FAILED', message: err?.message || String(err) }
+    };
+  }
+}
+
 module.exports = {
   generateTargetedRoles,
-  generateTargetedRolesSafe
+  generateTargetedRolesSafe,
+  getInitialRecommendations
 };
