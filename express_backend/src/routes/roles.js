@@ -6,7 +6,8 @@ const rolesRepo = require('../repositories/rolesRepoAdapter');
 const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../db/connection');
 const recommendationsService = require('../services/recommendationsService');
 const bedrockService = require('../services/bedrockService');
-const { buildThreeTwoReport } = require('../services/scoringEngine');
+const personasRepo = require('../repositories/personasRepoAdapter');
+const { validateThreeTwoBalance, buildThreeTwoReport } = require('../services/scoringEngine');
 
 const router = express.Router();
 
@@ -148,25 +149,51 @@ router.get('/skills', async (req, res) => {
   }
 });
 
+/**
+ * Collect unique role title strings from role objects (DB or seed shapes).
+ * Returns a sorted array of strings.
+ */
+function _deriveUniqueTitlesFromRoles(roles) {
+  const set = new Map(); // key: lowercased, value: original label
+  for (const r of Array.isArray(roles) ? roles : []) {
+    const label = _normalizeLabel(r?.roleTitle ?? r?.role_title ?? r?.role_title ?? r?.title);
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (!set.has(key)) set.set(key, label);
+  }
+  return Array.from(set.values()).sort(_sortCaseInsensitive);
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/roles/titles
+ *
+ * Returns distinct role title values for the Explore filters UI.
+ *
+ * IMPORTANT CONTRACT (to match /industries + /skills):
+ * - Always returns a JSON array of strings (never an object envelope).
+ * - On empty catalog OR on error, returns [] (HTTP 200).
+ */
+router.get('/titles', async (req, res) => {
+  try {
+    const roles = await _loadRolesForFilterOptions();
+    const titles = _deriveUniqueTitlesFromRoles(roles);
+    return res.json(Array.isArray(titles) ? titles : []);
+  } catch (_) {
+    return res.json([]);
+  }
+});
+
 // PUBLIC_INTERFACE
 router.get('/job-titles', async (req, res) => {
   /**
-   * (Optional) Return distinct job title values for the Explore filters UI.
+   * Backward-compatible endpoint for older clients.
    *
    * Response: { jobTitles: string[] }
    */
   try {
     const roles = await _loadRolesForFilterOptions();
-    const set = new Map(); // key: lowercased, value: original label
-
-    for (const r of roles) {
-      const label = _normalizeLabel(r?.roleTitle ?? r?.role_title ?? r?.title);
-      if (!label) continue;
-      const key = label.toLowerCase();
-      if (!set.has(key)) set.set(key, label);
-    }
-
-    const jobTitles = Array.from(set.values()).sort(_sortCaseInsensitive);
+    const jobTitles = _deriveUniqueTitlesFromRoles(roles);
     return res.json({ jobTitles });
   } catch (err) {
     return sendError(res, err);
@@ -264,14 +291,189 @@ router.get('/search', async (req, res) => {
   try {
     const debugRolesSearch = String(process.env.DEBUG_ROLES_SEARCH || '').toLowerCase() === 'true';
 
-    // Coerce q to a string before trimming (prevents `trim is not a function` crashes).
-    const searchQuery = String(req.query?.q || '').trim();
+    // Authoritative fix (user_input_ref): force query to string to avoid object.trim crashes.
+    // Also collapse internal whitespace for cleaner prompts.
+    const searchQuery = String(req.query?.q || '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
-    // If the query is empty, return default "Trending Roles" and skip Bedrock entirely.
+    /**
+     * Persona bridge:
+     * When q is empty, Explore "Suggested Roles" should still be personalized.
+     * We load the active finalized persona and generate Bedrock roles immediately, then score + sort.
+     *
+     * We accept an optional personaId to disambiguate which persona is "active".
+     * If not provided, we best-effort fall back to:
+     * - personasRepo.getFinal('active') (in-memory convention), else
+     * - no persona (falls back to deterministic scoring defaults).
+     */
+    const personaId = req.query?.personaId != null ? String(req.query.personaId).trim() : '';
+
+    const parseJsonQuery = (k) => {
+      const v = req.query?.[k];
+      if (v == null) return null;
+      const s = String(v).trim();
+      if (!s) return null;
+      try {
+        return JSON.parse(s);
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const includeThreeTwoRaw = String(req.query?.include_three_two ?? 'true').toLowerCase();
+    const includeThreeTwo = includeThreeTwoRaw !== 'false';
+
+    // Parse salary params defensively (even if we don't use them for Bedrock generation yet).
+    const parseOptionalNumber = (v) => {
+      if (v == null) return null;
+      const s = String(v).trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    const minSalary = parseOptionalNumber(req.query?.min_salary);
+    const maxSalary = parseOptionalNumber(req.query?.max_salary);
+
+    // If the query is empty, we do NOT return static trending roles anymore.
+    // Instead we generate suggested roles from the finalized persona (Day 3 requirement).
     if (!searchQuery) {
-      const trending = recommendationsService?.DEFAULT_ROLES_CATALOG;
-      const rolesArray = Array.isArray(trending) ? trending : [];
-      return res.json(rolesArray.slice(0, 5));
+      let finalPersona = null;
+      try {
+        if (personaId) {
+          finalPersona = await personasRepo.getFinal(personaId);
+        } else {
+          // Best-effort convention for "active persona" in memory-backed flows.
+          finalPersona = await personasRepo.getFinal('active');
+        }
+      } catch (_) {
+        finalPersona = null;
+      }
+
+      // Extract proficiency-bearing skills from finalized persona, supporting common shapes.
+      const skillsFromFinal = (() => {
+        const p = finalPersona && typeof finalPersona === 'object' ? finalPersona : {};
+        const candidates = [
+          p.user_skills,
+          p.userSkills,
+          p.skills_with_proficiency,
+          p.skillsWithProficiency,
+          p.skills,
+        ];
+
+        for (const c of candidates) {
+          if (!Array.isArray(c)) continue;
+          // If it's array of objects with proficiency, keep as-is; if strings, map to objects with null prof (scoring will fallback).
+          if (c.some((x) => x && typeof x === 'object')) return c;
+          if (c.some((x) => typeof x === 'string')) return c.map((name) => ({ name, proficiency: null }));
+        }
+        return [];
+      })();
+
+      const userPersona = {
+        query: '',
+        persona: finalPersona, // included to allow Bedrock prompt to leverage full context (service will ignore if not used)
+        skills: Array.isArray(skillsFromFinal) ? skillsFromFinal.map((s) => (typeof s === 'string' ? s : s?.name || s?.skill || s?.skill_name)).filter(Boolean) : [],
+        user_skills: Array.isArray(skillsFromFinal) ? skillsFromFinal : [],
+        min_salary: minSalary,
+        max_salary: maxSalary,
+      };
+
+      if (debugRolesSearch) {
+        // eslint-disable-next-line no-console
+        console.log('[roles.search] suggestedRolesMode:', {
+          personaId: personaId || '(default active)',
+          hasFinalPersona: Boolean(finalPersona),
+          userSkillsCount: Array.isArray(userPersona.user_skills) ? userPersona.user_skills.length : 0,
+          includeThreeTwo,
+        });
+      }
+
+      const bedrockResult = await bedrockService.generateTargetedRolesSafe(userPersona);
+      let { roles, prompt, modelId, usedFallback } = bedrockResult || {};
+
+      if (typeof roles === 'string') {
+        try {
+          roles = JSON.parse(roles);
+        } catch {
+          const safe2 = await bedrockService.generateTargetedRolesSafe(userPersona);
+          roles = safe2.roles;
+          usedFallback = true;
+        }
+      }
+
+      const rolesArray = Array.isArray(roles) ? roles : [];
+
+      const fallbackUserSkills = [
+        { name: 'Communication', proficiency: 50 },
+        { name: 'Teamwork', proficiency: 50 },
+        { name: 'Problem Solving', proficiency: 50 },
+        { name: 'Time Management', proficiency: 50 },
+        { name: 'Learning Agility', proficiency: 50 },
+      ];
+
+      const scoringUserSkills =
+        Array.isArray(userPersona.user_skills) && userPersona.user_skills.length > 0
+          ? userPersona.user_skills
+          : fallbackUserSkills;
+
+      const enriched = (() => {
+        try {
+          const hasProficiency =
+            Array.isArray(scoringUserSkills) &&
+            scoringUserSkills.some(
+              (s) =>
+                s &&
+                typeof s === 'object' &&
+                (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null),
+            );
+
+          const scored = rolesArray.map((r) => {
+            const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : [];
+            const balance = validateThreeTwoBalance(scoringUserSkills, roleReq);
+
+            // CompatibilityScore is used for ranking and UI.
+            const compatibilityScore = hasProficiency ? (balance.isValidThreeTwo ? 100 : 70) : 40;
+
+            const threeTwoReport = {
+              ...buildThreeTwoReport(scoringUserSkills, roleReq),
+              masteryAreas: Array.isArray(balance.masteryAreas) ? balance.masteryAreas : [],
+              growthAreas: Array.isArray(balance.growthAreas) ? balance.growthAreas : [],
+            };
+
+            const match_metadata = {
+              ...(r?.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+              source: r?.match_metadata?.source || (usedFallback ? 'fallback' : 'bedrock'),
+              usedFallback: Boolean(usedFallback),
+              personaId: personaId || null,
+            };
+
+            // IMPORTANT: per user_input_ref mapping, UI uses `threeTwoReport.score`.
+            // We set score = compatibilityScore for suggested roles/search so the animated circle reflects ranking.
+            return {
+              ...r,
+              match_metadata,
+              compatibilityScore,
+              threeTwoReport: { ...threeTwoReport, score: compatibilityScore },
+            };
+          });
+
+          // REQUIRED: backend sorts by compatibilityScore (desc)
+          scored.sort((a, b) => (Number(b.compatibilityScore) || 0) - (Number(a.compatibilityScore) || 0));
+          return scored;
+        } catch (scoreErr) {
+          // eslint-disable-next-line no-console
+          console.warn('[roles.search] scoring enrichment failed (suggested mode); returning unscored roles:', scoreErr?.message || scoreErr);
+          return rolesArray;
+        }
+      })();
+
+      if (debugRolesSearch) {
+        // eslint-disable-next-line no-console
+        console.log('[roles.search] suggested bedrockPrompt/model:', { modelId, promptPreview: String(prompt).slice(0, 500) });
+      }
+
+      return res.json(enriched);
     }
 
     // Build a minimal userPersona object from query params (since this is a GET route).
@@ -286,34 +488,19 @@ router.get('/search', async (req, res) => {
               .filter(Boolean)
           : [];
 
-    const parseJsonQuery = (k) => {
-      const v = req.query?.[k];
-      if (v == null) return null;
-      const s = String(v).trim();
-      if (!s) return null;
-      try {
-        return JSON.parse(s);
-      } catch (_) {
-        return null;
-      }
-    };
-
     const userSkillsJson = parseJsonQuery('user_skills_json');
     const validatedSkillsJson = parseJsonQuery('validated_skills_json');
 
-    const includeThreeTwoRaw = String(req.query?.include_three_two ?? 'true').toLowerCase();
-    const includeThreeTwo = includeThreeTwoRaw !== 'false';
-
     const userPersona = {
       query: searchQuery,
-      // For prompt: prioritize explicit skills list; otherwise use validated_skills_json; else user_skills_json as strings.
       skills:
         skills.length > 0 ? skills
         : Array.isArray(validatedSkillsJson) ? validatedSkillsJson
         : Array.isArray(userSkillsJson) ? userSkillsJson
         : [],
-      // For scoring: pass through proficiency-bearing structures if present.
-      user_skills: Array.isArray(userSkillsJson) ? userSkillsJson : []
+      user_skills: Array.isArray(userSkillsJson) ? userSkillsJson : [],
+      min_salary: minSalary,
+      max_salary: maxSalary
     };
 
     if (debugRolesSearch) {
@@ -322,36 +509,51 @@ router.get('/search', async (req, res) => {
         searchQueryPreview: searchQuery.slice(0, 80),
         skillsCount: Array.isArray(userPersona.skills) ? userPersona.skills.length : null,
         hasUserSkillsJson: Array.isArray(userSkillsJson),
-        includeThreeTwo
+        includeThreeTwo,
+        minSalary,
+        maxSalary
       });
     }
 
-    // Call Bedrock to generate roles. Service is expected to return strict JSON, but we defensively
-    // handle cases where `roles` might be a JSON string.
-    const bedrockResult = await bedrockService.generateTargetedRoles(userPersona);
+    const bedrockResult = await bedrockService.generateTargetedRolesSafe(userPersona);
 
-    let { roles, prompt, modelId } = bedrockResult || {};
+    let { roles, prompt, modelId, usedFallback } = bedrockResult || {};
 
-    // Only JSON.parse Bedrock output when it is a string.
     if (typeof roles === 'string') {
       try {
         roles = JSON.parse(roles);
       } catch (e) {
-        const parseErr = new Error(`Bedrock returned roles as a string but it was not valid JSON: ${e?.message || String(e)}`);
-        parseErr.code = 'bedrock_roles_json_parse_failed';
-        parseErr.details = { rolesPreview: String(roles).slice(0, 500) };
-        throw parseErr;
+        // eslint-disable-next-line no-console
+        console.warn('[roles.search] Bedrock roles JSON.parse failed; using fallback generator:', e?.message || e);
+        const safe2 = await bedrockService.generateTargetedRolesSafe(userPersona);
+        roles = safe2.roles;
+        usedFallback = true;
       }
     }
 
-    // Ensure we always have an array for downstream mapping (avoid 500s from calling .map on non-array).
     const rolesArray = Array.isArray(roles) ? roles : [];
 
-    // Fallback persona/user skills:
-    // If no persona is active (or skills are missing), use a safe mock so scoring doesn't throw.
-    // Scoring engine itself will mark "not_validated" if proficiency data is absent.
+    if (rolesArray.length === 0) {
+      return res.json([
+        {
+          role_id: 'fallback-3-2-role',
+          role_title: 'Fallback 3/2 Role',
+          industry: 'General',
+          skills_required: ['Communication', 'Problem Solving', 'Teamwork', 'Learning Agility', 'Stakeholder Management'],
+          salary_range: 'N/A',
+          match_metadata: { source: 'fallback', reason: 'empty_roles' },
+          is_targetable: true,
+          threeTwoReport: {
+            status: 'fallback',
+            masterySkills: [],
+            growthSkills: [],
+            missingSkills: []
+          }
+        }
+      ]);
+    }
+
     const fallbackUserSkills = [
-      // Minimal safe defaults; no proficiency => "not_validated" if scoring attempted anyway.
       { name: 'Communication', proficiency: 50 },
       { name: 'Teamwork', proficiency: 50 },
       { name: 'Problem Solving', proficiency: 50 },
@@ -362,22 +564,48 @@ router.get('/search', async (req, res) => {
     const scoringUserSkills =
       Array.isArray(userPersona.user_skills) && userPersona.user_skills.length > 0 ? userPersona.user_skills : fallbackUserSkills;
 
-    // Optional: enrich with 3/2 scoring if we have proficiency-bearing user skills.
-    // IMPORTANT: wrap Bedrock-to-scoring logic in try/catch so enrichment can't crash the route.
     const enriched = (() => {
       try {
-        const shouldScore =
-          includeThreeTwo &&
+        const hasProficiency =
           Array.isArray(scoringUserSkills) &&
           scoringUserSkills.some(
-            (s) => s && typeof s === 'object' && (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null)
+            (s) =>
+              s &&
+              typeof s === 'object' &&
+              (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null),
           );
 
-        return rolesArray.map((r) => {
-          if (!shouldScore) return r;
-          const threeTwoReport = buildThreeTwoReport(scoringUserSkills, r?.skills_required || []);
-          return { ...r, threeTwoReport };
+        const scored = rolesArray.map((r) => {
+          const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : [];
+          const balance = validateThreeTwoBalance(scoringUserSkills, roleReq);
+
+          const compatibilityScore = hasProficiency ? (balance.isValidThreeTwo ? 100 : 70) : 40;
+
+          const threeTwoReport = {
+            ...buildThreeTwoReport(scoringUserSkills, roleReq),
+            masteryAreas: Array.isArray(balance.masteryAreas) ? balance.masteryAreas : [],
+            growthAreas: Array.isArray(balance.growthAreas) ? balance.growthAreas : []
+          };
+
+          const match_metadata = {
+            ...(r?.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+            source: r?.match_metadata?.source || (usedFallback ? 'fallback' : 'bedrock'),
+            usedFallback: Boolean(usedFallback)
+          };
+
+          // Per user_input_ref mapping, drive the UI from compatibilityScore via threeTwoReport.score.
+          return {
+            ...r,
+            match_metadata,
+            compatibilityScore,
+            threeTwoReport: { ...threeTwoReport, score: compatibilityScore },
+          };
         });
+
+        // REQUIRED: Sort by compatibilityScore.
+        scored.sort((a, b) => (Number(b.compatibilityScore) || 0) - (Number(a.compatibilityScore) || 0));
+
+        return scored;
       } catch (scoreErr) {
         // eslint-disable-next-line no-console
         console.warn('[roles.search] scoring enrichment failed; returning unscored roles:', scoreErr?.message || scoreErr);
@@ -385,8 +613,6 @@ router.get('/search', async (req, res) => {
       }
     })();
 
-    // Keep strict JSON output (array only).
-    // Also expose prompt/modelId via server logs only (not API) to avoid leaking prompt details unless debug is enabled.
     if (debugRolesSearch) {
       // eslint-disable-next-line no-console
       console.log('[roles.search] bedrockPrompt/model:', { modelId, promptPreview: String(prompt).slice(0, 500) });
@@ -394,12 +620,26 @@ router.get('/search', async (req, res) => {
 
     return res.json(enriched);
   } catch (err) {
-    // Force JSON error (avoid HTML error pages).
-    const httpStatus = err?.httpStatus || 500;
-    return res.status(httpStatus).json({
-      error: err?.code || 'roles_search_bedrock_failed',
-      message: err?.message || 'Failed to generate roles via Bedrock.'
-    });
+    // eslint-disable-next-line no-console
+    console.warn('[roles.search] unexpected failure; returning fallback role:', err?.message || err);
+
+    return res.json([
+      {
+        role_id: 'fallback-3-2-role',
+        role_title: 'Fallback 3/2 Role',
+        industry: 'General',
+        skills_required: ['Communication', 'Problem Solving', 'Teamwork', 'Learning Agility', 'Stakeholder Management'],
+        salary_range: 'N/A',
+        match_metadata: { source: 'fallback', reason: 'unexpected_error' },
+        is_targetable: true,
+        threeTwoReport: {
+          status: 'fallback',
+          masterySkills: [],
+          growthSkills: [],
+          missingSkills: []
+        }
+      }
+    ]);
   }
 });
 
