@@ -22,10 +22,12 @@ const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-be
  */
 
 /**
- * Default to the region-scoped inference profile id (per user_input_ref).
- * This can be overridden via BEDROCK_ROLE_MODEL_ID.
+ * Default model id (per user_input_ref):
+ * - Prefer Claude 3.5 Sonnet base model id.
+ * - Can be overridden via BEDROCK_ROLE_MODEL_ID to use a region-specific inference profile ARN/ID
+ *   (e.g., a regional Claude 3 Haiku ARN) depending on Bedrock account/region configuration.
  */
-const DEFAULT_MODEL_ID = 'us.anthropic.claude-3-haiku-20240307-v1:0';
+const DEFAULT_MODEL_ID = 'anthropic.claude-3-5-sonnet-20240620-v1:0';
 
 /**
  * Extract text content from a Bedrock Claude response.
@@ -331,6 +333,26 @@ async function generateTargetedRoles(userPersona, options = {}) {
 async function generateTargetedRolesSafe(userPersona, options = {}) {
   try {
     const result = await generateTargetedRoles(userPersona, options);
+
+    // Extra hardening: even if Bedrock succeeded, ensure we always return 5 roles.
+    // If not, degrade gracefully to the logic-based fallback instead of letting callers 500.
+    if (!Array.isArray(result.roles) || result.roles.length < 5) {
+      const fallbackBedrockJsonRoles = _fallbackBedrockJsonRoles();
+      const normalized = _validateAndNormalizeGeneratedRoles(fallbackBedrockJsonRoles);
+
+      return {
+        roles: normalized.slice(0, 5),
+        bedrockJsonRoles: fallbackBedrockJsonRoles,
+        usedFallback: true,
+        modelId: result.modelId,
+        prompt: result.prompt,
+        error: {
+          code: 'BEDROCK_INSUFFICIENT_ROLES',
+          message: `Bedrock returned ${Array.isArray(result.roles) ? result.roles.length : 0} roles; falling back to deterministic roles.`
+        }
+      };
+    }
+
     return {
       roles: result.roles,
       bedrockJsonRoles: null,
