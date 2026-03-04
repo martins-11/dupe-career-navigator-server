@@ -6,7 +6,7 @@ const rolesRepo = require('../repositories/rolesRepoAdapter');
 const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../db/connection');
 const recommendationsService = require('../services/recommendationsService');
 const bedrockService = require('../services/bedrockService');
-const { buildThreeTwoReport } = require('../services/scoringEngine');
+const { validateThreeTwoBalance, buildThreeTwoReport } = require('../services/scoringEngine');
 
 const router = express.Router();
 
@@ -290,8 +290,8 @@ router.get('/search', async (req, res) => {
   try {
     const debugRolesSearch = String(process.env.DEBUG_ROLES_SEARCH || '').toLowerCase() === 'true';
 
-    // Coerce q to a string before trimming (prevents `trim is not a function` crashes).
-    // Also collapse internal whitespace so Bedrock sees a clean query string.
+    // Authoritative fix (user_input_ref): force query to string to avoid object.trim crashes.
+    // Also collapse internal whitespace for cleaner prompts.
     const searchQuery = String(req.query?.q || '')
       .replace(/\s+/g, ' ')
       .trim();
@@ -463,10 +463,9 @@ router.get('/search', async (req, res) => {
     }
 
     // Fallback persona/user skills:
-    // If no persona is active (or skills are missing), use a safe mock so scoring doesn't throw.
-    // Scoring engine itself will mark "not_validated" if proficiency data is absent.
+    // If no proficiency-bearing skills were provided, we still return a deterministic 3/2 payload
+    // (compatibilityScore + threeTwoReport) so the UI can always render tags.
     const fallbackUserSkills = [
-      // Minimal safe defaults; no proficiency => "not_validated" if scoring attempted anyway.
       { name: 'Communication', proficiency: 50 },
       { name: 'Teamwork', proficiency: 50 },
       { name: 'Problem Solving', proficiency: 50 },
@@ -477,21 +476,40 @@ router.get('/search', async (req, res) => {
     const scoringUserSkills =
       Array.isArray(userPersona.user_skills) && userPersona.user_skills.length > 0 ? userPersona.user_skills : fallbackUserSkills;
 
-    // Optional: enrich with 3/2 scoring if we have proficiency-bearing user skills.
-    // IMPORTANT: wrap Bedrock-to-scoring logic in try/catch so enrichment can't crash the route.
+    /**
+     * REQUIRED (user_input_ref): score EVERY Bedrock-generated role through scoringEngine.validateThreeTwoBalance()
+     * and return:
+     * - compatibilityScore: number (0-100)
+     * - threeTwoReport: { status, masteryAreas, growthAreas, score, ... }
+     */
     const enriched = (() => {
       try {
-        const shouldScore =
-          includeThreeTwo &&
+        const hasProficiency =
           Array.isArray(scoringUserSkills) &&
           scoringUserSkills.some(
-            (s) => s && typeof s === 'object' && (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null)
+            (s) =>
+              s &&
+              typeof s === 'object' &&
+              (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null),
           );
 
         return rolesArray.map((r) => {
-          if (!shouldScore) return r;
-          const threeTwoReport = buildThreeTwoReport(scoringUserSkills, r?.skills_required || []);
-          return { ...r, threeTwoReport };
+          const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : [];
+          const balance = validateThreeTwoBalance(scoringUserSkills, roleReq);
+
+          // If we have proficiency-bearing skills and the user meets 3/2, use 95; else use a conservative 60/40.
+          // (Keeps UI meaningful while remaining deterministic without introducing new model calls.)
+          const compatibilityScore = hasProficiency ? (balance.isValidThreeTwo ? 95 : 60) : 40;
+
+          const threeTwoReport = {
+            ...buildThreeTwoReport(scoringUserSkills, roleReq),
+            // Ensure these are always present for UI coloring.
+            masteryAreas: Array.isArray(balance.masteryAreas) ? balance.masteryAreas : [],
+            growthAreas: Array.isArray(balance.growthAreas) ? balance.growthAreas : [],
+            compatibilityScore
+          };
+
+          return { ...r, compatibilityScore, threeTwoReport };
         });
       } catch (scoreErr) {
         // eslint-disable-next-line no-console
