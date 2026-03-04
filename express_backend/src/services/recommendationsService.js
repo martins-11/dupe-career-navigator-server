@@ -2,6 +2,7 @@
 
 const rolesRepo = require('../repositories/rolesRepoAdapter');
 const personasRepo = require('../repositories/personasRepoAdapter');
+const { buildThreeTwoReport } = require('./scoringEngine');
 
 /**
  * Shared default roles catalog (in-memory seed).
@@ -167,16 +168,6 @@ function _uniqNorm(items) {
   return out;
 }
 
-function _titleIncludesPivot(currentRoleTitle, candidateRoleTitle) {
-  const cur = _normStr(currentRoleTitle);
-  const cand = _normStr(candidateRoleTitle);
-  if (!cur || !cand) return false;
-
-  // If the titles are very similar, we treat as lateral (not a pivot).
-  // This is deliberately simple for Phase 1.
-  return !(cand.includes(cur) || cur.includes(cand));
-}
-
 function _roleTitleTokens(title) {
   const t = _normStr(title);
   if (!t) return [];
@@ -228,9 +219,7 @@ function _matchesProgression({ personaCurrentRole, personaSeniority, roleTitle, 
   // "Logical next step or lateral move"
   // - Allow same rank (lateral)
   // - Allow +1 rank (next step)
-  // - Allow +2 rank only if title looks like a progression from current role (loose heuristic)
   if (personaRank >= minRank && personaRank <= maxRank) return true;
-
   if (personaRank + 1 >= minRank && personaRank + 1 <= maxRank) return true;
 
   // Sometimes a role like "Senior X" when persona seniority is ambiguous: allow if titles overlap
@@ -263,6 +252,30 @@ async function _ensureSeededIfEmpty() {
   return { seeded: true, roleCount };
 }
 
+function _deriveUserSkillsForScoring(finalPersona) {
+  /**
+   * Day 3 needs user skill proficiency percentages to detect mastery/growth.
+   *
+   * We support multiple persona shapes:
+   * - finalPersona.user_skills: [{ name, proficiency }, ...]
+   * - finalPersona.userSkills: [{ name, proficiency }, ...]
+   * - finalPersona.skills: [{ name, proficiency }, ...]   (if present)
+   *
+   * If no proficiency-bearing array exists, return [] (threeTwoReport will be not_validated).
+   */
+  const candidates = [
+    finalPersona?.user_skills,
+    finalPersona?.userSkills,
+    finalPersona?.skills,
+    finalPersona?.skillProficiencies
+  ];
+
+  for (const arr of candidates) {
+    if (Array.isArray(arr) && arr.length > 0) return arr;
+  }
+  return [];
+}
+
 // PUBLIC_INTERFACE
 async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId = null, pivot = false } = {}) {
   /**
@@ -273,6 +286,10 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
    * - industry
    * - validated_skills (array)
    * - seniority_level
+   *
+   * Day 3 additive behavior:
+   * - If proficiency-bearing user skills are available on the final persona, include a threeTwoReport
+   *   for each recommended role against that role's coreSkills.
    *
    * Matching rules:
    * - Skills: prioritize roles with >=3 overlapping skills with validated_skills.
@@ -305,6 +322,8 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
     err.httpStatus = 422;
     throw err;
   }
+
+  const userSkillsForScoring = _deriveUserSkillsForScoring(finalPersona);
 
   const roles = await rolesRepo.listRoles({ limit: 2000 });
 
@@ -389,18 +408,24 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
 
   const top = [...fallbackPool].sort((a, b) => b.score - a.score).slice(0, 5);
 
-  const recommendations = top.map((x) => ({
-    role_id: x.role.roleId,
-    role_title: x.role.roleTitle,
-    industry: x.role.industry,
-    match_reason: _buildMatchReason({
-      overlapSkills: x.overlap,
-      industryMatched: x.industryMatched,
-      titleAligned: x.titleAligned,
-      progressionOk: x.progressionOk
-    }),
-    estimated_salary_range: x.role.estimatedSalaryRange || null
-  }));
+  const recommendations = top.map((x) => {
+    const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, x.role.coreSkills || []);
+
+    return {
+      role_id: x.role.roleId,
+      role_title: x.role.roleTitle,
+      industry: x.role.industry,
+      match_reason: _buildMatchReason({
+        overlapSkills: x.overlap,
+        industryMatched: x.industryMatched,
+        titleAligned: x.titleAligned,
+        progressionOk: x.progressionOk
+      }),
+      estimated_salary_range: x.role.estimatedSalaryRange || null,
+      // Day 3 additive field
+      threeTwoReport
+    };
+  });
 
   return {
     recommendations,
