@@ -65,26 +65,11 @@ router.get('/roles', async (req, res) => {
       String(req.session?.personaId || req.session?.defaultPersonaId || req.context?.personaId || req.context?.defaultPersonaId || '').trim() ||
       null;
 
-    const resolvedPersonaId = personaIdRaw || fallbackPersonaId;
+    // Per user_input_ref: if personaId is missing, default to the "Rossini" test persona.
+    // We keep the previous guest-safe behavior as a secondary fallback if Rossini is not available.
+    const resolvedPersonaId = personaIdRaw || fallbackPersonaId || 'Rossini';
 
     let recommendations = [];
-
-    // If we truly have no persona id available, immediately return deterministic guest recommendations.
-    // (Do not attempt DB lookups, and do not treat as an error.)
-    if (!resolvedPersonaId) {
-      const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
-      const seedArr = Array.isArray(seed) ? seed : [];
-      recommendations = seedArr.slice(0, 5).map((r, idx) => ({
-        role_id: `guest_${idx + 1}`,
-        role_title: r?.roleTitle || 'Role',
-        industry: r?.industry || null,
-        match_reason: 'Sign in or create a persona to get personalized recommendations.',
-        estimated_salary_range: r?.estimatedSalaryRange || null
-      }));
-
-      const payload = enforceResponse(RecommendationsRolesResponseSchema, { roles: recommendations });
-      return res.json(payload);
-    }
 
     try {
       // Primary behavior: use Final Persona when available.

@@ -377,64 +377,23 @@ router.get('/search', async (req, res) => {
       });
     }
 
-    // Call Bedrock to generate roles. Service is expected to return strict JSON, but we defensively
-    // handle cases where `roles` might be a JSON string.
-    let bedrockResult;
-    try {
-      bedrockResult = await bedrockService.generateTargetedRoles(userPersona);
-    } catch (bedrockErr) {
-      // HARDENING requirement (user_input_ref): never 500 the UI due to Bedrock failures.
-      // Return a hardcoded fallback "3/2 role" instead.
-      // eslint-disable-next-line no-console
-      console.warn('[roles.search] Bedrock failed; returning fallback role:', bedrockErr?.message || bedrockErr);
+    // Call Bedrock to generate roles (safe wrapper).
+    // This MUST NOT throw UI-breaking errors on throughput problems; it returns 5 fallback roles if needed.
+    const bedrockResult = await bedrockService.generateTargetedRolesSafe(userPersona);
 
-      return res.json([
-        {
-          role_id: 'fallback-3-2-role',
-          role_title: 'Fallback 3/2 Role',
-          industry: 'General',
-          skills_required: ['Communication', 'Problem Solving', 'Teamwork', 'Learning Agility', 'Stakeholder Management'],
-          salary_range: 'N/A',
-          match_metadata: { source: 'fallback', reason: 'bedrock_failure' },
-          is_targetable: true,
-          threeTwoReport: {
-            status: 'fallback',
-            masterySkills: [],
-            growthSkills: [],
-            missingSkills: []
-          }
-        }
-      ]);
-    }
-
-    let { roles, prompt, modelId } = bedrockResult || {};
+    let { roles, prompt, modelId, usedFallback } = bedrockResult || {};
 
     // Only JSON.parse Bedrock output when it is a string, and do so safely.
     if (typeof roles === 'string') {
       try {
         roles = JSON.parse(roles);
       } catch (e) {
-        // HARDENING requirement: if parsing fails, do not throw -> return fallback role
+        // If parsing fails, fall back to the hardcoded generator inside bedrockService.
         // eslint-disable-next-line no-console
-        console.warn('[roles.search] Bedrock roles JSON.parse failed; returning fallback role:', e?.message || e);
-
-        return res.json([
-          {
-            role_id: 'fallback-3-2-role',
-            role_title: 'Fallback 3/2 Role',
-            industry: 'General',
-            skills_required: ['Communication', 'Problem Solving', 'Teamwork', 'Learning Agility', 'Stakeholder Management'],
-            salary_range: 'N/A',
-            match_metadata: { source: 'fallback', reason: 'bedrock_parse_failure' },
-            is_targetable: true,
-            threeTwoReport: {
-              status: 'fallback',
-              masterySkills: [],
-              growthSkills: [],
-              missingSkills: []
-            }
-          }
-        ]);
+        console.warn('[roles.search] Bedrock roles JSON.parse failed; using fallback generator:', e?.message || e);
+        const safe2 = await bedrockService.generateTargetedRolesSafe(userPersona);
+        roles = safe2.roles;
+        usedFallback = true;
       }
     }
 
@@ -493,24 +452,37 @@ router.get('/search', async (req, res) => {
               (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null),
           );
 
-        return rolesArray.map((r) => {
+        const scored = rolesArray.map((r) => {
           const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : [];
           const balance = validateThreeTwoBalance(scoringUserSkills, roleReq);
 
-          // If we have proficiency-bearing skills and the user meets 3/2, use 95; else use a conservative 60/40.
-          // (Keeps UI meaningful while remaining deterministic without introducing new model calls.)
-          const compatibilityScore = hasProficiency ? (balance.isValidThreeTwo ? 95 : 60) : 40;
+          // Deterministic compatibility score:
+          // - 100 for validated 3/2 (the "100% matches at the top" requirement)
+          // - 70 for non-validated when we do have proficiency data (still plausible)
+          // - 40 when we don't have proficiency data at all (guest-like)
+          const compatibilityScore = hasProficiency ? (balance.isValidThreeTwo ? 100 : 70) : 40;
 
           const threeTwoReport = {
             ...buildThreeTwoReport(scoringUserSkills, roleReq),
             // Ensure these are always present for UI coloring.
             masteryAreas: Array.isArray(balance.masteryAreas) ? balance.masteryAreas : [],
-            growthAreas: Array.isArray(balance.growthAreas) ? balance.growthAreas : [],
-            compatibilityScore
+            growthAreas: Array.isArray(balance.growthAreas) ? balance.growthAreas : []
           };
 
-          return { ...r, compatibilityScore, threeTwoReport };
+          // Ensure match metadata indicates fallback if that happened.
+          const match_metadata = {
+            ...(r?.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+            source: r?.match_metadata?.source || (usedFallback ? 'fallback' : 'bedrock'),
+            usedFallback: Boolean(usedFallback)
+          };
+
+          return { ...r, match_metadata, compatibilityScore, threeTwoReport };
         });
+
+        // REQUIRED: Sort so best matches appear at the top.
+        scored.sort((a, b) => (Number(b.compatibilityScore) || 0) - (Number(a.compatibilityScore) || 0));
+
+        return scored;
       } catch (scoreErr) {
         // eslint-disable-next-line no-console
         console.warn('[roles.search] scoring enrichment failed; returning unscored roles:', scoreErr?.message || scoreErr);

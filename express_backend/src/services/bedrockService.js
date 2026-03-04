@@ -11,12 +11,21 @@ const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-be
  * - AWS_REGION: e.g. "us-east-1"
  * - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN (as appropriate for environment)
  *
+ * Optional ENV:
+ * - BEDROCK_ROLE_MODEL_ID: override the Bedrock model id / inference profile id.
+ *   IMPORTANT: For provisioned throughput / throughput errors, prefer an INFERENCE PROFILE ID
+ *   for your region (example: "us.anthropic.claude-3-haiku-20240307-v1:0") instead of the base model id.
+ *
  * Notes:
  * - This service is designed to return STRICT JSON only.
  * - We defensively parse and validate returned content because LLMs can still hallucinate wrappers.
  */
 
-const DEFAULT_MODEL_ID = 'anthropic.claude-3-haiku-20240307-v1:0';
+/**
+ * Default to the region-scoped inference profile id (per user_input_ref).
+ * This can be overridden via BEDROCK_ROLE_MODEL_ID.
+ */
+const DEFAULT_MODEL_ID = 'us.anthropic.claude-3-haiku-20240307-v1:0';
 
 /**
  * Extract text content from a Bedrock Claude response.
@@ -128,17 +137,25 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
  */
 function _buildStrictJsonPrompt(userPersona) {
   const skills =
-    Array.isArray(userPersona?.skills) ? userPersona.skills
-    : Array.isArray(userPersona?.validated_skills) ? userPersona.validated_skills
-    : Array.isArray(userPersona?.validatedSkills) ? userPersona.validatedSkills
-    : Array.isArray(userPersona?.user_skills) ? userPersona.user_skills.map((s) => (s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s))
-    : Array.isArray(userPersona?.userSkills) ? userPersona.userSkills.map((s) => (s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s))
-    : [];
+    Array.isArray(userPersona?.skills)
+      ? userPersona.skills
+      : Array.isArray(userPersona?.validated_skills)
+        ? userPersona.validated_skills
+        : Array.isArray(userPersona?.validatedSkills)
+          ? userPersona.validatedSkills
+          : Array.isArray(userPersona?.user_skills)
+            ? userPersona.user_skills.map((s) =>
+                s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
+              )
+            : Array.isArray(userPersona?.userSkills)
+              ? userPersona.userSkills.map((s) =>
+                  s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
+                )
+              : [];
 
   const skillsList = _asStringArray(skills).slice(0, 30); // cap to keep prompt compact
   const skillsInline = skillsList.length > 0 ? skillsList.join(', ') : 'N/A';
 
-  // Authoritative prompt from user_input_ref, hardened to enforce strict JSON.
   return [
     'Act as a career expert.',
     `Given these user skills: [${skillsInline}], return a JSON array of 5 real-world job roles.`,
@@ -169,12 +186,53 @@ function _getBedrockClient() {
 }
 
 /**
+ * Fallback generator: returns exactly 5 hardcoded roles in the Bedrock JSON shape:
+ * [{ title, industry, salary_range, required_skills }]
+ *
+ * This is required as a safety net for Bedrock throughput errors so Day 3 UI can be verified.
+ */
+function _fallbackBedrockJsonRoles() {
+  return [
+    {
+      title: 'Full-Stack Software Engineer',
+      industry: 'Technology',
+      salary_range: '$120k-$170k',
+      required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git']
+    },
+    {
+      title: 'Backend Engineer (Node.js)',
+      industry: 'Technology',
+      salary_range: '$130k-$185k',
+      required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability']
+    },
+    {
+      title: 'Data Analyst',
+      industry: 'Technology',
+      salary_range: '$80k-$120k',
+      required_skills: ['SQL', 'Excel', 'Data Visualization', 'Statistics', 'Dashboards', 'Stakeholder Management']
+    },
+    {
+      title: 'Product Manager (Technical)',
+      industry: 'Technology',
+      salary_range: '$130k-$210k',
+      required_skills: ['Roadmapping', 'Prioritization', 'User Research', 'Analytics', 'Communication', 'Stakeholder Management']
+    },
+    {
+      title: 'DevOps Engineer',
+      industry: 'Technology',
+      salary_range: '$130k-$205k',
+      required_skills: ['AWS', 'Docker', 'Kubernetes', 'CI/CD', 'Monitoring', 'Infrastructure as Code']
+    }
+  ];
+}
+
+/**
  * PUBLIC_INTERFACE
  * Generate targeted roles from a user persona using Amazon Bedrock (Claude 3 Haiku).
  *
  * @param {object} userPersona - Persona object containing at least skills/validated_skills/user_skills.
  * @param {object} [options]
- * @param {string} [options.modelId] - Override Bedrock model id.
+ * @param {string} [options.modelId] - Override Bedrock model id (or inference profile id).
  * @param {number} [options.count] - Number of roles to request (default 5). (Prompt currently fixed to 5.)
  * @returns {Promise<{ roles: Array, rawText: string, prompt: string, modelId: string }>}
  */
@@ -255,6 +313,47 @@ async function generateTargetedRoles(userPersona, options = {}) {
   return { roles: roles.slice(0, 5), rawText, prompt, modelId };
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Safe wrapper around Bedrock role generation.
+ *
+ * If Bedrock invocation fails (e.g., throughput / throttling), this returns:
+ * - bedrockJsonRoles: the raw fallback roles in the *Bedrock JSON shape*
+ * - roles: the normalized API roles shape used by /api/roles/search
+ * - usedFallback: true
+ *
+ * This is intentionally used by the route layer so the UI never breaks.
+ *
+ * @param {object} userPersona
+ * @param {object} [options]
+ * @returns {Promise<{roles:Array, bedrockJsonRoles:Array, usedFallback:boolean, modelId:string, prompt:string, error?:object}>}
+ */
+async function generateTargetedRolesSafe(userPersona, options = {}) {
+  try {
+    const result = await generateTargetedRoles(userPersona, options);
+    return {
+      roles: result.roles,
+      bedrockJsonRoles: null,
+      usedFallback: false,
+      modelId: result.modelId,
+      prompt: result.prompt
+    };
+  } catch (err) {
+    const fallbackBedrockJsonRoles = _fallbackBedrockJsonRoles();
+    const normalized = _validateAndNormalizeGeneratedRoles(fallbackBedrockJsonRoles);
+
+    return {
+      roles: normalized.slice(0, 5),
+      bedrockJsonRoles: fallbackBedrockJsonRoles,
+      usedFallback: true,
+      modelId: options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID,
+      prompt: _buildStrictJsonPrompt(userPersona),
+      error: { code: err?.code || 'BEDROCK_FAILED', message: err?.message || String(err) }
+    };
+  }
+}
+
 module.exports = {
-  generateTargetedRoles
+  generateTargetedRoles,
+  generateTargetedRolesSafe
 };
