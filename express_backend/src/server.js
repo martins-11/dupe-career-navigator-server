@@ -77,6 +77,15 @@ app.use('/documents', documentsRouter);
 app.use('/personas', personasRouter);
 
 app.use('/api/recommendations', recommendationsRouter);
+
+// Safety-net mount: ensure GET /api/recommendations/initial is reachable exactly here,
+// even if router mounting changes in some environments.
+if (typeof recommendationsRouter.getInitialRecommendationsHandler === 'function') {
+  app.get(
+    '/api/recommendations/initial',
+    recommendationsRouter.getInitialRecommendationsHandler()
+  );
+}
 app.use('/api/paths', pathsRouter);
 app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
