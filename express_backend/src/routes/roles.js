@@ -148,25 +148,51 @@ router.get('/skills', async (req, res) => {
   }
 });
 
+/**
+ * Collect unique role title strings from role objects (DB or seed shapes).
+ * Returns a sorted array of strings.
+ */
+function _deriveUniqueTitlesFromRoles(roles) {
+  const set = new Map(); // key: lowercased, value: original label
+  for (const r of Array.isArray(roles) ? roles : []) {
+    const label = _normalizeLabel(r?.roleTitle ?? r?.role_title ?? r?.role_title ?? r?.title);
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (!set.has(key)) set.set(key, label);
+  }
+  return Array.from(set.values()).sort(_sortCaseInsensitive);
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/roles/titles
+ *
+ * Returns distinct role title values for the Explore filters UI.
+ *
+ * IMPORTANT CONTRACT (to match /industries + /skills):
+ * - Always returns a JSON array of strings (never an object envelope).
+ * - On empty catalog OR on error, returns [] (HTTP 200).
+ */
+router.get('/titles', async (req, res) => {
+  try {
+    const roles = await _loadRolesForFilterOptions();
+    const titles = _deriveUniqueTitlesFromRoles(roles);
+    return res.json(Array.isArray(titles) ? titles : []);
+  } catch (_) {
+    return res.json([]);
+  }
+});
+
 // PUBLIC_INTERFACE
 router.get('/job-titles', async (req, res) => {
   /**
-   * (Optional) Return distinct job title values for the Explore filters UI.
+   * Backward-compatible endpoint for older clients.
    *
    * Response: { jobTitles: string[] }
    */
   try {
     const roles = await _loadRolesForFilterOptions();
-    const set = new Map(); // key: lowercased, value: original label
-
-    for (const r of roles) {
-      const label = _normalizeLabel(r?.roleTitle ?? r?.role_title ?? r?.title);
-      if (!label) continue;
-      const key = label.toLowerCase();
-      if (!set.has(key)) set.set(key, label);
-    }
-
-    const jobTitles = Array.from(set.values()).sort(_sortCaseInsensitive);
+    const jobTitles = _deriveUniqueTitlesFromRoles(roles);
     return res.json({ jobTitles });
   } catch (err) {
     return sendError(res, err);
