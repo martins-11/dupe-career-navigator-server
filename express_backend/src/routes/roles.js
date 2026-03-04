@@ -7,7 +7,7 @@ const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../
 const recommendationsService = require('../services/recommendationsService');
 const bedrockService = require('../services/bedrockService');
 const personasRepo = require('../repositories/personasRepoAdapter');
-const { validateThreeTwoBalance, buildThreeTwoReport } = require('../services/scoringEngine');
+const { validateThreeTwoBalance, buildThreeTwoReport, scoreRoleCompatibility } = require('../services/scoringEngine');
 
 const router = express.Router();
 
@@ -429,16 +429,20 @@ router.get('/search', async (req, res) => {
             );
 
           const scored = rolesArray.map((r) => {
-            const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : [];
+            const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : Array.isArray(r?.required_skills) ? r.required_skills : [];
             const balance = validateThreeTwoBalance(scoringUserSkills, roleReq);
 
-            // CompatibilityScore is used for ranking and UI.
-            const compatibilityScore = hasProficiency ? (balance.isValidThreeTwo ? 100 : 70) : 40;
+            // Day 3: real-time score based on role requirements vs persona proficiencies.
+            const compat = hasProficiency ? scoreRoleCompatibility(scoringUserSkills, roleReq) : { score: 40, masteryAreas: [], growthAreas: [] };
+            const compatibilityScore = compat.score;
 
             const threeTwoReport = {
               ...buildThreeTwoReport(scoringUserSkills, roleReq),
-              masteryAreas: Array.isArray(balance.masteryAreas) ? balance.masteryAreas : [],
-              growthAreas: Array.isArray(balance.growthAreas) ? balance.growthAreas : [],
+              // Prefer real-time mastery/growth areas (intersection) for chip coloring + counts.
+              masteryAreas: compat.masteryAreas,
+              growthAreas: compat.growthAreas,
+              // Preserve boolean 3/2 validation status for future gating if needed.
+              isValidThreeTwo: Boolean(balance.isValidThreeTwo),
             };
 
             const match_metadata = {
@@ -448,8 +452,6 @@ router.get('/search', async (req, res) => {
               personaId: personaId || null,
             };
 
-            // IMPORTANT: per user_input_ref mapping, UI uses `threeTwoReport.score`.
-            // We set score = compatibilityScore for suggested roles/search so the animated circle reflects ranking.
             return {
               ...r,
               match_metadata,
@@ -576,15 +578,17 @@ router.get('/search', async (req, res) => {
           );
 
         const scored = rolesArray.map((r) => {
-          const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : [];
+          const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : Array.isArray(r?.required_skills) ? r.required_skills : [];
           const balance = validateThreeTwoBalance(scoringUserSkills, roleReq);
 
-          const compatibilityScore = hasProficiency ? (balance.isValidThreeTwo ? 100 : 70) : 40;
+          const compat = hasProficiency ? scoreRoleCompatibility(scoringUserSkills, roleReq) : { score: 40, masteryAreas: [], growthAreas: [] };
+          const compatibilityScore = compat.score;
 
           const threeTwoReport = {
             ...buildThreeTwoReport(scoringUserSkills, roleReq),
-            masteryAreas: Array.isArray(balance.masteryAreas) ? balance.masteryAreas : [],
-            growthAreas: Array.isArray(balance.growthAreas) ? balance.growthAreas : []
+            masteryAreas: compat.masteryAreas,
+            growthAreas: compat.growthAreas,
+            isValidThreeTwo: Boolean(balance.isValidThreeTwo),
           };
 
           const match_metadata = {
@@ -593,7 +597,6 @@ router.get('/search', async (req, res) => {
             usedFallback: Boolean(usedFallback)
           };
 
-          // Per user_input_ref mapping, drive the UI from compatibilityScore via threeTwoReport.score.
           return {
             ...r,
             match_metadata,

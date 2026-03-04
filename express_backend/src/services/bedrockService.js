@@ -13,8 +13,8 @@ const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-be
  *
  * Optional ENV:
  * - BEDROCK_ROLE_MODEL_ID: override the Bedrock model id / inference profile id.
- *   IMPORTANT: For provisioned throughput / throughput errors, prefer an INFERENCE PROFILE ID
- *   for your region (example: "us.anthropic.claude-3-haiku-20240307-v1:0") instead of the base model id.
+ *   IMPORTANT: For provisioned throughput / throughput errors, prefer an INFERENCE PROFILE ID/ARN
+ *   for your region instead of the base model id.
  *
  * Notes:
  * - This service is designed to return STRICT JSON only.
@@ -94,8 +94,16 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
     throw err;
   }
 
-  // Normalize into a stable API shape that matches existing roles/search output expectations.
-  // Required per user_input_ref: title, industry, salary_range, required_skills (>=5).
+  /**
+   * Normalize into a stable API shape used by /api/roles/search.
+   *
+   * Day 3 required per user_input_ref:
+   * - description: 2-sentence summary
+   * - key_responsibilities: exactly 3 tasks
+   * - experience_range: realistic string (e.g., "3-5 years")
+   * - salary_range: localized, realistic market data (based on persona industry if possible)
+   * - required_skills: 5-8 skills (mix of technical + soft)
+   */
   const out = [];
   const seen = new Set();
 
@@ -105,23 +113,36 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
     const title = _normStr(r.title);
     const industry = _normStr(r.industry);
     const salaryRange = _normStr(r.salary_range);
+    const experienceRange = _normStr(r.experience_range);
+    const description = _normStr(r.description);
+    const keyResponsibilities = _asStringArray(r.key_responsibilities);
     const requiredSkills = _asStringArray(r.required_skills);
 
+    // Minimum validation to keep UI stable; we allow some fields to be empty but try hard to enforce Day 3.
     if (!title || !industry || !salaryRange) continue;
-    if (requiredSkills.length < 5) continue;
+    if (requiredSkills.length < 5 || requiredSkills.length > 10) continue;
+
+    // Enforce "exactly 3" responsibilities if present; if not, allow empty but keep field.
+    const responsibilities =
+      keyResponsibilities.length >= 3 ? keyResponsibilities.slice(0, 3) : keyResponsibilities;
 
     const key = title.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
 
     out.push({
-      // Keep compatibility with existing /api/roles/search payload shape
       role_id: `bedrock-${title
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/(^-|-$)/g, '')}`,
       role_title: title,
       industry,
+      // new Day 3 fields (used by Explore RoleCard mapping)
+      description,
+      key_responsibilities: responsibilities,
+      experience_range: experienceRange,
+      required_skills: requiredSkills,
+      // backward-compatible fields
       skills_required: requiredSkills,
       salary_range: salaryRange,
       match_metadata: { source: 'bedrock' },
@@ -132,12 +153,44 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
   return out;
 }
 
+function _extractPersonaProficiencies(finalizedPersona) {
+  // Supports common shapes for "FinalizedPersona skills + proficiencies".
+  const p = finalizedPersona && typeof finalizedPersona === 'object' ? finalizedPersona : {};
+  const candidates = [
+    p.skills_with_proficiency,
+    p.skillsWithProficiency,
+    p.user_skills,
+    p.userSkills,
+    p.skills,
+    p.proficiencies,
+  ];
+
+  const out = [];
+  for (const c of candidates) {
+    if (!Array.isArray(c)) continue;
+    for (const row of c) {
+      if (!row || typeof row !== 'object') continue;
+      const name = _normStr(row.name || row.skill || row.skill_name || row.label);
+      const prof = row.proficiency ?? row.proficiencyPercent ?? row.proficiency_percent ?? row.percent ?? row.score;
+      const n = Number(prof);
+      if (!name || !Number.isFinite(n)) continue;
+      out.push({ name, proficiency: Math.max(0, Math.min(100, Math.round(n))) });
+    }
+    if (out.length) break;
+  }
+
+  return out;
+}
+
 /**
- * Build a strict-JSON prompt that aligns with the 3/2 scoring engine needs:
- * - role.required_skills must be >= 5 and concrete (so scoring can compare).
- * - output must be ONLY a JSON array (no markdown, no backticks).
+ * Build a strict-JSON prompt per Day 3 acceptance criteria.
+ * - "Global Recruitment Expert" system behavior
+ * - inject FinalizedPersona (skills + proficiencies) for better targeting
+ * - request new schema fields for the Explore UI
  */
 function _buildStrictJsonPrompt(userPersona) {
+  const personaObj = userPersona?.persona && typeof userPersona.persona === 'object' ? userPersona.persona : null;
+
   const skills =
     Array.isArray(userPersona?.skills)
       ? userPersona.skills
@@ -155,25 +208,47 @@ function _buildStrictJsonPrompt(userPersona) {
                 )
               : [];
 
-  const skillsList = _asStringArray(skills).slice(0, 30); // cap to keep prompt compact
+  const skillsList = _asStringArray(skills).slice(0, 30);
   const skillsInline = skillsList.length > 0 ? skillsList.join(', ') : 'N/A';
 
+  const profs = _extractPersonaProficiencies(personaObj);
+  const profInline =
+    profs.length > 0
+      ? profs
+          .slice(0, 18)
+          .map((s) => `${s.name}:${s.proficiency}%`)
+          .join(', ')
+      : 'N/A';
+
+  const personaIndustry =
+    _normStr(personaObj?.industry || personaObj?.profile?.industry || userPersona?.industry || '') || 'N/A';
+
   return [
-    'Act as a career expert.',
-    `Given these user skills: [${skillsInline}], return a JSON array of 5 real-world job roles.`,
-    'Each array element MUST be an object with EXACTLY these keys:',
-    '- "title" (string)',
-    '- "industry" (string)',
-    '- "salary_range" (string, e.g., "$120k-$170k" or "₹18L-₹28L")',
-    '- "required_skills" (array of strings; at least 5 skills; concrete and role-relevant)',
+    'You are a Global Recruitment Expert with deep knowledge of current market roles, skills, and compensation.',
     '',
-    'STRICT OUTPUT RULES:',
-    '1) Output MUST be valid JSON.',
-    '2) Output MUST be ONLY the JSON array (no extra text, no markdown, no code fences).',
-    '3) Do not include trailing comments.',
-    '4) Ensure required_skills has at least 5 items for every role.',
+    'CONTEXT (FinalizedPersona):',
+    `- Persona industry: ${personaIndustry}`,
+    `- User skills (names): [${skillsInline}]`,
+    `- User proficiencies (name:percent): [${profInline}]`,
     '',
-    'Return exactly 5 roles.'
+    'TASK:',
+    'Generate EXACTLY 5 realistic job roles that fit this persona and are common in the current market.',
+    '',
+    'OUTPUT FORMAT:',
+    'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
+    'Each element MUST be an object with EXACTLY these keys:',
+    '- "title": string',
+    '- "industry": string',
+    '- "description": string (exactly 2 sentences)',
+    '- "key_responsibilities": array of strings (EXACTLY 3 items; high-impact tasks)',
+    '- "experience_range": string (e.g., "3-5 years")',
+    '- "salary_range": string (localized and realistic for the role/industry; include currency)',
+    '- "required_skills": array of strings (5-8 items; mix technical + soft skills; concrete)',
+    '',
+    'QUALITY RULES:',
+    '- Avoid generic filler. Use role-accurate responsibilities and skills.',
+    '- Ensure required_skills contain skills that can be compared against the user skill list.',
+    '- Keep outputs consistent and market-realistic.'
   ].join('\n');
 }
 
@@ -198,32 +273,47 @@ function _fallbackBedrockJsonRoles() {
     {
       title: 'Full-Stack Software Engineer',
       industry: 'Technology',
+      description: 'Builds customer-facing web products across frontend and backend systems. Owns features end-to-end with an emphasis on reliability and iteration speed.',
+      key_responsibilities: ['Deliver full-stack features from design to production', 'Design and integrate APIs and data models', 'Improve performance, testing, and developer tooling'],
+      experience_range: '3-5 years',
       salary_range: '$120k-$170k',
-      required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git']
+      required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git', 'Communication']
     },
     {
       title: 'Backend Engineer (Node.js)',
       industry: 'Technology',
+      description: 'Designs and operates scalable backend services and APIs used by multiple product surfaces. Focuses on performance, reliability, and observability in production.',
+      key_responsibilities: ['Build and maintain high-throughput APIs', 'Optimize database queries and service performance', 'Implement monitoring, logging, and on-call readiness'],
+      experience_range: '3-6 years',
       salary_range: '$130k-$185k',
-      required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability']
+      required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability', 'Collaboration']
     },
     {
       title: 'Data Analyst',
       industry: 'Technology',
+      description: 'Turns raw business data into actionable insights for product and operations teams. Partners with stakeholders to define metrics, dashboards, and decision frameworks.',
+      key_responsibilities: ['Define metrics and build dashboards for stakeholders', 'Analyze trends and root causes using SQL', 'Communicate insights and recommendations clearly'],
+      experience_range: '2-4 years',
       salary_range: '$80k-$120k',
       required_skills: ['SQL', 'Excel', 'Data Visualization', 'Statistics', 'Dashboards', 'Stakeholder Management']
     },
     {
       title: 'Product Manager (Technical)',
       industry: 'Technology',
+      description: 'Leads product strategy and execution for technical initiatives that require close engineering partnership. Translates customer needs into prioritized roadmaps and measurable outcomes.',
+      key_responsibilities: ['Own roadmap and prioritize tradeoffs', 'Write clear requirements and align stakeholders', 'Measure impact via experimentation and analytics'],
+      experience_range: '4-7 years',
       salary_range: '$130k-$210k',
       required_skills: ['Roadmapping', 'Prioritization', 'User Research', 'Analytics', 'Communication', 'Stakeholder Management']
     },
     {
       title: 'DevOps Engineer',
       industry: 'Technology',
+      description: 'Builds and maintains the infrastructure and deployment pipelines that keep services running reliably. Improves security posture, release velocity, and incident response tooling.',
+      key_responsibilities: ['Build CI/CD pipelines and deployment automation', 'Manage cloud infrastructure and incident response', 'Implement monitoring, security, and reliability best practices'],
+      experience_range: '3-6 years',
       salary_range: '$130k-$205k',
-      required_skills: ['AWS', 'Docker', 'Kubernetes', 'CI/CD', 'Monitoring', 'Infrastructure as Code']
+      required_skills: ['AWS', 'Docker', 'Kubernetes', 'CI/CD', 'Monitoring', 'Infrastructure as Code', 'Incident Management']
     }
   ];
 }

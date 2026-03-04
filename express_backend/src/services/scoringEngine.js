@@ -201,8 +201,66 @@ function buildThreeTwoReport(userSkills, roleRequirements) {
   };
 }
 
+function _normSkillSet(arr) {
+  const set = new Set();
+  for (const s of Array.isArray(arr) ? arr : []) {
+    const k = _normStr(s);
+    if (k) set.add(k);
+  }
+  return set;
+}
+
+// PUBLIC_INTERFACE
+function scoreRoleCompatibility(userSkills, roleRequiredSkills) {
+  /**
+   * Day 3 real-time scoring (authoritative user_input_ref):
+   * - Compare role required_skills against FinalizedPersona skills+proficiencies.
+   * - Mastery: any skill where user proficiency >= 80%
+   * - Growth:  any skill where user proficiency is 20%–60%
+   * - Compatibility %: percentage of required_skills that are either Mastery or Growth.
+   *
+   * Returns both:
+   * - score (0..100 integer)
+   * - masteryAreas (intersection skill names)
+   * - growthAreas (intersection skill names)
+   *
+   * @param {Array<object>} userSkills proficiency-bearing skills
+   * @param {Array<string>|object} roleRequiredSkills array of required skill names (or role object w/ coreSkills)
+   * @returns {{ score:number, masteryAreas:string[], growthAreas:string[] }}
+   */
+  const reqList = _asRoleRequirementsArray(roleRequiredSkills).map((s) => String(s || '').trim()).filter(Boolean);
+
+  if (reqList.length === 0) {
+    return { score: 0, masteryAreas: [], growthAreas: [] };
+  }
+
+  const reqNorm = _normSkillSet(reqList);
+
+  const { mastery, growth } = classifySkillProficiency(userSkills);
+
+  const masteryAreas = mastery
+    .filter((s) => reqNorm.has(_normStr(s.name)))
+    .slice(0, reqList.length) // keep stable
+    .map((s) => s.name);
+
+  const growthAreas = growth
+    .filter((s) => reqNorm.has(_normStr(s.name)))
+    .slice(0, reqList.length)
+    .map((s) => s.name);
+
+  const covered = new Set([...masteryAreas, ...growthAreas].map((s) => _normStr(s)).filter(Boolean));
+  const score = Math.round((covered.size / reqNorm.size) * 100);
+
+  return {
+    score: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0,
+    masteryAreas,
+    growthAreas
+  };
+}
+
 module.exports = {
   classifySkillProficiency,
   validateThreeTwoBalance,
-  buildThreeTwoReport
+  buildThreeTwoReport,
+  scoreRoleCompatibility
 };
