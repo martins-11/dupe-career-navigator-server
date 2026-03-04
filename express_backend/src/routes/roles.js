@@ -61,17 +61,21 @@ async function _loadRolesForFilterOptions() {
   return Array.isArray(seed) ? seed : [];
 }
 
-// PUBLIC_INTERFACE
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/roles/industries
+ *
+ * Returns distinct industry values for the Explore filters UI.
+ *
+ * IMPORTANT CONTRACT:
+ * - Always returns a JSON array of strings (never an object envelope).
+ * - On empty catalog OR on error, returns [] (HTTP 200).
+ *
+ * Rationale:
+ * - The frontend expects an array; returning error objects/strings (or changing shape)
+ *   can trigger `options.map is not a function`.
+ */
 router.get('/industries', async (req, res) => {
-  /**
-   * Return distinct industry values for the Explore filters UI.
-   *
-   * Response: { industries: string[] }
-   *
-   * Notes:
-   * - Values are derived from the currently available role catalog (DB when available, otherwise seed catalog).
-   * - Empty/NULL industries are excluded.
-   */
   try {
     const roles = await _loadRolesForFilterOptions();
     const set = new Map(); // key: lowercased, value: original label
@@ -84,26 +88,24 @@ router.get('/industries', async (req, res) => {
     }
 
     const industries = Array.from(set.values()).sort(_sortCaseInsensitive);
-    return res.json({ industries });
-  } catch (err) {
-    return sendError(res, err);
+    return res.json(Array.isArray(industries) ? industries : []);
+  } catch (_) {
+    // Per requirement: do not throw; return a stable array shape.
+    return res.json([]);
   }
 });
 
-// PUBLIC_INTERFACE
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/roles/skills
+ *
+ * Returns distinct skill values for the Explore filters UI.
+ *
+ * IMPORTANT CONTRACT:
+ * - Always returns a JSON array of strings (never an object envelope).
+ * - On empty catalog OR on error, returns [] (HTTP 200).
+ */
 router.get('/skills', async (req, res) => {
-  /**
-   * Return distinct skill values for the Explore filters UI.
-   *
-   * Response: { skills: string[] }
-   *
-   * Notes:
-   * - Values are derived from the currently available role catalog (DB when available, otherwise seed catalog).
-   * - Skills are taken from:
-   *   - DB listRoles shape: coreSkills (array)
-   *   - Seed shape: coreSkills (array)
-   * - Empty skills are excluded.
-   */
   try {
     const roles = await _loadRolesForFilterOptions();
     const set = new Map(); // key: lowercased, value: original label
@@ -119,9 +121,9 @@ router.get('/skills', async (req, res) => {
     }
 
     const skills = Array.from(set.values()).sort(_sortCaseInsensitive);
-    return res.json({ skills });
-  } catch (err) {
-    return sendError(res, err);
+    return res.json(Array.isArray(skills) ? skills : []);
+  } catch (_) {
+    return res.json([]);
   }
 });
 
