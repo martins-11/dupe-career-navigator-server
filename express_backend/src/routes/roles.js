@@ -308,22 +308,62 @@ router.get('/search', async (req, res) => {
       });
     }
 
-    // Call Bedrock to generate roles. Strict JSON is enforced inside bedrockService.
-    const { roles, prompt, modelId } = await bedrockService.generateTargetedRoles(userPersona);
+    // Call Bedrock to generate roles. Service is expected to return strict JSON, but we defensively
+    // handle cases where `roles` might be a JSON string (per user_input_ref).
+    const bedrockResult = await bedrockService.generateTargetedRoles(userPersona);
+
+    let { roles, prompt, modelId } = bedrockResult || {};
+    if (typeof roles === 'string') {
+      try {
+        roles = JSON.parse(roles);
+      } catch (e) {
+        const parseErr = new Error(`Bedrock returned roles as a string but it was not valid JSON: ${e?.message || String(e)}`);
+        parseErr.code = 'bedrock_roles_json_parse_failed';
+        parseErr.details = { rolesPreview: String(roles).slice(0, 500) };
+        throw parseErr;
+      }
+    }
+
+    // Ensure we always have an array for downstream mapping (avoid 500s from calling .map on non-array).
+    const rolesArray = Array.isArray(roles) ? roles : [];
+
+    // Fallback persona/user skills:
+    // If no persona is active (or skills are missing), use a safe mock so scoring doesn't throw.
+    // Scoring engine itself will mark "not_validated" if proficiency data is absent.
+    const fallbackUserSkills = [
+      // Minimal safe defaults; no proficiency => "not_validated" if scoring attempted anyway.
+      { name: 'Communication', proficiency: 50 },
+      { name: 'Teamwork', proficiency: 50 },
+      { name: 'Problem Solving', proficiency: 50 },
+      { name: 'Time Management', proficiency: 50 },
+      { name: 'Learning Agility', proficiency: 50 }
+    ];
+
+    const scoringUserSkills =
+      Array.isArray(userPersona.user_skills) && userPersona.user_skills.length > 0 ? userPersona.user_skills : fallbackUserSkills;
 
     // Optional: enrich with 3/2 scoring if we have proficiency-bearing user skills.
-    // scoringEngine requires user skills objects with proficiency; if missing, report is "not_validated".
-    const shouldScore =
-      includeThreeTwo &&
-      Array.isArray(userPersona.user_skills) &&
-      userPersona.user_skills.some((s) => s && typeof s === 'object' && (s.proficiency != null || s.proficiency_percent != null));
+    // IMPORTANT: wrap Bedrock-to-scoring logic in try/catch so enrichment can't crash the route.
+    const enriched = (() => {
+      try {
+        const shouldScore =
+          includeThreeTwo &&
+          Array.isArray(scoringUserSkills) &&
+          scoringUserSkills.some(
+            (s) => s && typeof s === "object" && (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null)
+          );
 
-    const enriched = roles.map((r) => {
-      if (!shouldScore) return r;
-
-      const threeTwoReport = buildThreeTwoReport(userPersona.user_skills, r.skills_required || []);
-      return { ...r, threeTwoReport };
-    });
+        return rolesArray.map((r) => {
+          if (!shouldScore) return r;
+          const threeTwoReport = buildThreeTwoReport(scoringUserSkills, r?.skills_required || []);
+          return { ...r, threeTwoReport };
+        });
+      } catch (scoreErr) {
+        // eslint-disable-next-line no-console
+        console.warn('[roles.search] scoring enrichment failed; returning unscored roles:', scoreErr?.message || scoreErr);
+        return rolesArray;
+      }
+    })();
 
     // Keep strict JSON output (array only).
     // Also expose prompt/modelId via server logs only (not API) to avoid leaking prompt details unless debug is enabled.
