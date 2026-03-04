@@ -43,7 +43,12 @@ const router = express.Router();
  * Response:
  * { roles: Array<{ role_id, role_title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }> }
  */
-router.get('/initial', async (req, res) => {
+/**
+ * Shared handler for initial recommendations.
+ * NOTE: We intentionally support TWO paths below to avoid 404s caused by router
+ * mount-prefix mistakes (double-prefixing /recommendations).
+ */
+async function handleInitialRecommendations(req, res) {
   try {
     const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
 
@@ -86,7 +91,22 @@ router.get('/initial', async (req, res) => {
   } catch (err) {
     return sendError(res, err);
   }
-});
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/recommendations/initial
+ */
+router.get('/initial', handleInitialRecommendations);
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/recommendations/initial (defensive alias)
+ *
+ * If someone accidentally mounts this router at `/api` instead of `/api/recommendations`,
+ * this keeps the endpoint reachable at `/api/recommendations/initial`.
+ */
+router.get('/recommendations/initial', handleInitialRecommendations);
 
 // PUBLIC_INTERFACE
 router.get('/roles', async (req, res) => {

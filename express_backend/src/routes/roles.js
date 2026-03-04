@@ -214,11 +214,13 @@ router.get('/job-titles', async (req, res) => {
  */
 router.get('/autocomplete', async (req, res) => {
   try {
-    const q = req.query?.q != null ? String(req.query.q).trim() : '';
+    // Per user_input_ref hardening: always coerce q to string before trimming.
+    const query = String(req.query?.q || '').trim();
+
     const limitRaw = req.query?.limit != null ? Number(req.query.limit) : undefined;
     const limit = Number.isFinite(limitRaw) && limitRaw != null ? Math.max(1, Math.min(Number(limitRaw), 20)) : 6;
 
-    if (q.length < 2) return res.json([]);
+    if (query.length < 2) return res.json([]);
 
     const collectTitles = (rows) => {
       const seen = new Set();
@@ -241,7 +243,7 @@ router.get('/autocomplete', async (req, res) => {
     if (shouldAttemptDb) {
       try {
         const dbResult = await rolesRepo.searchRoles({
-          q,
+          q: query,
           industry: null,
           skills: [],
           minSalary: null,
