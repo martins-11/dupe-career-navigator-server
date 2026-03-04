@@ -69,6 +69,11 @@ async function handleInitialRecommendations(req, res) {
      * 2) Pass persona skills to Bedrock to generate EXACTLY 5 India-market roles (₹LPA).
      * 3) Score each role with scoringEngine for Mastery/Growth (threeTwoReport) + compatibilityScore.
      * 4) Return exactly 5 roles with required fields.
+     *
+     * Important contract changes:
+     * - personaId is REQUIRED (no guest-mode, no unconditional fallback).
+     * - If Bedrock fails, we may use the allowed deterministic fallback from bedrockService,
+     *   but we STILL enrich results with scoring fields.
      */
     const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
     if (!personaIdRaw) {
@@ -89,13 +94,22 @@ async function handleInitialRecommendations(req, res) {
       throw err;
     }
 
-    // 2) Bedrock call (Bedrock prompt already enforces ₹LPA + 3 responsibilities + required fields)
+    // 2) Bedrock call (safe wrapper inside bedrockService handles allowed fallback)
     const result = await bedrockService.getInitialRecommendations(finalPersona, {});
     const roles = Array.isArray(result?.roles) ? result.roles : [];
+
+    // BedrockService guarantees "exactly 5" on success/fallback. If not, treat as upstream failure.
+    if (roles.length !== 5) {
+      const err = new Error(`Initial recommendations generator returned ${roles.length} roles; expected exactly 5.`);
+      err.code = 'initial_recommendations_invalid_count';
+      err.httpStatus = 502;
+      throw err;
+    }
 
     // 3) Scoring (Mastery/Growth tags + compatibility)
     const { buildThreeTwoReport, scoreRoleCompatibility } = require('../services/scoringEngine');
 
+    // Support multiple final persona shapes for proficiency-bearing skills.
     const proficiencyCandidates = [
       finalPersona?.skills_with_proficiency,
       finalPersona?.skillsWithProficiency,
@@ -113,7 +127,7 @@ async function handleInitialRecommendations(req, res) {
       }
     }
 
-    const scoredRoles = roles.slice(0, 5).map((r) => {
+    const scoredRoles = roles.map((r) => {
       const requiredSkills = Array.isArray(r.required_skills)
         ? r.required_skills
         : Array.isArray(r.skills_required)
@@ -142,28 +156,6 @@ async function handleInitialRecommendations(req, res) {
       };
     });
 
-    // Ensure exactly 5
-    while (scoredRoles.length < 5) {
-      scoredRoles.push({
-        role_id: `padded-rec-${scoredRoles.length + 1}`,
-        role_title: 'Software Engineer',
-        industry: 'Technology',
-        salary_lpa_range: '₹12–₹22 LPA',
-        experience_range: '2–4 years',
-        description:
-          'Builds and maintains product features across backend services and APIs. Works closely with product and QA to ship reliable releases.',
-        key_responsibilities: [
-          'Build and maintain APIs and backend services',
-          'Write tests and improve reliability in production',
-          'Collaborate with cross-functional teams to deliver features'
-        ],
-        required_skills: ['JavaScript', 'Node.js', 'REST APIs', 'SQL', 'Git'],
-        threeTwoReport: { status: 'not_validated', masteryAreas: [], growthAreas: [], score: 0 },
-        compatibilityScore: 0,
-        match_metadata: { source: 'padded_fallback' }
-      });
-    }
-
     // Best-effort persist for refresh/reload.
     try {
       await holisticPersonaRepo.upsertRecommendationsRoles({
@@ -177,7 +169,7 @@ async function handleInitialRecommendations(req, res) {
       // ignore persistence failures
     }
 
-    return res.json({ roles: scoredRoles.slice(0, 5) });
+    return res.json({ roles: scoredRoles });
   } catch (err) {
     return sendError(res, err);
   }
