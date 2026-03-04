@@ -61,44 +61,123 @@ function getInitialRecommendationsHandler() {
  */
 async function handleInitialRecommendations(req, res) {
   try {
+    /**
+     * PersonaId-driven Day 3 endpoint.
+     *
+     * Requirements (user_input_ref):
+     * 1) Fetch the Finalized Persona using personaId from the request.
+     * 2) Pass persona skills to Bedrock to generate EXACTLY 5 India-market roles (₹LPA).
+     * 3) Score each role with scoringEngine for Mastery/Growth (threeTwoReport) + compatibilityScore.
+     * 4) Return exactly 5 roles with required fields.
+     */
     const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
+    if (!personaIdRaw) {
+      const err = new Error('personaId query parameter is required.');
+      err.code = 'missing_persona_id';
+      err.httpStatus = 400;
+      throw err;
+    }
 
-    // Load finalized persona as the source of truth.
-    // We support a few non-breaking fallback ids used in earlier scaffolding.
-    const candidatePersonaIds = [personaIdRaw, 'active', 'latest', 'Rossini'].filter(Boolean);
+    // 1) Load finalized persona (strictly personaId-driven)
+    const finalWrap = await personasRepo.getFinal(personaIdRaw);
+    const finalPersona = finalWrap?.finalJson || finalWrap || null;
 
-    let finalWrap = null;
-    for (const pid of candidatePersonaIds) {
-      try {
-        // personasRepo.getFinal returns wrapper { personaId, finalJson } in current adapter.
-        // If it returns raw JSON, bedrockService handles that too.
-        // eslint-disable-next-line no-await-in-loop
-        finalWrap = await personasRepo.getFinal(pid);
-        if (finalWrap) break;
-      } catch (_) {
-        // try next
+    if (!finalPersona || typeof finalPersona !== 'object') {
+      const err = new Error(`Finalized Persona not found for personaId=${personaIdRaw}`);
+      err.code = 'final_persona_not_found';
+      err.httpStatus = 404;
+      throw err;
+    }
+
+    // 2) Bedrock call (Bedrock prompt already enforces ₹LPA + 3 responsibilities + required fields)
+    const result = await bedrockService.getInitialRecommendations(finalPersona, {});
+    const roles = Array.isArray(result?.roles) ? result.roles : [];
+
+    // 3) Scoring (Mastery/Growth tags + compatibility)
+    const { buildThreeTwoReport, scoreRoleCompatibility } = require('../services/scoringEngine');
+
+    const proficiencyCandidates = [
+      finalPersona?.skills_with_proficiency,
+      finalPersona?.skillsWithProficiency,
+      finalPersona?.user_skills,
+      finalPersona?.userSkills,
+      finalPersona?.skills,
+      finalPersona?.skillProficiencies
+    ];
+
+    let userSkillsForScoring = [];
+    for (const arr of proficiencyCandidates) {
+      if (Array.isArray(arr) && arr.length > 0) {
+        userSkillsForScoring = arr;
+        break;
       }
     }
 
-    const finalPersona = finalWrap?.finalJson || finalWrap || null;
+    const scoredRoles = roles.slice(0, 5).map((r) => {
+      const requiredSkills = Array.isArray(r.required_skills)
+        ? r.required_skills
+        : Array.isArray(r.skills_required)
+          ? r.skills_required
+          : [];
 
-    const result = await bedrockService.getInitialRecommendations(finalPersona, {});
-    const roles = Array.isArray(result?.roles) ? result.roles : [];
+      const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, requiredSkills);
+      const compat = scoreRoleCompatibility(userSkillsForScoring, requiredSkills);
+
+      return {
+        role_id: r.role_id,
+        role_title: r.role_title,
+        industry: r.industry,
+        salary_lpa_range: r.salary_lpa_range,
+        experience_range: r.experience_range,
+        description: r.description,
+        key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
+        required_skills: requiredSkills,
+        threeTwoReport,
+        compatibilityScore: compat.score,
+        match_metadata: {
+          ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+          bedrockUsedFallback: Boolean(result?.usedFallback),
+          bedrockModelId: result?.modelId || null
+        }
+      };
+    });
+
+    // Ensure exactly 5
+    while (scoredRoles.length < 5) {
+      scoredRoles.push({
+        role_id: `padded-rec-${scoredRoles.length + 1}`,
+        role_title: 'Software Engineer',
+        industry: 'Technology',
+        salary_lpa_range: '₹12–₹22 LPA',
+        experience_range: '2–4 years',
+        description:
+          'Builds and maintains product features across backend services and APIs. Works closely with product and QA to ship reliable releases.',
+        key_responsibilities: [
+          'Build and maintain APIs and backend services',
+          'Write tests and improve reliability in production',
+          'Collaborate with cross-functional teams to deliver features'
+        ],
+        required_skills: ['JavaScript', 'Node.js', 'REST APIs', 'SQL', 'Git'],
+        threeTwoReport: { status: 'not_validated', masteryAreas: [], growthAreas: [], score: 0 },
+        compatibilityScore: 0,
+        match_metadata: { source: 'padded_fallback' }
+      });
+    }
 
     // Best-effort persist for refresh/reload.
     try {
       await holisticPersonaRepo.upsertRecommendationsRoles({
         userId: null,
-        personaId: personaIdRaw || finalWrap?.personaId || null,
+        personaId: personaIdRaw,
         buildId: null,
         inferredTags: [],
-        roles
+        roles: scoredRoles
       });
     } catch (_) {
       // ignore persistence failures
     }
 
-    return res.json({ roles });
+    return res.json({ roles: scoredRoles.slice(0, 5) });
   } catch (err) {
     return sendError(res, err);
   }
