@@ -2075,6 +2075,96 @@ const openapiDefinition = {
       }
     },
 
+    '/api/roles/industries': {
+      get: {
+        tags: ['Roles'],
+        summary: 'List distinct industries for role filtering',
+        description:
+          'Returns distinct industry values derived from the currently available roles catalog (DB when available, otherwise seed catalog).',
+        responses: {
+          200: {
+            description: 'Industries list',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    industries: { type: 'array', items: { type: 'string' } }
+                  },
+                  required: ['industries']
+                }
+              }
+            }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/roles/skills': {
+      get: {
+        tags: ['Roles'],
+        summary: 'List distinct skills for role filtering',
+        description:
+          'Returns distinct skill values derived from the currently available roles catalog (DB when available, otherwise seed catalog).',
+        responses: {
+          200: {
+            description: 'Skills list',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    skills: { type: 'array', items: { type: 'string' } }
+                  },
+                  required: ['skills']
+                }
+              }
+            }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/roles/job-titles': {
+      get: {
+        tags: ['Roles'],
+        summary: 'List distinct job titles for role filtering (optional)',
+        description:
+          'Returns distinct job title values derived from the currently available roles catalog (DB when available, otherwise seed catalog).',
+        responses: {
+          200: {
+            description: 'Job titles list',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    jobTitles: { type: 'array', items: { type: 'string' } }
+                  },
+                  required: ['jobTitles']
+                }
+              }
+            }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
     '/api/personas/target-role': {
       post: {
         tags: ['Roles'],

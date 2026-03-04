@@ -15,6 +15,224 @@ const router = express.Router();
  * This is part of the "Future Role Selection (Targeted Search)" feature.
  */
 
+/**
+ * Normalizes a display string for stable sorting/deduping.
+ * - trims whitespace
+ * - collapses internal whitespace
+ */
+function _normalizeLabel(v) {
+  if (v == null) return '';
+  return String(v)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _sortCaseInsensitive(a, b) {
+  return String(a).localeCompare(String(b), undefined, { sensitivity: 'base' });
+}
+
+/**
+ * Salary alignment note (frontend vs backend):
+ * - The Explore UI currently presents salary range in "L" (lakhs; e.g. 0–60).
+ * - The roles catalog (DB + seed) stores salary ranges like "$130k-$210k" (USD).
+ *
+ * To prevent the default UI slider from excluding all results (e.g. max_salary=60 vs $130k),
+ * we interpret min_salary/max_salary from the UI as lakhs and convert to an approximate USD
+ * annual amount for catalog filtering:
+ *    dollars ~= (lakhs * 100_000) / USD_TO_INR
+ *
+ * USD_TO_INR is env-driven with a safe default.
+ */
+function _uiLakhsToApproxUsdDollars(lakhs) {
+  if (lakhs == null) return null;
+  const n = Number(lakhs);
+  if (!Number.isFinite(n)) return null;
+
+  const usdToInrRaw = Number(process.env.USD_TO_INR || 83);
+  const usdToInr = Number.isFinite(usdToInrRaw) && usdToInrRaw > 0 ? usdToInrRaw : 83;
+
+  // 1 lakh = 100,000 INR
+  return Math.round((n * 100000) / usdToInr);
+}
+
+async function _loadRolesForFilterOptions() {
+  /**
+   * Loads the roles source of truth to derive filter options.
+   *
+   * Preference order:
+   * 1) DB-backed catalog (MySQL) if reachable and listRoles works
+   * 2) In-memory DEFAULT_ROLES_CATALOG (seed catalog)
+   *
+   * Returns a unified array of role objects that may be in either shape:
+   * - DB listRoles shape: { roleId, roleTitle, industry, coreSkills, ... }
+   * - Seed shape: { roleTitle, industry, coreSkills, ... }
+   */
+  const engine = getDbEngine();
+  const shouldAttemptDb = engine === 'mysql';
+
+  if (shouldAttemptDb) {
+    try {
+      // listRoles is already guarded by config checks in the adapter.
+      // If it returns [], we fall back to seed catalog.
+      const dbRoles = await rolesRepo.listRoles({ limit: 5000 });
+      if (Array.isArray(dbRoles) && dbRoles.length > 0) return dbRoles;
+    } catch (_) {
+      // Fall through to memory catalog
+    }
+  }
+
+  const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
+  return Array.isArray(seed) ? seed : [];
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/roles/industries
+ *
+ * Returns distinct industry values for the Explore filters UI.
+ *
+ * IMPORTANT CONTRACT:
+ * - Always returns a JSON array of strings (never an object envelope).
+ * - On empty catalog OR on error, returns [] (HTTP 200).
+ */
+router.get('/industries', async (req, res) => {
+  try {
+    const roles = await _loadRolesForFilterOptions();
+    const set = new Map(); // key: lowercased, value: original label
+
+    for (const r of roles) {
+      const label = _normalizeLabel(r?.industry);
+      if (!label) continue;
+      const key = label.toLowerCase();
+      if (!set.has(key)) set.set(key, label);
+    }
+
+    const industries = Array.from(set.values()).sort(_sortCaseInsensitive);
+    return res.json(Array.isArray(industries) ? industries : []);
+  } catch (_) {
+    return res.json([]);
+  }
+});
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/roles/skills
+ *
+ * Returns distinct skill values for the Explore filters UI.
+ *
+ * IMPORTANT CONTRACT:
+ * - Always returns a JSON array of strings (never an object envelope).
+ * - On empty catalog OR on error, returns [] (HTTP 200).
+ */
+router.get('/skills', async (req, res) => {
+  try {
+    const roles = await _loadRolesForFilterOptions();
+    const set = new Map(); // key: lowercased, value: original label
+
+    for (const r of roles) {
+      const skills = Array.isArray(r?.coreSkills) ? r.coreSkills : Array.isArray(r?.skills_required) ? r.skills_required : [];
+      for (const s of skills) {
+        const label = _normalizeLabel(s);
+        if (!label) continue;
+        const key = label.toLowerCase();
+        if (!set.has(key)) set.set(key, label);
+      }
+    }
+
+    const skills = Array.from(set.values()).sort(_sortCaseInsensitive);
+    return res.json(Array.isArray(skills) ? skills : []);
+  } catch (_) {
+    return res.json([]);
+  }
+});
+
+// PUBLIC_INTERFACE
+router.get('/job-titles', async (req, res) => {
+  /**
+   * (Optional) Return distinct job title values for the Explore filters UI.
+   *
+   * Response: { jobTitles: string[] }
+   */
+  try {
+    const roles = await _loadRolesForFilterOptions();
+    const set = new Map(); // key: lowercased, value: original label
+
+    for (const r of roles) {
+      const label = _normalizeLabel(r?.roleTitle ?? r?.role_title ?? r?.title);
+      if (!label) continue;
+      const key = label.toLowerCase();
+      if (!set.has(key)) set.set(key, label);
+    }
+
+    const jobTitles = Array.from(set.values()).sort(_sortCaseInsensitive);
+    return res.json({ jobTitles });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/roles/autocomplete
+ *
+ * Returns role title suggestions for the Explore SearchBar.
+ *
+ * Query params:
+ * - q: string (if <2 chars returns [])
+ * - limit: number (optional; default 6; max 20)
+ *
+ * Response: string[] (role titles)
+ */
+router.get('/autocomplete', async (req, res) => {
+  try {
+    const q = req.query?.q != null ? String(req.query.q).trim() : '';
+    const limitRaw = req.query?.limit != null ? Number(req.query.limit) : undefined;
+    const limit = Number.isFinite(limitRaw) && limitRaw != null ? Math.max(1, Math.min(Number(limitRaw), 20)) : 6;
+
+    if (q.length < 2) return res.json([]);
+
+    const collectTitles = (rows) => {
+      const seen = new Set();
+      const out = [];
+      for (const r of Array.isArray(rows) ? rows : []) {
+        const title = String(r?.role_title ?? r?.roleTitle ?? r?.title ?? '').trim();
+        if (!title) continue;
+        const key = title.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(title);
+        if (out.length >= limit) break;
+      }
+      return out;
+    };
+
+    const engine = getDbEngine();
+    const shouldAttemptDb = engine === 'mysql';
+
+    if (shouldAttemptDb) {
+      try {
+        const dbResult = await rolesRepo.searchRoles({
+          q,
+          industry: null,
+          skills: [],
+          minSalary: null,
+          maxSalary: null,
+          limit
+        });
+        const rows = Array.isArray(dbResult) ? dbResult : Array.isArray(dbResult?.rows) ? dbResult.rows : [];
+        return res.json(collectTitles(rows));
+      } catch (_) {
+        // fall through
+      }
+    }
+
+    const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
+    return res.json(collectTitles(Array.isArray(seed) ? seed : []));
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
 // PUBLIC_INTERFACE
 router.get('/search', async (req, res) => {
   /**
@@ -24,7 +242,7 @@ router.get('/search', async (req, res) => {
    * - q: string Search string matched against role_title and skills.
    * - industry: string Exact match on industry (case-insensitive).
    * - skills: string|string[] Comma-separated or repeated params; must all be present in core_skills_json.
-   * - min_salary / max_salary: numbers Filter against estimated_salary_range (best-effort parsing).
+   * - min_salary / max_salary: numbers Salary filter from UI slider (lakhs). Converted to approx USD for catalog filtering.
    * - limit: number Max number of results to return (default: 10; max: 200).
    * - user_id: string If provided and DB-backed, result rows include is_targetable=false when role already exists in user_targets for that user.
    *
@@ -54,11 +272,15 @@ router.get('/search', async (req, res) => {
 
     const minSalaryRaw = req.query?.min_salary != null ? String(req.query.min_salary).trim() : '';
     const minSalaryParsed = minSalaryRaw !== '' ? Number(minSalaryRaw) : null;
-    const minSalary = Number.isFinite(minSalaryParsed) ? minSalaryParsed : null;
+    const minSalaryUi = Number.isFinite(minSalaryParsed) ? minSalaryParsed : null;
 
     const maxSalaryRaw = req.query?.max_salary != null ? String(req.query.max_salary).trim() : '';
     const maxSalaryParsed = maxSalaryRaw !== '' ? Number(maxSalaryRaw) : null;
-    const maxSalary = Number.isFinite(maxSalaryParsed) ? maxSalaryParsed : null;
+    const maxSalaryUi = Number.isFinite(maxSalaryParsed) ? maxSalaryParsed : null;
+
+    // Convert UI slider (lakhs) to approx USD dollars for catalog filtering.
+    const minSalaryUsd = minSalaryUi != null ? _uiLakhsToApproxUsdDollars(minSalaryUi) : null;
+    const maxSalaryUsd = maxSalaryUi != null ? _uiLakhsToApproxUsdDollars(maxSalaryUi) : null;
 
     // Integration requirement: default limit=10, overrideable via query param.
     const limitRaw = req.query?.limit != null ? Number(req.query.limit) : undefined;
@@ -71,18 +293,15 @@ router.get('/search', async (req, res) => {
         q,
         industry: industry || null,
         skills,
-        minSalary: Number.isFinite(minSalary) ? minSalary : null,
-        maxSalary: Number.isFinite(maxSalary) ? maxSalary : null,
+        minSalaryUi: Number.isFinite(minSalaryUi) ? minSalaryUi : null,
+        maxSalaryUi: Number.isFinite(maxSalaryUi) ? maxSalaryUi : null,
+        minSalaryUsd: Number.isFinite(minSalaryUsd) ? minSalaryUsd : null,
+        maxSalaryUsd: Number.isFinite(maxSalaryUsd) ? maxSalaryUsd : null,
         limit,
         userId: userId || null
       });
     }
 
-    // Prefer DB-backed search when possible, but do NOT hard-gate the endpoint.
-    // In some environments, DB credentials may be present but helper detection functions
-    // can mis-detect, leading to a false "no DB" mode and empty results. We therefore:
-    // 1) Attempt DB search when engine is mysql.
-    // 2) If DB search fails, fall back to the in-memory catalog.
     const engine = getDbEngine();
     const shouldAttemptDb = engine === 'mysql';
 
@@ -99,7 +318,6 @@ router.get('/search', async (req, res) => {
       const list = Array.isArray(rows) ? rows : [];
       const cleanUserId = String(userId || '').trim();
       if (!cleanUserId) {
-        // Still standardize integration-ready output: include is_targetable=true when no user context.
         return list.map((r) => ({ ...r, is_targetable: true }));
       }
 
@@ -136,8 +354,8 @@ router.get('/search', async (req, res) => {
           q,
           industry: industry || null,
           skills,
-          minSalary: Number.isFinite(minSalary) ? minSalary : null,
-          maxSalary: Number.isFinite(maxSalary) ? maxSalary : null,
+          minSalary: Number.isFinite(minSalaryUsd) ? minSalaryUsd : null,
+          maxSalary: Number.isFinite(maxSalaryUsd) ? maxSalaryUsd : null,
           limit
         });
 
@@ -211,6 +429,10 @@ router.get('/search', async (req, res) => {
 
     const requiredSkills = (Array.isArray(skills) ? skills : []).map((s) => String(s).trim()).filter(Boolean);
 
+    // Use *converted* salary bounds in memory filtering too.
+    const minS = minSalaryUsd != null && Number.isFinite(minSalaryUsd) && minSalaryUsd > 0 ? minSalaryUsd : null;
+    const maxS = maxSalaryUsd != null && Number.isFinite(maxSalaryUsd) && maxSalaryUsd > 0 ? maxSalaryUsd : null;
+
     let matches = catalog
       .map((r) => {
         // Support BOTH shapes:
@@ -266,18 +488,18 @@ router.get('/search', async (req, res) => {
           if (!roleSkillsContainAll(r.skills_required, requiredSkills)) return false;
         }
 
-        if (minSalary != null) {
+        if (minS != null) {
           const { min, max } = r._internal.salaryBounds || { min: null, max: null };
           if (min == null && max == null) return false;
           const roleMax = max != null ? max : min;
-          if (roleMax == null || roleMax < minSalary) return false;
+          if (roleMax == null || roleMax < minS) return false;
         }
 
-        if (maxSalary != null) {
+        if (maxS != null) {
           const { min, max } = r._internal.salaryBounds || { min: null, max: null };
           if (min == null && max == null) return false;
           const roleMin = min != null ? min : max;
-          if (roleMin == null || roleMin > maxSalary) return false;
+          if (roleMin == null || roleMin > maxS) return false;
         }
 
         return true;
@@ -287,8 +509,8 @@ router.get('/search', async (req, res) => {
         if (qNorm) matchedFilters.push('q');
         if (industryNorm) matchedFilters.push('industry');
         if (requiredSkills.length > 0) matchedFilters.push('skills');
-        if (minSalary != null) matchedFilters.push('min_salary');
-        if (maxSalary != null) matchedFilters.push('max_salary');
+        if (minS != null) matchedFilters.push('min_salary');
+        if (maxS != null) matchedFilters.push('max_salary');
 
         const { _internal, ...pub } = r;
         pub.match_metadata = { matchedFilters, source: 'memory' };
