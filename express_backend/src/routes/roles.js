@@ -265,7 +265,10 @@ router.get('/search', async (req, res) => {
     const debugRolesSearch = String(process.env.DEBUG_ROLES_SEARCH || '').toLowerCase() === 'true';
 
     // Coerce q to a string before trimming (prevents `trim is not a function` crashes).
-    const searchQuery = String(req.query?.q || '').trim();
+    // Also collapse internal whitespace so Bedrock sees a clean query string.
+    const searchQuery = String(req.query?.q || '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
     // If the query is empty, return default "Trending Roles" and skip Bedrock entirely.
     if (!searchQuery) {
@@ -273,6 +276,22 @@ router.get('/search', async (req, res) => {
       const rolesArray = Array.isArray(trending) ? trending : [];
       return res.json(rolesArray.slice(0, 5));
     }
+
+    // Parse salary params defensively:
+    // - Empty string -> null
+    // - Non-numeric -> null
+    // NOTE: We do not currently apply salary filters in this Bedrock route, but we must
+    // never crash just because the frontend includes min_salary/max_salary keys with empty values.
+    const parseOptionalNumber = (v) => {
+      if (v == null) return null;
+      const s = String(v).trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const minSalary = parseOptionalNumber(req.query?.min_salary);
+    const maxSalary = parseOptionalNumber(req.query?.max_salary);
 
     // Build a minimal userPersona object from query params (since this is a GET route).
     const skillsRaw = req.query?.skills;
@@ -305,6 +324,7 @@ router.get('/search', async (req, res) => {
     const includeThreeTwo = includeThreeTwoRaw !== 'false';
 
     const userPersona = {
+      // Bedrock should receive a clean query string (no weird whitespace, always a string).
       query: searchQuery,
       // For prompt: prioritize explicit skills list; otherwise use validated_skills_json; else user_skills_json as strings.
       skills:
@@ -313,7 +333,10 @@ router.get('/search', async (req, res) => {
         : Array.isArray(userSkillsJson) ? userSkillsJson
         : [],
       // For scoring: pass through proficiency-bearing structures if present.
-      user_skills: Array.isArray(userSkillsJson) ? userSkillsJson : []
+      user_skills: Array.isArray(userSkillsJson) ? userSkillsJson : [],
+      // Keep these for future use (filters), but do not rely on them being present.
+      min_salary: minSalary,
+      max_salary: maxSalary
     };
 
     if (debugRolesSearch) {
@@ -322,30 +345,96 @@ router.get('/search', async (req, res) => {
         searchQueryPreview: searchQuery.slice(0, 80),
         skillsCount: Array.isArray(userPersona.skills) ? userPersona.skills.length : null,
         hasUserSkillsJson: Array.isArray(userSkillsJson),
-        includeThreeTwo
+        includeThreeTwo,
+        minSalary,
+        maxSalary
       });
     }
 
     // Call Bedrock to generate roles. Service is expected to return strict JSON, but we defensively
     // handle cases where `roles` might be a JSON string.
-    const bedrockResult = await bedrockService.generateTargetedRoles(userPersona);
+    let bedrockResult;
+    try {
+      bedrockResult = await bedrockService.generateTargetedRoles(userPersona);
+    } catch (bedrockErr) {
+      // HARDENING requirement (user_input_ref): never 500 the UI due to Bedrock failures.
+      // Return a hardcoded fallback "3/2 role" instead.
+      // eslint-disable-next-line no-console
+      console.warn('[roles.search] Bedrock failed; returning fallback role:', bedrockErr?.message || bedrockErr);
+
+      return res.json([
+        {
+          role_id: 'fallback-3-2-role',
+          role_title: 'Fallback 3/2 Role',
+          industry: 'General',
+          skills_required: ['Communication', 'Problem Solving', 'Teamwork', 'Learning Agility', 'Stakeholder Management'],
+          salary_range: 'N/A',
+          match_metadata: { source: 'fallback', reason: 'bedrock_failure' },
+          is_targetable: true,
+          threeTwoReport: {
+            status: 'fallback',
+            masterySkills: [],
+            growthSkills: [],
+            missingSkills: []
+          }
+        }
+      ]);
+    }
 
     let { roles, prompt, modelId } = bedrockResult || {};
 
-    // Only JSON.parse Bedrock output when it is a string.
+    // Only JSON.parse Bedrock output when it is a string, and do so safely.
     if (typeof roles === 'string') {
       try {
         roles = JSON.parse(roles);
       } catch (e) {
-        const parseErr = new Error(`Bedrock returned roles as a string but it was not valid JSON: ${e?.message || String(e)}`);
-        parseErr.code = 'bedrock_roles_json_parse_failed';
-        parseErr.details = { rolesPreview: String(roles).slice(0, 500) };
-        throw parseErr;
+        // HARDENING requirement: if parsing fails, do not throw -> return fallback role
+        // eslint-disable-next-line no-console
+        console.warn('[roles.search] Bedrock roles JSON.parse failed; returning fallback role:', e?.message || e);
+
+        return res.json([
+          {
+            role_id: 'fallback-3-2-role',
+            role_title: 'Fallback 3/2 Role',
+            industry: 'General',
+            skills_required: ['Communication', 'Problem Solving', 'Teamwork', 'Learning Agility', 'Stakeholder Management'],
+            salary_range: 'N/A',
+            match_metadata: { source: 'fallback', reason: 'bedrock_parse_failure' },
+            is_targetable: true,
+            threeTwoReport: {
+              status: 'fallback',
+              masterySkills: [],
+              growthSkills: [],
+              missingSkills: []
+            }
+          }
+        ]);
       }
     }
 
     // Ensure we always have an array for downstream mapping (avoid 500s from calling .map on non-array).
     const rolesArray = Array.isArray(roles) ? roles : [];
+
+    // If Bedrock returned no usable roles, still keep the UI alive.
+    if (rolesArray.length === 0) {
+      return res.json([
+        {
+          role_id: 'fallback-3-2-role',
+          role_title: 'Fallback 3/2 Role',
+          industry: 'General',
+          skills_required: ['Communication', 'Problem Solving', 'Teamwork', 'Learning Agility', 'Stakeholder Management'],
+          salary_range: 'N/A',
+          match_metadata: { source: 'fallback', reason: 'empty_roles' },
+          is_targetable: true,
+          threeTwoReport: {
+            status: 'fallback',
+            masterySkills: [],
+            growthSkills: [],
+            missingSkills: []
+          }
+        }
+      ]);
+    }
 
     // Fallback persona/user skills:
     // If no persona is active (or skills are missing), use a safe mock so scoring doesn't throw.
@@ -385,21 +474,35 @@ router.get('/search', async (req, res) => {
       }
     })();
 
-    // Keep strict JSON output (array only).
-    // Also expose prompt/modelId via server logs only (not API) to avoid leaking prompt details unless debug is enabled.
     if (debugRolesSearch) {
       // eslint-disable-next-line no-console
       console.log('[roles.search] bedrockPrompt/model:', { modelId, promptPreview: String(prompt).slice(0, 500) });
     }
 
+    // Keep strict JSON output (array only).
     return res.json(enriched);
   } catch (err) {
-    // Force JSON error (avoid HTML error pages).
-    const httpStatus = err?.httpStatus || 500;
-    return res.status(httpStatus).json({
-      error: err?.code || 'roles_search_bedrock_failed',
-      message: err?.message || 'Failed to generate roles via Bedrock.'
-    });
+    // Last-resort hardening: still do not leak HTML errors; return JSON with fallback role to protect UI.
+    // eslint-disable-next-line no-console
+    console.warn('[roles.search] unexpected failure; returning fallback role:', err?.message || err);
+
+    return res.json([
+      {
+        role_id: 'fallback-3-2-role',
+        role_title: 'Fallback 3/2 Role',
+        industry: 'General',
+        skills_required: ['Communication', 'Problem Solving', 'Teamwork', 'Learning Agility', 'Stakeholder Management'],
+        salary_range: 'N/A',
+        match_metadata: { source: 'fallback', reason: 'unexpected_error' },
+        is_targetable: true,
+        threeTwoReport: {
+          status: 'fallback',
+          masterySkills: [],
+          growthSkills: [],
+          missingSkills: []
+        }
+      }
+    ]);
   }
 });
 
