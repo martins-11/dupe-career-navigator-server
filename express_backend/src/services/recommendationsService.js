@@ -138,6 +138,13 @@ const DEFAULT_ROLES_CATALOG = [
     coreSkills: ['Requirements', 'Process Mapping', 'Stakeholder Management', 'Documentation', 'Analytics'],
     seniorityLevels: ['Mid', 'Senior'],
     estimatedSalaryRange: '$90k-$150k'
+  },
+  {
+    roleTitle: 'Engineering Manager',
+    industry: 'Technology',
+    coreSkills: ['Leadership', 'People Management', 'System Design', 'Planning', 'Communication'],
+    seniorityLevels: ['Manager', 'Senior'],
+    estimatedSalaryRange: '$160k-$240k'
   }
 ];
 
