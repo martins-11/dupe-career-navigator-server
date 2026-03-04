@@ -82,6 +82,17 @@ app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
 app.use('/api/roles', rolesRouter);
 
+/**
+ * Ensure the API surface never returns HTML 404 pages.
+ * This prevents frontend JSON parsing crashes when a route is missing/mis-mounted.
+ */
+app.use('/api', (req, res) => {
+  return res.status(404).json({
+    error: 'not_found',
+    message: `No route for ${req.method} ${req.originalUrl}`
+  });
+});
+
 app.use('/docs', docsRouter);
 
 // Generic error handler (keeps responses safe)
