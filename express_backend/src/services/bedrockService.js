@@ -190,6 +190,8 @@ function _extractPersonaProficiencies(finalizedPersona) {
  */
 function _buildStrictJsonPrompt(userPersona) {
   const personaObj = userPersona?.persona && typeof userPersona.persona === 'object' ? userPersona.persona : null;
+  const requestType = _normStr(userPersona?.requestType) || 'searched';
+  const query = _normStr(userPersona?.query);
 
   const skills =
     Array.isArray(userPersona?.skills)
@@ -226,13 +228,19 @@ function _buildStrictJsonPrompt(userPersona) {
   return [
     'You are a Global Recruitment Expert with deep knowledge of current market roles, skills, and compensation.',
     '',
+    'REQUEST TYPE (important for variety):',
+    `- requestType: ${requestType} (suggested = no query; searched = query-driven)`,
+    `- query (may be empty): ${query || 'N/A'}`,
+    '',
     'CONTEXT (FinalizedPersona):',
     `- Persona industry: ${personaIndustry}`,
     `- User skills (names): [${skillsInline}]`,
     `- User proficiencies (name:percent): [${profInline}]`,
     '',
     'TASK:',
-    'Generate EXACTLY 5 realistic job roles that fit this persona and are common in the current market.',
+    requestType === 'suggested'
+      ? 'Generate EXACTLY 5 realistic job roles that fit this persona and are common in the current market. Do NOT assume any specific query intent.'
+      : 'Generate EXACTLY 5 realistic job roles that match BOTH the persona and the search query intent.',
     '',
     'OUTPUT FORMAT:',
     'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
@@ -242,13 +250,14 @@ function _buildStrictJsonPrompt(userPersona) {
     '- "description": string (exactly 2 sentences)',
     '- "key_responsibilities": array of strings (EXACTLY 3 items; high-impact tasks)',
     '- "experience_range": string (e.g., "3-5 years")',
-    '- "salary_range": string (localized and realistic for the role/industry; include currency)',
+    '- "salary_range": string (REALISTIC for India; use ₹ and LPA, e.g., "₹18–₹30 LPA")',
     '- "required_skills": array of strings (5-8 items; mix technical + soft skills; concrete)',
     '',
     'QUALITY RULES:',
     '- Avoid generic filler. Use role-accurate responsibilities and skills.',
     '- Ensure required_skills contain skills that can be compared against the user skill list.',
-    '- Keep outputs consistent and market-realistic.'
+    '- Keep outputs consistent and market-realistic.',
+    '- Ensure the set of roles differs between suggested and searched mode when query is non-empty.'
   ].join('\n');
 }
 
