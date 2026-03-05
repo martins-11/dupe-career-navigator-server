@@ -54,15 +54,29 @@ function extractFinalPersonaObject(finalPersonaEnvelope) {
 function extractPersonaProficiencies(finalPersonaEnvelope) {
   /**
    * Extract [{name, proficiency}] from the finalized persona.
+   *
    * Supports common shapes:
    * - persona.skills_with_proficiency = [{name, proficiency}]
    * - persona.user_skills = [{name, proficiency}] or [{skill_name, proficiency_percent}]
    * - persona.proficiencies = [{skill, percent}]
    *
+   * Also supports the current Finalized Persona schema emitted by orchestration/personaService:
+   * - professional_summary, core_competencies, technical_stack (languages/frameworks/databases/...)
+   *
+   * That schema typically does NOT carry explicit numeric proficiencies; to enable downstream
+   * Day-3 scoring/validation we derive a reasonable default proficiency for these skills:
+   * - core_competencies: 85 (treat as strengths / likely mastery)
+   * - technical_stack.*: 70 (treat as solid working proficiency)
+   *
+   * This is intentionally conservative-but-useful: it enables `usedPersonaProficiencies=true`
+   * and allows 3/2 validation to produce populated masteryAreas/growthAreas when personaId is provided.
+   *
    * @param {any} finalPersonaEnvelope
    * @returns {Array<{name:string, proficiency:number}>}
    */
   const personaObj = extractFinalPersonaObject(finalPersonaEnvelope) || {};
+
+  // 1) Prefer explicit proficiency-bearing lists when present.
   const candidates = [
     personaObj.skills_with_proficiency,
     personaObj.skillsWithProficiency,
@@ -102,6 +116,41 @@ function extractPersonaProficiencies(finalPersonaEnvelope) {
     }
 
     if (out.length) break;
+  }
+
+  // 2) If nothing explicit exists, derive proficiencies from the finalized persona schema.
+  if (out.length === 0) {
+    const derived = [];
+
+    const addMany = (names, proficiency) => {
+      for (const n of Array.isArray(names) ? names : []) {
+        const name = _normStr(n);
+        const p = _clampPercent(_tryReadNumber(proficiency));
+        if (!name || p == null) continue;
+        derived.push({ name, proficiency: p });
+      }
+    };
+
+    // Core competencies are effectively "strengths" in this schema.
+    addMany(personaObj.core_competencies, 85);
+
+    // Technical stack is typically tool/language/framework familiarity.
+    const ts = personaObj.technical_stack && typeof personaObj.technical_stack === 'object' ? personaObj.technical_stack : {};
+    addMany(ts.languages, 70);
+    addMany(ts.frameworks, 70);
+    addMany(ts.databases, 70);
+    addMany(ts.cloud_and_devops, 70);
+    addMany(ts.tools, 70);
+
+    // Deduplicate by case-insensitive name, keep max proficiency.
+    const byKey = new Map();
+    for (const row of derived) {
+      const key = row.name.toLowerCase();
+      const prev = byKey.get(key);
+      if (!prev || (prev.proficiency ?? 0) < (row.proficiency ?? 0)) byKey.set(key, row);
+    }
+
+    out.push(...Array.from(byKey.values()));
   }
 
   // Sort for determinism (highest proficiency first).
