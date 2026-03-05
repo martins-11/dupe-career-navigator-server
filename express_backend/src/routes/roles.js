@@ -8,6 +8,11 @@ const recommendationsService = require('../services/recommendationsService');
 const bedrockService = require('../services/bedrockService');
 const personasRepo = require('../repositories/personasRepoAdapter');
 const { validateThreeTwoBalance, buildThreeTwoReport, scoreRoleCompatibility } = require('../services/scoringEngine');
+const {
+  extractFinalPersonaObject,
+  buildScoringUserSkills,
+  normalizeSalaryToIndiaLpaRange,
+} = require('../services/rolesSearchUtils');
 
 const router = express.Router();
 
@@ -340,43 +345,22 @@ router.get('/search', async (req, res) => {
     // If the query is empty, we do NOT return static trending roles anymore.
     // Instead we generate suggested roles from the finalized persona (Day 3 requirement).
     if (!searchQuery) {
-      let finalPersona = null;
+      let finalPersonaEnvelope = null;
       try {
-        if (personaId) {
-          finalPersona = await personasRepo.getFinal(personaId);
-        } else {
-          // Best-effort convention for "active persona" in memory-backed flows.
-          finalPersona = await personasRepo.getFinal('active');
-        }
+        finalPersonaEnvelope = personaId ? await personasRepo.getFinal(personaId) : await personasRepo.getFinal('active');
       } catch (_) {
-        finalPersona = null;
+        finalPersonaEnvelope = null;
       }
 
-      // Extract proficiency-bearing skills from finalized persona, supporting common shapes.
-      const skillsFromFinal = (() => {
-        const p = finalPersona && typeof finalPersona === 'object' ? finalPersona : {};
-        const candidates = [
-          p.user_skills,
-          p.userSkills,
-          p.skills_with_proficiency,
-          p.skillsWithProficiency,
-          p.skills,
-        ];
+      const finalPersonaObj = extractFinalPersonaObject(finalPersonaEnvelope);
 
-        for (const c of candidates) {
-          if (!Array.isArray(c)) continue;
-          // If it's array of objects with proficiency, keep as-is; if strings, map to objects with null prof (scoring will fallback).
-          if (c.some((x) => x && typeof x === 'object')) return c;
-          if (c.some((x) => typeof x === 'string')) return c.map((name) => ({ name, proficiency: null }));
-        }
-        return [];
-      })();
-
+      // Suggested-mode: always pass persona context and explicitly mark request type to avoid identical outputs.
       const userPersona = {
         query: '',
-        persona: finalPersona, // included to allow Bedrock prompt to leverage full context (service will ignore if not used)
-        skills: Array.isArray(skillsFromFinal) ? skillsFromFinal.map((s) => (typeof s === 'string' ? s : s?.name || s?.skill || s?.skill_name)).filter(Boolean) : [],
-        user_skills: Array.isArray(skillsFromFinal) ? skillsFromFinal : [],
+        requestType: 'suggested',
+        persona: finalPersonaObj,
+        skills: [],
+        user_skills: [],
         min_salary: minSalary,
         max_salary: maxSalary,
       };
@@ -385,8 +369,7 @@ router.get('/search', async (req, res) => {
         // eslint-disable-next-line no-console
         console.log('[roles.search] suggestedRolesMode:', {
           personaId: personaId || '(default active)',
-          hasFinalPersona: Boolean(finalPersona),
-          userSkillsCount: Array.isArray(userPersona.user_skills) ? userPersona.user_skills.length : 0,
+          hasFinalPersona: Boolean(finalPersonaObj),
           includeThreeTwo,
         });
       }
@@ -414,37 +397,39 @@ router.get('/search', async (req, res) => {
         { name: 'Learning Agility', proficiency: 50 },
       ];
 
-      const scoringUserSkills =
-        Array.isArray(userPersona.user_skills) && userPersona.user_skills.length > 0
-          ? userPersona.user_skills
-          : fallbackUserSkills;
+      const { userSkills: scoringUserSkills, usedPersonaProficiencies } = buildScoringUserSkills({
+        finalPersonaEnvelope,
+        fallbackUserSkills,
+      });
 
       const enriched = (() => {
         try {
           const hasProficiency =
             Array.isArray(scoringUserSkills) &&
-            scoringUserSkills.some(
-              (s) =>
-                s &&
-                typeof s === 'object' &&
-                (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null),
-            );
+            scoringUserSkills.some((s) => s && typeof s === 'object' && s.proficiency != null);
 
           const scored = rolesArray.map((r) => {
-            const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : Array.isArray(r?.required_skills) ? r.required_skills : [];
+            const roleReq = Array.isArray(r?.skills_required)
+              ? r.skills_required
+              : Array.isArray(r?.required_skills)
+                ? r.required_skills
+                : [];
+
             const balance = validateThreeTwoBalance(scoringUserSkills, roleReq);
 
-            // Day 3: real-time score based on role requirements vs persona proficiencies.
-            const compat = hasProficiency ? scoreRoleCompatibility(scoringUserSkills, roleReq) : { score: 40, masteryAreas: [], growthAreas: [] };
+            // Compatibility is computed strictly off proficiencies (final persona when present).
+            const compat = hasProficiency
+              ? scoreRoleCompatibility(scoringUserSkills, roleReq)
+              : { score: 40, masteryAreas: [], growthAreas: [] };
+
             const compatibilityScore = compat.score;
 
             const threeTwoReport = {
               ...buildThreeTwoReport(scoringUserSkills, roleReq),
-              // Prefer real-time mastery/growth areas (intersection) for chip coloring + counts.
               masteryAreas: compat.masteryAreas,
               growthAreas: compat.growthAreas,
-              // Preserve boolean 3/2 validation status for future gating if needed.
               isValidThreeTwo: Boolean(balance.isValidThreeTwo),
+              status: balance.isValidThreeTwo ? 'validated' : 'not_validated',
             };
 
             const match_metadata = {
@@ -452,29 +437,37 @@ router.get('/search', async (req, res) => {
               source: r?.match_metadata?.source || (usedFallback ? 'fallback' : 'bedrock'),
               usedFallback: Boolean(usedFallback),
               personaId: personaId || null,
+              requestType: 'suggested',
+              usedPersonaProficiencies: Boolean(usedPersonaProficiencies),
             };
 
             return {
               ...r,
+              salary_range: normalizeSalaryToIndiaLpaRange(r?.salary_range),
               match_metadata,
               compatibilityScore,
               threeTwoReport: { ...threeTwoReport, score: compatibilityScore },
             };
           });
 
-          // REQUIRED: backend sorts by compatibilityScore (desc)
           scored.sort((a, b) => (Number(b.compatibilityScore) || 0) - (Number(a.compatibilityScore) || 0));
           return scored;
         } catch (scoreErr) {
           // eslint-disable-next-line no-console
-          console.warn('[roles.search] scoring enrichment failed (suggested mode); returning unscored roles:', scoreErr?.message || scoreErr);
-          return rolesArray;
+          console.warn(
+            '[roles.search] scoring enrichment failed (suggested mode); returning unscored roles:',
+            scoreErr?.message || scoreErr,
+          );
+          return rolesArray.map((r) => ({ ...r, salary_range: normalizeSalaryToIndiaLpaRange(r?.salary_range) }));
         }
       })();
 
       if (debugRolesSearch) {
         // eslint-disable-next-line no-console
-        console.log('[roles.search] suggested bedrockPrompt/model:', { modelId, promptPreview: String(prompt).slice(0, 500) });
+        console.log('[roles.search] suggested bedrockPrompt/model:', {
+          modelId,
+          promptPreview: String(prompt).slice(0, 500),
+        });
       }
 
       return res.json(enriched);
@@ -495,16 +488,31 @@ router.get('/search', async (req, res) => {
     const userSkillsJson = parseJsonQuery('user_skills_json');
     const validatedSkillsJson = parseJsonQuery('validated_skills_json');
 
+    // If personaId is provided, prefer finalized persona proficiencies for scoring (even in searched mode).
+    let finalPersonaEnvelope = null;
+    try {
+      if (personaId) finalPersonaEnvelope = await personasRepo.getFinal(personaId);
+    } catch (_) {
+      finalPersonaEnvelope = null;
+    }
+
+    const finalPersonaObj = extractFinalPersonaObject(finalPersonaEnvelope);
+
     const userPersona = {
       query: searchQuery,
+      requestType: 'searched',
+      persona: finalPersonaObj,
       skills:
-        skills.length > 0 ? skills
-        : Array.isArray(validatedSkillsJson) ? validatedSkillsJson
-        : Array.isArray(userSkillsJson) ? userSkillsJson
-        : [],
+        skills.length > 0
+          ? skills
+          : Array.isArray(validatedSkillsJson)
+            ? validatedSkillsJson
+            : Array.isArray(userSkillsJson)
+              ? userSkillsJson
+              : [],
       user_skills: Array.isArray(userSkillsJson) ? userSkillsJson : [],
       min_salary: minSalary,
-      max_salary: maxSalary
+      max_salary: maxSalary,
     };
 
     if (debugRolesSearch) {
@@ -562,28 +570,36 @@ router.get('/search', async (req, res) => {
       { name: 'Teamwork', proficiency: 50 },
       { name: 'Problem Solving', proficiency: 50 },
       { name: 'Time Management', proficiency: 50 },
-      { name: 'Learning Agility', proficiency: 50 }
+      { name: 'Learning Agility', proficiency: 50 },
     ];
 
+    // Prefer finalized persona proficiencies (when personaId present), else user_skills_json, else fallback.
+    const { userSkills: personaScoringSkills, usedPersonaProficiencies } = buildScoringUserSkills({
+      finalPersonaEnvelope,
+      fallbackUserSkills,
+    });
+
     const scoringUserSkills =
-      Array.isArray(userPersona.user_skills) && userPersona.user_skills.length > 0 ? userPersona.user_skills : fallbackUserSkills;
+      Array.isArray(userPersona.user_skills) && userPersona.user_skills.length > 0 ? userPersona.user_skills : personaScoringSkills;
 
     const enriched = (() => {
       try {
         const hasProficiency =
-          Array.isArray(scoringUserSkills) &&
-          scoringUserSkills.some(
-            (s) =>
-              s &&
-              typeof s === 'object' &&
-              (s.proficiency != null || s.proficiency_percent != null || s.proficiencyPercent != null),
-          );
+          Array.isArray(scoringUserSkills) && scoringUserSkills.some((s) => s && typeof s === 'object' && s.proficiency != null);
 
         const scored = rolesArray.map((r) => {
-          const roleReq = Array.isArray(r?.skills_required) ? r.skills_required : Array.isArray(r?.required_skills) ? r.required_skills : [];
+          const roleReq = Array.isArray(r?.skills_required)
+            ? r.skills_required
+            : Array.isArray(r?.required_skills)
+              ? r.required_skills
+              : [];
+
           const balance = validateThreeTwoBalance(scoringUserSkills, roleReq);
 
-          const compat = hasProficiency ? scoreRoleCompatibility(scoringUserSkills, roleReq) : { score: 40, masteryAreas: [], growthAreas: [] };
+          const compat = hasProficiency
+            ? scoreRoleCompatibility(scoringUserSkills, roleReq)
+            : { score: 40, masteryAreas: [], growthAreas: [] };
+
           const compatibilityScore = compat.score;
 
           const threeTwoReport = {
@@ -591,30 +607,33 @@ router.get('/search', async (req, res) => {
             masteryAreas: compat.masteryAreas,
             growthAreas: compat.growthAreas,
             isValidThreeTwo: Boolean(balance.isValidThreeTwo),
+            status: balance.isValidThreeTwo ? 'validated' : 'not_validated',
           };
 
           const match_metadata = {
             ...(r?.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
             source: r?.match_metadata?.source || (usedFallback ? 'fallback' : 'bedrock'),
-            usedFallback: Boolean(usedFallback)
+            usedFallback: Boolean(usedFallback),
+            personaId: personaId || null,
+            requestType: 'searched',
+            usedPersonaProficiencies: Boolean(usedPersonaProficiencies),
           };
 
           return {
             ...r,
+            salary_range: normalizeSalaryToIndiaLpaRange(r?.salary_range),
             match_metadata,
             compatibilityScore,
             threeTwoReport: { ...threeTwoReport, score: compatibilityScore },
           };
         });
 
-        // REQUIRED: Sort by compatibilityScore.
         scored.sort((a, b) => (Number(b.compatibilityScore) || 0) - (Number(a.compatibilityScore) || 0));
-
         return scored;
       } catch (scoreErr) {
         // eslint-disable-next-line no-console
         console.warn('[roles.search] scoring enrichment failed; returning unscored roles:', scoreErr?.message || scoreErr);
-        return rolesArray;
+        return rolesArray.map((r) => ({ ...r, salary_range: normalizeSalaryToIndiaLpaRange(r?.salary_range) }));
       }
     })();
 
