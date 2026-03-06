@@ -42,14 +42,21 @@ function _extractPersonaSkillsWithProficiency(finalPersona) {
   /**
    * Extract proficiency-bearing skills from a Finalized Persona.
    *
-   * We support multiple historical persona shapes, but the scoring engine requires objects
-   * that contain both:
-   * - a skill name field (name/skill/skill_name/label)
-   * - a proficiency field (proficiency / proficiencyPercent / proficiency_percent / percent / score)
+   * IMPORTANT:
+   * - /api/recommendations/initial scoring (compatibilityScore + threeTwoReport) is only meaningful
+   *   when we have proficiency-bearing skills (name + percent).
+   * - The "finalized persona" can arrive in multiple shapes:
+   *   1) legacy: { skills_with_proficiency: [{name, proficiency}, ...] }
+   *   2) legacy: { skillProficiencies: [{skillName, proficiencyPercent}, ...] }
+   *   3) holistic-final: { skills: [{ name, proficiency }, ...] }  <-- common current format
+   *   4) other variants: user_skills, proficiencies, etc.
    *
-   * If we only have string skill names (no proficiency), scoring will be meaningless (0 score).
+   * If we only have string skill names (no proficiency), scoring becomes 0 and threeTwoReport
+   * becomes not_validated. In that case we still return roles, but we do NOT fabricate proficiencies.
    */
   const p = finalPersona && typeof finalPersona === 'object' ? finalPersona : {};
+
+  // Prefer known proficiency-bearing arrays first.
   const candidates = [
     p.skills_with_proficiency,
     p.skillsWithProficiency,
@@ -57,7 +64,7 @@ function _extractPersonaSkillsWithProficiency(finalPersona) {
     p.userSkills,
     p.skillProficiencies,
     p.proficiencies,
-    // IMPORTANT: DO NOT treat `p.skills` as proficiency-bearing by default; it is often string[].
+    // Holistic persona finalized shape frequently uses `skills` as objects with proficiency.
     p.skills
   ];
 
@@ -68,14 +75,25 @@ function _extractPersonaSkillsWithProficiency(finalPersona) {
     for (const row of arr) {
       if (!row) continue;
 
-      // If it's a string skill name, it has no proficiency => skip.
+      // If it's a string skill name, it has no proficiency => skip (do not guess).
       if (typeof row === 'string') continue;
-
       if (typeof row !== 'object' || Array.isArray(row)) continue;
 
-      const name = String(row.name || row.skill || row.skill_name || row.skillName || row.label || '').trim();
+      const name = String(
+        row.name || row.skill || row.skill_name || row.skillName || row.label || row.title || ''
+      ).trim();
+
+      // Accept a broader set of proficiency keys across persona variants.
       const rawProf =
-        row.proficiency ?? row.proficiencyPercent ?? row.proficiency_percent ?? row.percent ?? row.score ?? null;
+        row.proficiency ??
+        row.proficiencyPercent ??
+        row.proficiency_percent ??
+        row.percent ??
+        row.score ??
+        row.level_percent ??
+        row.levelPercent ??
+        row.value ??
+        null;
 
       const n = Number(rawProf);
       if (!name || !Number.isFinite(n)) continue;
@@ -154,21 +172,38 @@ function _scoreRoles(finalPersona, roles) {
   const userSkillsForScoring = _extractPersonaSkillsWithProficiency(finalPersona);
 
   return roles.map((r) => {
-    const requiredSkills = Array.isArray(r.required_skills)
+    // Normalize required skills to a stable 5–8 item string[] (per endpoint contract + Bedrock prompt).
+    const rawRequiredSkills = Array.isArray(r.required_skills)
       ? r.required_skills
       : Array.isArray(r.skills_required)
         ? r.skills_required
         : [];
 
+    const requiredSkills = rawRequiredSkills
+      .map((s) => String(typeof s === 'string' ? s : s?.name || s?.skill || s?.label || '').trim())
+      .filter(Boolean)
+      .slice(0, 8);
+
     const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, requiredSkills);
     const compat = scoreRoleCompatibility(userSkillsForScoring, requiredSkills);
+
+    // If we have proficiencies and role skills, score should generally be > 0.
+    // We never "invent" a score; we only expose debug metadata to clarify why it is 0.
+    const compatibilityScore = compat.score;
 
     return {
       ...r,
       key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
       required_skills: requiredSkills,
       threeTwoReport,
-      compatibilityScore: compat.score
+      compatibilityScore,
+      match_metadata: {
+        ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+        scoring: {
+          hadUserProficiencies: userSkillsForScoring.length > 0,
+          requiredSkillsCount: requiredSkills.length
+        }
+      }
     };
   });
 }
@@ -252,9 +287,8 @@ async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPe
         onetGrounded: Boolean(onetContext),
         onetError: onetError ? { code: onetError.code, message: onetError.message } : null,
         bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
-        // Explicit indicator for clients/UI:
-        // If bedrockUsedFallback=true, it means BedrockService had to use its deterministic fallback;
-        // but this is still BedrockService-driven, not a hardcoded endpoint fallback.
+        // Endpoint-level fallback is NOT used in the success path.
+        // BedrockService may still set usedFallback=true internally, which we surface separately.
         endpointFallbackUsed: false
       }
     };
