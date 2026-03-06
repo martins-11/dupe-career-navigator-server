@@ -585,30 +585,68 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
           .join(', ')
       : 'N/A';
 
-  const validatedSkills =
-    _asStringArray(personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || []).slice(0, 30);
+  // Important: validated skills are often string[], but could also be objects.
+  const validatedSkillsRaw = personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || [];
+  const validatedSkills = _asStringArray(
+    Array.isArray(validatedSkillsRaw)
+      ? validatedSkillsRaw.map((s) => (typeof s === 'string' ? s : s?.name || s?.skill || s?.skill_name || s?.label))
+      : []
+  ).slice(0, 30);
+
   const validatedInline = validatedSkills.length ? validatedSkills.join(', ') : 'N/A';
 
   const personaIndustry =
     _normStr(personaObj?.industry || personaObj?.profile?.industry || personaObj?.domain || '') || 'N/A';
   const personaHeadline =
-    _normStr(personaObj?.profile?.headline || personaObj?.current_role || personaObj?.currentRole || personaObj?.title || '') || 'N/A';
+    _normStr(
+      personaObj?.profile?.headline ||
+        personaObj?.current_role ||
+        personaObj?.currentRole ||
+        personaObj?.title ||
+        personaObj?.professional_title ||
+        ''
+    ) || 'N/A';
   const personaSeniority =
-    _normStr(personaObj?.seniority_level || personaObj?.seniorityLevel || personaObj?.seniority || personaObj?.profile?.seniority || '') ||
-    'N/A';
+    _normStr(
+      personaObj?.seniority_level ||
+        personaObj?.seniorityLevel ||
+        personaObj?.seniority ||
+        personaObj?.profile?.seniority ||
+        ''
+    ) || 'N/A';
 
   const onetGrounding = options?.context?.onetGrounding || null;
+
+  // We pass both skill grounding and (best-effort) task grounding into the model prompt.
   const onetSnippet =
     onetGrounding && typeof onetGrounding === 'object'
       ? [
-          'GROUNDING CONTEXT (O*NET):',
+          'GROUNDING CONTEXT (O*NET) (use as factual grounding):',
           `- keywordUsed: ${_normStr(onetGrounding.keywordUsed) || 'N/A'}`,
-          `- occupations: ${Array.isArray(onetGrounding.occupations) ? onetGrounding.occupations.map((o) => `${o.title} (${o.code})`).slice(0, 6).join('; ') : 'N/A'}`,
-          `- groundingSkills: [${Array.isArray(onetGrounding.groundingSkills) ? onetGrounding.groundingSkills.slice(0, 30).join(', ') : 'N/A'}]`,
+          `- occupations: ${
+            Array.isArray(onetGrounding.occupations)
+              ? onetGrounding.occupations
+                  .map((o) => `${o.title || 'Unknown'} (${o.code || 'N/A'})`)
+                  .slice(0, 6)
+                  .join('; ')
+              : 'N/A'
+          }`,
+          `- groundingSkills: [${
+            Array.isArray(onetGrounding.groundingSkills) ? onetGrounding.groundingSkills.slice(0, 30).join(', ') : 'N/A'
+          }]`,
+          `- occupationTasksSample: ${
+            Array.isArray(onetGrounding.occupations)
+              ? onetGrounding.occupations
+                  .flatMap((o) => (Array.isArray(o.tasks) ? o.tasks : []))
+                  .slice(0, 8)
+                  .join(' | ')
+              : 'N/A'
+          }`,
           '',
-          'IMPORTANT:',
-          '- Use the O*NET groundingSkills and occupation tasks as factual grounding for responsibilities/skills.',
-          '- Do not invent rare/niche titles unsupported by typical O*NET occupation families.'
+          'GROUNDING RULES (IMPORTANT):',
+          '- Prefer role responsibilities and required skills that are supported by O*NET groundingSkills and tasks.',
+          '- Do not invent rare/niche titles that are not aligned to the occupation families above.',
+          '- Keep titles market-realistic and common in India.'
         ].join('\n')
       : '';
 
@@ -642,6 +680,7 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
     '- Compensation MUST be realistic for India in ₹ LPA.',
     '- Responsibilities must be specific (systems, tools, outcomes), not generic filler.',
     '- Avoid duplicates and avoid overly niche titles.',
+    '- Ensure required_skills overlap with the persona validated skills when reasonable.'
   ]
     .filter(Boolean)
     .join('\n');
@@ -708,8 +747,13 @@ async function getInitialRecommendations(finalPersona, options = {}) {
 
     return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
   } catch (err) {
-    // Deterministic fallback: use the existing safe generator and map into the required UI shape.
+    /**
+     * Bedrock call failed OR output was invalid. We still return 5 roles for UI stability,
+     * but we must clearly mark this as a BedrockService fallback (NOT an endpoint hardcoded fallback),
+     * so route/service layers can decide whether the endpoint itself "usedFallback".
+     */
     const safe = await generateTargetedRolesSafe({ persona: finalPersona, skills: [], user_skills: [] }, { modelId });
+
     const roles = (Array.isArray(safe?.roles) ? safe.roles : []).slice(0, 5).map((r) => ({
       role_id: r.role_id,
       role_title: r.role_title,
@@ -718,23 +762,39 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       experience_range: r.experience_range || '',
       description: r.description || '',
       key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
-      required_skills: Array.isArray(r.required_skills) ? r.required_skills.slice(0, 8) : Array.isArray(r.skills_required) ? r.skills_required.slice(0, 8) : [],
-      match_metadata: { source: 'fallback_initial_recommendations', usedFallback: true }
+      required_skills: Array.isArray(r.required_skills)
+        ? r.required_skills.slice(0, 8)
+        : Array.isArray(r.skills_required)
+          ? r.skills_required.slice(0, 8)
+          : [],
+      match_metadata: {
+        source: 'bedrock_initial_recommendations',
+        bedrockUsedFallback: true
+      }
     }));
 
-    // Ensure exactly 5.
+    // Ensure exactly 5 (pad deterministically).
     const padded = [...roles];
     while (padded.length < 5) {
       padded.push({
-        role_id: `fallback-rec-${padded.length + 1}`,
+        role_id: `bedrock-initial-fallback-${padded.length + 1}`,
         role_title: 'Software Engineer',
         industry: 'Technology',
         salary_lpa_range: '₹12–₹22 LPA',
         experience_range: '2–4 years',
-        description: 'Builds and maintains product features across backend services and APIs. Works closely with product and QA to ship reliable releases.',
-        key_responsibilities: ['Build and maintain APIs and backend services', 'Write tests and improve reliability in production', 'Collaborate with cross-functional teams to deliver features'],
+        description:
+          'Builds and maintains product features across backend services and APIs. Works closely with product and QA to ship reliable releases.',
+        key_responsibilities: [
+          'Build and maintain APIs and backend services',
+          'Write tests and improve reliability in production',
+          'Collaborate with cross-functional teams to deliver features'
+        ],
         required_skills: ['JavaScript', 'Node.js', 'REST APIs', 'SQL', 'Git'],
-        match_metadata: { source: 'fallback_initial_recommendations', padded: true }
+        match_metadata: {
+          source: 'bedrock_initial_recommendations',
+          bedrockUsedFallback: true,
+          padded: true
+        }
       });
     }
 

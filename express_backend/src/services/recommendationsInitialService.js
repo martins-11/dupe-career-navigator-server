@@ -39,6 +39,16 @@ function _extractPersonaSkillNames(finalPersona) {
 }
 
 function _extractPersonaSkillsWithProficiency(finalPersona) {
+  /**
+   * Extract proficiency-bearing skills from a Finalized Persona.
+   *
+   * We support multiple historical persona shapes, but the scoring engine requires objects
+   * that contain both:
+   * - a skill name field (name/skill/skill_name/label)
+   * - a proficiency field (proficiency / proficiencyPercent / proficiency_percent / percent / score)
+   *
+   * If we only have string skill names (no proficiency), scoring will be meaningless (0 score).
+   */
   const p = finalPersona && typeof finalPersona === 'object' ? finalPersona : {};
   const candidates = [
     p.skills_with_proficiency,
@@ -46,11 +56,36 @@ function _extractPersonaSkillsWithProficiency(finalPersona) {
     p.user_skills,
     p.userSkills,
     p.skillProficiencies,
+    p.proficiencies,
+    // IMPORTANT: DO NOT treat `p.skills` as proficiency-bearing by default; it is often string[].
     p.skills
   ];
+
   for (const arr of candidates) {
-    if (Array.isArray(arr) && arr.length) return arr;
+    if (!Array.isArray(arr) || !arr.length) continue;
+
+    const out = [];
+    for (const row of arr) {
+      if (!row) continue;
+
+      // If it's a string skill name, it has no proficiency => skip.
+      if (typeof row === 'string') continue;
+
+      if (typeof row !== 'object' || Array.isArray(row)) continue;
+
+      const name = String(row.name || row.skill || row.skill_name || row.skillName || row.label || '').trim();
+      const rawProf =
+        row.proficiency ?? row.proficiencyPercent ?? row.proficiency_percent ?? row.percent ?? row.score ?? null;
+
+      const n = Number(rawProf);
+      if (!name || !Number.isFinite(n)) continue;
+
+      out.push({ name, proficiency: Math.max(0, Math.min(100, Math.round(n))) });
+    }
+
+    if (out.length) return out;
   }
+
   return [];
 }
 
