@@ -78,10 +78,35 @@ async function handleInitialRecommendations(req, res) {
     }
 
     // 1) Load finalized persona (strictly personaId-driven)
-    const finalWrap = await personasRepo.getFinal(personaIdRaw);
-    const finalPersona = finalWrap?.finalJson || finalWrap || null;
+    // IMPORTANT: personasRepo.getFinal() is "best-effort" and some persistence layers historically returned
+    // "latest overall" (not per-persona), so we harden here by preferring a persona version when available.
+    const [personaRow, latestVersion, finalWrap] = await Promise.allSettled([
+      personasRepo.getPersonaById(personaIdRaw),
+      personasRepo.getLatestPersonaVersion(personaIdRaw),
+      personasRepo.getFinal(personaIdRaw)
+    ]);
 
-    if (!finalPersona || typeof finalPersona !== 'object') {
+    const latestVersionValue = latestVersion.status === 'fulfilled' ? latestVersion.value : null;
+    const finalWrapValue = finalWrap.status === 'fulfilled' ? finalWrap.value : null;
+
+    // Prefer a versioned personaJson (true per-persona), otherwise fall back to "final" blob.
+    let finalPersona =
+      (latestVersionValue && latestVersionValue.personaJson) ||
+      (finalWrapValue && finalWrapValue.finalJson) ||
+      finalWrapValue ||
+      null;
+
+    // MySQL repo may return persona_json/final_json as a string; parse if needed.
+    if (typeof finalPersona === 'string') {
+      try {
+        finalPersona = JSON.parse(finalPersona);
+      } catch (_) {
+        // leave as string
+      }
+    }
+
+    // Ensure we got a real object.
+    if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
       const err = new Error(`Finalized Persona not found for personaId=${personaIdRaw}`);
       err.code = 'final_persona_not_found';
       err.httpStatus = 404;
@@ -89,7 +114,11 @@ async function handleInitialRecommendations(req, res) {
     }
 
     // 2) O*NET-grounded + Bedrock-generated roles (exactly 5), with scored results
-    const result = await generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPersona });
+    // NOTE: This must be persona-driven; no static fallback unless O*NET and/or Bedrock fail.
+    const result = await generateInitialRecommendationsPersonaDrivenOnetGrounded({
+      finalPersona,
+      personaId: personaIdRaw
+    });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
     if (roles.length !== 5) {

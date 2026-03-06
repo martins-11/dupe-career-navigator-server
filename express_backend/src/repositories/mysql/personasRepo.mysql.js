@@ -279,36 +279,43 @@ async function saveFinal(personaId, finalJson) {
 
 // PUBLIC_INTERFACE
 async function getFinal(personaId) {
-  /** Get the latest saved final for a persona. (Best-effort mapping; personaId isn't stored in table.) */
-  // Schema note: persona_final table doesn't include persona_id in this scaffold.
-  // Minimal behavior: return the latest final row overall.
-  const res = await dbQuery(
-    `
-    SELECT id, persona_final_json as finalJson, created_at as createdAt
-    FROM persona_final
-    ORDER BY created_at DESC
-    LIMIT 1
-    `
-  );
+  /**
+   * Get the best available "finalized persona" for a given personaId.
+   *
+   * IMPORTANT:
+   * - The scaffolded persona_final table does not include persona_id, so a strict lookup is impossible there.
+   * - To keep /api/recommendations/initial truly persona-driven, we DO NOT return "latest overall" anymore.
+   *
+   * Resolution strategy:
+   * 1) Prefer latest persona_versions.persona_json for the given personaId (canonical per-persona history).
+   * 2) If none exists, return null (caller can 404).
+   *
+   * This preserves personaId semantics and prevents cross-persona contamination.
+   */
+  const id = String(personaId || '').trim();
+  if (!id) return null;
 
-  const row = res.rows[0] || null;
-  if (!row) return null;
-
-  let finalJson = row.finalJson;
-  if (typeof finalJson === 'string') {
-    try {
-      finalJson = JSON.parse(finalJson);
-    } catch (_) {
-      // leave as string if parsing fails
+  // Prefer latest versioned persona JSON for this personaId.
+  const v = await getLatestPersonaVersion(id);
+  if (v && v.personaJson != null) {
+    let personaJson = v.personaJson;
+    if (typeof personaJson === 'string') {
+      try {
+        personaJson = JSON.parse(personaJson);
+      } catch (_) {
+        // leave as string if parsing fails
+      }
     }
+
+    return {
+      personaId: id,
+      finalId: v.id,
+      finalJson: personaJson,
+      updatedAt: v.createdAt ? new Date(v.createdAt).toISOString() : new Date().toISOString()
+    };
   }
 
-  return {
-    personaId,
-    finalId: row.id,
-    finalJson,
-    updatedAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString()
-  };
+  return null;
 }
 
 module.exports = {

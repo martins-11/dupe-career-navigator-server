@@ -139,24 +139,35 @@ function _scoreRoles(finalPersona, roles) {
 }
 
 // PUBLIC_INTERFACE
-async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPersona } = {}) {
+async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPersona, personaId } = {}) {
   /**
    * Generate initial recommendations:
    * - Loads O*NET grounding context (occupations/skills/tasks) best-effort
    * - Calls Bedrock for EXACTLY 5 roles (passing grounding context when available)
    * - Adds compatibilityScore + threeTwoReport
    *
-   * Fallback policy:
-   * - If O*NET succeeds but Bedrock fails => DO NOT static-fallback; fail (502).
-   * - If O*NET fails but Bedrock succeeds => return Bedrock roles (not grounded).
-   * - If both fail => allow Bedrock's deterministic fallback (last resort).
+   * Fallback policy (IMPORTANT):
+   * - If Bedrock succeeds => return Bedrock roles (even if Bedrock internally used its deterministic fallback).
+   * - If Bedrock fails => surface error when O*NET succeeded (502), otherwise (if O*NET also failed) surface 503.
+   * - This service MUST NOT unconditionally return generic/static roles when Bedrock is available.
+   *
+   * Additionally:
+   * - Returns per-role match_metadata indicating:
+   *   - whether O*NET grounding was used
+   *   - whether Bedrock used its own fallback path
+   *   - whether persona proficiencies were present (and thus meaningful for scoring)
    */
-  if (!finalPersona || typeof finalPersona !== 'object') {
+  if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
     const err = new Error('finalPersona is required.');
     err.code = 'missing_final_persona';
     err.httpStatus = 400;
     throw err;
   }
+
+  const profs = _extractPersonaSkillsWithProficiency(finalPersona);
+  const hasPersonaProficiencies =
+    Array.isArray(profs) &&
+    profs.some((x) => x && typeof x === 'object' && (x.proficiency != null || x.proficiencyPercent != null));
 
   let onetContext = null;
   let onetError = null;
@@ -168,6 +179,7 @@ async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPe
     onetContext = null;
   }
 
+  // Always attempt Bedrock first; only fall back (by throwing) if Bedrock fails.
   try {
     const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
       context: onetContext ? { onetGrounding: onetContext } : null
@@ -178,13 +190,20 @@ async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPe
       ...r,
       match_metadata: {
         ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+        persona: {
+          personaId: personaId || null,
+          usedPersonaProficiencies: hasPersonaProficiencies
+        },
         grounding: onetContext
           ? {
               source: 'onet',
               keywordUsed: onetContext.keywordUsed,
               occupationsUsed: onetContext.occupations.map((o) => ({ code: o.code, title: o.title }))
             }
-          : { source: 'none' },
+          : {
+              source: 'none',
+              onetFailed: Boolean(onetError)
+            },
         bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
         bedrockModelId: bedrockResult?.modelId || null
       }
@@ -193,12 +212,20 @@ async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPe
     return {
       roles: scored,
       meta: {
+        personaId: personaId || null,
+        hasPersonaProficiencies,
         onetGrounded: Boolean(onetContext),
         onetError: onetError ? { code: onetError.code, message: onetError.message } : null,
-        bedrockUsedFallback: Boolean(bedrockResult?.usedFallback)
+        bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
+        // Explicit indicator for clients/UI:
+        // If bedrockUsedFallback=true, it means BedrockService had to use its deterministic fallback;
+        // but this is still BedrockService-driven, not a hardcoded endpoint fallback.
+        endpointFallbackUsed: false
       }
     };
   } catch (bedrockErr) {
+    // Bedrock failed. Per requirements: only "fallback" when Bedrock/O*NET fail.
+    // Here we fail fast (502/503) so the caller can see it's not a persona-driven success.
     if (onetContext) {
       const err = new Error(
         `Bedrock failed to generate initial recommendations: ${bedrockErr?.message || String(bedrockErr)}`
@@ -206,6 +233,7 @@ async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPe
       err.code = bedrockErr?.code || 'BEDROCK_FAILED';
       err.httpStatus = 502;
       err.details = {
+        personaId: personaId || null,
         onetGrounded: true,
         onetKeywordUsed: onetContext.keywordUsed,
         onetOccupationsUsed: onetContext.occupations.map((o) => ({ code: o.code, title: o.title }))
@@ -213,40 +241,19 @@ async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPe
       throw err;
     }
 
-    try {
-      const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {});
-      const roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
-      const scored = _scoreRoles(finalPersona, roles).map((r) => ({
-        ...r,
-        match_metadata: {
-          ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
-          grounding: { source: 'none', onetFailed: true },
-          bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
-          bedrockModelId: bedrockResult?.modelId || null
-        }
-      }));
-
-      return {
-        roles: scored,
-        meta: {
-          onetGrounded: false,
-          onetError: onetError ? { code: onetError.code, message: onetError.message } : null,
-          bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
-          note: 'O*NET failed; Bedrock result returned without O*NET grounding.'
-        }
-      };
-    } catch (bothErr) {
-      const err = new Error(
-        `Initial recommendations failed (both Bedrock and O*NET unavailable): ${bothErr?.message || String(bothErr)}`
-      );
-      err.code = 'INITIAL_RECOMMENDATIONS_UNAVAILABLE';
-      err.httpStatus = 503;
-      err.details = {
-        bedrock: { code: bedrockErr?.code || null, message: bedrockErr?.message || String(bedrockErr) },
-        onet: onetError ? { code: onetError.code || null, message: onetError.message || String(onetError) } : null
-      };
-      throw err;
-    }
+    const err = new Error(
+      `Initial recommendations failed (Bedrock unavailable; O*NET also unavailable or not configured): ${
+        bedrockErr?.message || String(bedrockErr)
+      }`
+    );
+    err.code = 'INITIAL_RECOMMENDATIONS_UNAVAILABLE';
+    err.httpStatus = 503;
+    err.details = {
+      personaId: personaId || null,
+      bedrock: { code: bedrockErr?.code || null, message: bedrockErr?.message || String(bedrockErr) },
+      onet: onetError ? { code: onetError.code || null, message: onetError.message || String(onetError) } : null
+    };
+    throw err;
   }
 }
 
