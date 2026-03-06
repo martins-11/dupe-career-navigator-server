@@ -247,68 +247,35 @@ router.get('/search', async (req, res) => {
    * PUBLIC_INTERFACE
    * GET /api/roles/search
    *
-   * O*NET-backed Explore search.
+   * Persona-driven Explore search:
+   * - Uses Bedrock (Claude) to propose roles
+   * - Grounds generation on O*NET occupation results
+   * - Scores roles against the FINAL persona (when personaId is provided) and returns sorted results
    *
    * Query params:
-   * - q: keyword (optional). If empty => returns a default set using a generic keyword.
-   * - limit: number (optional; default 30; max 50)
+   * - q: string (optional) keyword query
+   * - limit: number (optional; default 30; max 50)  (currently returns up to 5)
+   * - personaId: string (optional) persona id to load FINAL persona and compute persona-based scoring
    *
    * Response: Array<{
-   *   role_id: string,          // O*NET occupation code
-   *   role_title: string,       // O*NET occupation title
-   *   industry: string,         // not available from O*NET in this phase; returned as "—"
-   *   description?: string,
-   *   key_responsibilities?: string[],
-   *   experience_range?: string,
-   *   salary_range?: string,
-   *   required_skills?: string[],
-   *   skills_required?: string[],
-   *   match_metadata?: object
+   *   role_id, role_title, industry, salary_range,
+   *   description, key_responsibilities, experience_range,
+   *   required_skills, skills_required,
+   *   threeTwoReport, compatibilityScore, match_metadata
    * }>
-   *
-   * NOTE: We keep fields compatible with the existing Explore UI mapper.
    */
   try {
-    const searchQuery = String(req.query?.q || '').replace(/\s+/g, ' ').trim();
+    const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
+
+    const q = String(req.query?.q || '').replace(/\s+/g, ' ').trim();
     const limitRaw = req.query?.limit != null ? Number(req.query.limit) : 30;
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.round(limitRaw))) : 30;
 
-    const keyword = searchQuery || 'developer';
-    const hits = await onetService.searchOccupations({ keyword, start: 1, end: Math.max(10, limit) });
+    const personaId = req.query?.personaId ? String(req.query.personaId).trim() : null;
 
-    // Fetch details for top N to provide skills/tasks; keep it bounded for latency.
-    const top = hits.slice(0, limit);
-    const details = await Promise.allSettled(top.map((h) => onetService.getOccupationDetails({ code: h.code })));
-
-    const rows = top.map((h, idx) => {
-      const det = details[idx] && details[idx].status === 'fulfilled' ? details[idx].value : null;
-      const requiredSkills = Array.isArray(det?.skills) ? det.skills.slice(0, 10) : [];
-      const tasks = Array.isArray(det?.tasks) ? det.tasks.slice(0, 3) : [];
-      const description = String(det?.description || h.description || '').trim();
-
-      return {
-        role_id: h.code,
-        role_title: h.title,
-        industry: '—',
-        description: description || null,
-        key_responsibilities: tasks,
-        experience_range: '—',
-        // Salary is not available via O*NET web services directly in this phase.
-        salary_range: '—',
-        required_skills: requiredSkills,
-        skills_required: requiredSkills,
-        match_metadata: {
-          source: 'onet',
-          keyword,
-        },
-        is_targetable: true,
-        // Leave scoring fields absent; the Explore UI already defends when missing.
-        // (A future step can re-introduce scoring based on persona proficiencies against required_skills.)
-      };
-    });
-
-    return res.json(rows);
-  } catch (err) {
+    const rows = await exploreSearchRolesPersonaDriven({ q, limit, personaId });
+    return res.json(Array.isArray(rows) ? rows : []);
+  } catch (_) {
     // Always return JSON array (never HTML) to keep frontend resilient.
     return res.json([]);
   }
