@@ -177,6 +177,11 @@ router.get('/roles', async (req, res) => {
    * - Frontend may also call it when a Final Persona exists but is not recommendation-ready yet
    *   (e.g., validated_skills not populated). In both cases, we MUST NOT 422/500.
    *
+   * Additional hardening:
+   * - Frontend bugs can accidentally pass a non-string personaId (e.g. an object), which serializes
+   *   to "[object Object]" in query params. Treat this as guest/not-ready and return fallback roles
+   *   instead of propagating deep errors that could surface as 422.
+   *
    * Query params (additive):
    * - personaId: UUID (optional)
    * - userId: UUID (optional)
@@ -217,8 +222,15 @@ router.get('/roles', async (req, res) => {
           ''
       ).trim() || null;
 
-    // If personaId is missing, default to the "Rossini" test persona.
-    const resolvedPersonaId = personaIdRaw || fallbackPersonaId || 'Rossini';
+    // Validate personaId: if present it must be a UUID.
+    // If invalid, treat as missing (guest/not-ready) to avoid 422s caused by malformed query params.
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const personaIdValidated = personaIdRaw && uuidRe.test(personaIdRaw) ? personaIdRaw : '';
+
+    // If personaId is missing/invalid, default to the "Rossini" test persona.
+    // NOTE: recommendationsService is resilient to missing persona readiness and we also have a
+    // deterministic fallback below.
+    const resolvedPersonaId = personaIdValidated || fallbackPersonaId || 'Rossini';
 
     let recommendations = [];
 
