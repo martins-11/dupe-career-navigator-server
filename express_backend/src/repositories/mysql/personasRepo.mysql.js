@@ -285,6 +285,9 @@ async function saveFinal(personaId, finalJson) {
     throw err;
   }
 
+  // Runtime-safe guard: if schema drift exists (persona_id missing), self-heal before executing.
+  await ensureMysqlSchemaCompatible();
+
   await dbQuery(
     `
     INSERT INTO persona_final (id, persona_id, persona_final_json, alignment_score, created_at)
@@ -312,6 +315,9 @@ async function getFinal(personaId) {
    */
   const pid = String(personaId || '').trim();
   if (!pid) return null;
+
+  // Runtime-safe guard: if schema drift exists (persona_id missing), self-heal before executing.
+  await ensureMysqlSchemaCompatible();
 
   const res = await dbQuery(
     `
