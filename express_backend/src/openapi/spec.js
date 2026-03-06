@@ -1943,6 +1943,79 @@ const openapiDefinition = {
     // Career Navigator /api routes
     // ----------------------------
 
+    '/api/recommendations/initial': {
+      get: {
+        tags: ['Recommendations'],
+        summary: 'Initial persona-driven recommendations (5 roles)',
+        description:
+          'Loads the Finalized Persona by personaId, uses O*NET occupations/skills as grounding context, calls Bedrock to generate EXACTLY 5 personalized role recommendations, and returns scored results (compatibilityScore + threeTwoReport).',
+        parameters: [
+          {
+            name: 'personaId',
+            in: 'query',
+            required: true,
+            schema: { type: 'string' },
+            description: 'Persona identifier used to load the Finalized Persona JSON.'
+          }
+        ],
+        responses: {
+          200: {
+            description: 'Initial recommendations (exactly 5 roles)',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    roles: {
+                      type: 'array',
+                      minItems: 5,
+                      maxItems: 5,
+                      items: {
+                        type: 'object',
+                        additionalProperties: true,
+                        properties: {
+                          role_id: { type: 'string' },
+                          role_title: { type: 'string' },
+                          industry: { type: 'string' },
+                          salary_lpa_range: { type: 'string' },
+                          experience_range: { type: 'string' },
+                          description: { type: 'string' },
+                          key_responsibilities: { type: 'array', items: { type: 'string' } },
+                          required_skills: { type: 'array', items: { type: 'string' } },
+                          compatibilityScore: { type: 'integer', minimum: 0, maximum: 100 },
+                          threeTwoReport: { type: 'object', additionalProperties: true }
+                        },
+                        required: ['role_id', 'role_title', 'industry', 'required_skills', 'compatibilityScore', 'threeTwoReport']
+                      }
+                    },
+                    meta: { type: 'object', nullable: true, additionalProperties: true }
+                  },
+                  required: ['roles']
+                }
+              }
+            }
+          },
+          400: {
+            description: 'Missing personaId',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Final persona not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          502: {
+            description: 'Upstream AI failure',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'Both Bedrock and O*NET unavailable',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
     '/api/recommendations/roles': {
       get: {
         tags: ['Recommendations'],

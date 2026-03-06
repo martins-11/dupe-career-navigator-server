@@ -568,7 +568,7 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
   return out;
 }
 
-function _buildInitialRecommendationsPrompt(finalPersona) {
+function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
   const personaObj =
     finalPersona && typeof finalPersona === 'object'
       ? finalPersona.finalJson && typeof finalPersona.finalJson === 'object'
@@ -597,8 +597,23 @@ function _buildInitialRecommendationsPrompt(finalPersona) {
     _normStr(personaObj?.seniority_level || personaObj?.seniorityLevel || personaObj?.seniority || personaObj?.profile?.seniority || '') ||
     'N/A';
 
+  const onetGrounding = options?.context?.onetGrounding || null;
+  const onetSnippet =
+    onetGrounding && typeof onetGrounding === 'object'
+      ? [
+          'GROUNDING CONTEXT (O*NET):',
+          `- keywordUsed: ${_normStr(onetGrounding.keywordUsed) || 'N/A'}`,
+          `- occupations: ${Array.isArray(onetGrounding.occupations) ? onetGrounding.occupations.map((o) => `${o.title} (${o.code})`).slice(0, 6).join('; ') : 'N/A'}`,
+          `- groundingSkills: [${Array.isArray(onetGrounding.groundingSkills) ? onetGrounding.groundingSkills.slice(0, 30).join(', ') : 'N/A'}]`,
+          '',
+          'IMPORTANT:',
+          '- Use the O*NET groundingSkills and occupation tasks as factual grounding for responsibilities/skills.',
+          '- Do not invent rare/niche titles unsupported by typical O*NET occupation families.'
+        ].join('\n')
+      : '';
+
   return [
-    'You are a Market Intelligence Expert for the Indian tech job market.',
+    'You are a Market Intelligence Expert for the Indian job market.',
     'You deeply understand in-demand roles in India, realistic compensation bands in ₹ LPA, and technical responsibilities.',
     '',
     'CONTEXT (FinalizedPersona):',
@@ -608,6 +623,7 @@ function _buildInitialRecommendationsPrompt(finalPersona) {
     `- Validated skills: [${validatedInline}]`,
     `- Skill proficiencies (name:percent): [${profInline}]`,
     '',
+    onetSnippet,
     'TASK:',
     'Return EXACTLY 5 realistic India-market job roles that best fit this persona today.',
     '',
@@ -626,7 +642,9 @@ function _buildInitialRecommendationsPrompt(finalPersona) {
     '- Compensation MUST be realistic for India in ₹ LPA.',
     '- Responsibilities must be specific (systems, tools, outcomes), not generic filler.',
     '- Avoid duplicates and avoid overly niche titles.',
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 /**
@@ -643,7 +661,7 @@ function _buildInitialRecommendationsPrompt(finalPersona) {
 async function getInitialRecommendations(finalPersona, options = {}) {
   const modelId = options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID;
 
-  const prompt = _buildInitialRecommendationsPrompt(finalPersona);
+  const prompt = _buildInitialRecommendationsPrompt(finalPersona, { context: options?.context || null });
 
   const body = {
     anthropic_version: 'bedrock-2023-05-31',
