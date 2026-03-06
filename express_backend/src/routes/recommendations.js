@@ -69,6 +69,9 @@ function getInitialRecommendationsHandler() {
  */
 async function handleInitialRecommendations(req, res) {
   try {
+    // Prevent caching of persona-driven scoring results (persona can change quickly during debugging/iteration).
+    res.set('Cache-Control', 'no-store');
+
     const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
     if (!personaIdRaw) {
       const err = new Error('personaId query parameter is required.');
@@ -78,22 +81,24 @@ async function handleInitialRecommendations(req, res) {
     }
 
     // 1) Load finalized persona (strictly personaId-driven)
-    // IMPORTANT: personasRepo.getFinal() is "best-effort" and some persistence layers historically returned
-    // "latest overall" (not per-persona), so we harden here by preferring a persona version when available.
-    const [personaRow, latestVersion, finalWrap] = await Promise.allSettled([
+    // IMPORTANT:
+    // - /api/recommendations/initial must use the FINAL persona, not personaDraft, so scoring produces
+    //   validated mastery/growth areas.
+    // - Therefore, we prefer personasRepo.getFinal(personaId) first.
+    // - As a compatibility fallback (older data), we can still use latest persona version.
+    const [personaRow, finalWrap, latestVersion] = await Promise.allSettled([
       personasRepo.getPersonaById(personaIdRaw),
-      personasRepo.getLatestPersonaVersion(personaIdRaw),
-      personasRepo.getFinal(personaIdRaw)
+      personasRepo.getFinal(personaIdRaw),
+      personasRepo.getLatestPersonaVersion(personaIdRaw)
     ]);
 
-    const latestVersionValue = latestVersion.status === 'fulfilled' ? latestVersion.value : null;
     const finalWrapValue = finalWrap.status === 'fulfilled' ? finalWrap.value : null;
+    const latestVersionValue = latestVersion.status === 'fulfilled' ? latestVersion.value : null;
 
-    // Prefer a versioned personaJson (true per-persona), otherwise fall back to "final" blob.
+    // Prefer explicit finalized persona blob, then fallback to versioned personaJson (if present).
     let finalPersona =
-      (latestVersionValue && latestVersionValue.personaJson) ||
       (finalWrapValue && finalWrapValue.finalJson) ||
-      finalWrapValue ||
+      (latestVersionValue && latestVersionValue.personaJson) ||
       null;
 
     // MySQL repo may return persona_json/final_json as a string; parse if needed.

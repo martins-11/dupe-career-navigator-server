@@ -203,19 +203,26 @@ async function getLatestPersonaVersion(personaId) {
 
 // PUBLIC_INTERFACE
 async function saveDraft(personaId, draftJson) {
-  /** Save a persona draft JSON blob to MySQL persona_drafts, returning a small payload. */
+  /** Save a persona draft JSON blob to MySQL persona_drafts (persona-scoped), returning a small payload. */
   const id = uuidV4();
+  const pid = String(personaId || '').trim();
+  if (!pid) {
+    const err = new Error('personaId is required to save a draft.');
+    err.code = 'INVALID_PERSONA_ID';
+    err.httpStatus = 400;
+    throw err;
+  }
 
   await dbQuery(
     `
-    INSERT INTO persona_drafts (id, persona_draft_json, alignment_score, created_at)
-    VALUES (?,?,?,?)
+    INSERT INTO persona_drafts (id, persona_id, persona_draft_json, alignment_score, created_at)
+    VALUES (?,?,?,?,?)
     `,
-    [id, JSON.stringify(draftJson ?? {}), 0, new Date()]
+    [id, pid, JSON.stringify(draftJson ?? {}), 0, new Date()]
   );
 
   return {
-    personaId,
+    personaId: pid,
     draftId: id,
     draftJson,
     updatedAt: new Date().toISOString()
@@ -224,16 +231,19 @@ async function saveDraft(personaId, draftJson) {
 
 // PUBLIC_INTERFACE
 async function getDraft(personaId) {
-  /** Get the latest saved draft for a persona. (Best-effort mapping; personaId isn't stored in table.) */
-  // Schema note: persona_drafts table doesn't include persona_id in this scaffold.
-  // Minimal behavior: return the latest draft row overall.
+  /** Get the latest saved draft for a persona (strict personaId-scoped lookup). */
+  const pid = String(personaId || '').trim();
+  if (!pid) return null;
+
   const res = await dbQuery(
     `
     SELECT id, persona_draft_json as draftJson, created_at as createdAt
     FROM persona_drafts
+    WHERE persona_id = ?
     ORDER BY created_at DESC
     LIMIT 1
-    `
+    `,
+    [pid]
   );
 
   const row = res.rows[0] || null;
@@ -249,7 +259,7 @@ async function getDraft(personaId) {
   }
 
   return {
-    personaId,
+    personaId: pid,
     draftId: row.id,
     draftJson,
     updatedAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString()
@@ -258,19 +268,26 @@ async function getDraft(personaId) {
 
 // PUBLIC_INTERFACE
 async function saveFinal(personaId, finalJson) {
-  /** Save a persona final JSON blob to MySQL persona_final, returning a small payload. */
+  /** Save a persona final JSON blob to MySQL persona_final (persona-scoped), returning a small payload. */
   const id = uuidV4();
+  const pid = String(personaId || '').trim();
+  if (!pid) {
+    const err = new Error('personaId is required to save a final persona.');
+    err.code = 'INVALID_PERSONA_ID';
+    err.httpStatus = 400;
+    throw err;
+  }
 
   await dbQuery(
     `
-    INSERT INTO persona_final (id, persona_final_json, alignment_score, created_at)
-    VALUES (?,?,?,?)
+    INSERT INTO persona_final (id, persona_id, persona_final_json, alignment_score, created_at)
+    VALUES (?,?,?,?,?)
     `,
-    [id, JSON.stringify(finalJson ?? {}), 0, new Date()]
+    [id, pid, JSON.stringify(finalJson ?? {}), 0, new Date()]
   );
 
   return {
-    personaId,
+    personaId: pid,
     finalId: id,
     finalJson,
     updatedAt: new Date().toISOString()
@@ -280,42 +297,48 @@ async function saveFinal(personaId, finalJson) {
 // PUBLIC_INTERFACE
 async function getFinal(personaId) {
   /**
-   * Get the best available "finalized persona" for a given personaId.
+   * Get the latest finalized persona for a given personaId (strict personaId-scoped lookup).
    *
-   * IMPORTANT:
-   * - The scaffolded persona_final table does not include persona_id, so a strict lookup is impossible there.
-   * - To keep /api/recommendations/initial truly persona-driven, we DO NOT return "latest overall" anymore.
-   *
-   * Resolution strategy:
-   * 1) Prefer latest persona_versions.persona_json for the given personaId (canonical per-persona history).
-   * 2) If none exists, return null (caller can 404).
-   *
-   * This preserves personaId semantics and prevents cross-persona contamination.
+   * NOTE:
+   * - persona_versions are version history; persona_final is the explicit "finalized" artifact.
+   * - This method returns ONLY persona_final to ensure /api/recommendations/initial uses the true finalized persona.
    */
-  const id = String(personaId || '').trim();
-  if (!id) return null;
+  const pid = String(personaId || '').trim();
+  if (!pid) return null;
 
-  // Prefer latest versioned persona JSON for this personaId.
-  const v = await getLatestPersonaVersion(id);
-  if (v && v.personaJson != null) {
-    let personaJson = v.personaJson;
-    if (typeof personaJson === 'string') {
-      try {
-        personaJson = JSON.parse(personaJson);
-      } catch (_) {
-        // leave as string if parsing fails
-      }
+  const res = await dbQuery(
+    `
+    SELECT
+      id,
+      persona_id as personaId,
+      persona_final_json as finalJson,
+      created_at as createdAt
+    FROM persona_final
+    WHERE persona_id = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [pid]
+  );
+
+  const row = res.rows[0] || null;
+  if (!row) return null;
+
+  let finalJson = row.finalJson;
+  if (typeof finalJson === 'string') {
+    try {
+      finalJson = JSON.parse(finalJson);
+    } catch (_) {
+      // leave as string if parsing fails
     }
-
-    return {
-      personaId: id,
-      finalId: v.id,
-      finalJson: personaJson,
-      updatedAt: v.createdAt ? new Date(v.createdAt).toISOString() : new Date().toISOString()
-    };
   }
 
-  return null;
+  return {
+    personaId: pid,
+    finalId: row.id,
+    finalJson,
+    updatedAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString()
+  };
 }
 
 module.exports = {
