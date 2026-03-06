@@ -41,6 +41,11 @@ const rolesRouter = require('./routes/roles');
 
 const app = express();
 
+// Best-effort runtime-safe schema fixups for known drift issues.
+// This must NOT prevent server startup (DB is optional in this project).
+const { ensureMysqlSchemaCompatible } = require('./db/schemaSelfHeal');
+void ensureMysqlSchemaCompatible();
+
 app.set('trust proxy', String(process.env.TRUST_PROXY).toLowerCase() === 'true');
 
 app.use(helmet());

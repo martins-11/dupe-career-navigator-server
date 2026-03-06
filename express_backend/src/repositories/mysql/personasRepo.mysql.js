@@ -1,6 +1,7 @@
 'use strict';
 
 const { dbQuery } = require('../../db/connection');
+const { ensureMysqlSchemaCompatible } = require('../../db/schemaSelfHeal');
 const { uuidV4 } = require('../../utils/uuid');
 
 /**
@@ -213,6 +214,9 @@ async function saveDraft(personaId, draftJson) {
     throw err;
   }
 
+  // Runtime-safe guard: if schema drift exists (persona_id missing), self-heal before executing.
+  await ensureMysqlSchemaCompatible();
+
   await dbQuery(
     `
     INSERT INTO persona_drafts (id, persona_id, persona_draft_json, alignment_score, created_at)
@@ -234,6 +238,9 @@ async function getDraft(personaId) {
   /** Get the latest saved draft for a persona (strict personaId-scoped lookup). */
   const pid = String(personaId || '').trim();
   if (!pid) return null;
+
+  // Runtime-safe guard: if schema drift exists (persona_id missing), self-heal before executing.
+  await ensureMysqlSchemaCompatible();
 
   const res = await dbQuery(
     `
