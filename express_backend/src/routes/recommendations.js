@@ -172,15 +172,16 @@ router.get('/roles', async (req, res) => {
   /**
    * Phase 1: Return recommended roles based solely on the latest Final Persona stored in DB.
    *
-   * IMPORTANT HARDENING (guest state):
+   * IMPORTANT HARDENING (guest state + persona-not-ready):
    * - Frontend may call this endpoint before a persona is created/selected (personaId missing).
-   * - In that case, we MUST NOT 400/500; instead return a safe deterministic recommendation list.
-   * - If a session/default persona exists on the request (middleware-added), prefer that over the generic fallback.
+   * - Frontend may also call it when a Final Persona exists but is not recommendation-ready yet
+   *   (e.g., validated_skills not populated). In both cases, we MUST NOT 422/500.
    *
    * Query params (additive):
    * - personaId: UUID (optional)
    * - userId: UUID (optional)
    * - pivot: boolean (default false) - if true, do NOT filter to persona industry
+   * - limit: number (optional; default 5; min 5; max 50)
    *
    * Response (validated):
    * { roles: Array<{ role_id, role_title, industry, match_reason, estimated_salary_range }> }
@@ -189,6 +190,12 @@ router.get('/roles', async (req, res) => {
     const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
     const userId = req.query?.userId ? String(req.query.userId).trim() : null;
     const pivot = String(req.query?.pivot || '').toLowerCase() === 'true';
+
+    // Parse limit with safe defaults.
+    const limitRaw = req.query?.limit != null ? String(req.query.limit).trim() : '';
+    const parsedLimit = Number.parseInt(limitRaw, 10);
+    // Schema requires >=5 roles; keep a floor of 5 to avoid creating a validation error.
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 5), 50) : 5;
 
     /**
      * Guest-state fallback strategy:
@@ -202,11 +209,15 @@ router.get('/roles', async (req, res) => {
      * 3) Else, return deterministic "trending roles" based on DEFAULT_ROLES_CATALOG.
      */
     const fallbackPersonaId =
-      String(req.session?.personaId || req.session?.defaultPersonaId || req.context?.personaId || req.context?.defaultPersonaId || '').trim() ||
-      null;
+      String(
+        req.session?.personaId ||
+          req.session?.defaultPersonaId ||
+          req.context?.personaId ||
+          req.context?.defaultPersonaId ||
+          ''
+      ).trim() || null;
 
-    // Per user_input_ref: if personaId is missing, default to the "Rossini" test persona.
-    // We keep the previous guest-safe behavior as a secondary fallback if Rossini is not available.
+    // If personaId is missing, default to the "Rossini" test persona.
     const resolvedPersonaId = personaIdRaw || fallbackPersonaId || 'Rossini';
 
     let recommendations = [];
@@ -220,29 +231,38 @@ router.get('/roles', async (req, res) => {
       });
       recommendations = Array.isArray(result?.recommendations) ? result.recommendations : [];
     } catch (err) {
-      // If persona resolution fails (e.g., missing final persona), return deterministic fallback instead of failing.
-      // We only swallow persona-not-found / DB-not-ready style conditions; other errors still surface.
+      // If persona resolution fails OR persona is not ready (e.g., missing validated_skills),
+      // return deterministic fallback instead of failing.
+      //
+      // This prevents the Explore page from breaking when a persona exists but has not yet
+      // produced validated_skills for matching.
       const code = err?.code || '';
       const httpStatus = err?.httpStatus;
 
-      const isGuestLike =
+      const isGuestLikeOrNotReady =
         code === 'final_persona_not_found' ||
         httpStatus === 404 ||
         code === 'DB_NOT_CONFIGURED' ||
-        httpStatus === 503;
+        httpStatus === 503 ||
+        code === 'final_persona_missing_skills' ||
+        httpStatus === 422;
 
-      if (!isGuestLike) throw err;
+      if (!isGuestLikeOrNotReady) throw err;
 
       const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
       const seedArr = Array.isArray(seed) ? seed : [];
-      recommendations = seedArr.slice(0, 5).map((r, idx) => ({
+      const slice = seedArr.slice(0, Math.max(limit, 5));
+      recommendations = slice.map((r, idx) => ({
         role_id: `guest_${idx + 1}`,
         role_title: r?.roleTitle || 'Role',
         industry: r?.industry || null,
-        match_reason: 'Sign in or create a persona to get personalized recommendations.',
+        match_reason: 'Complete your persona to get personalized recommendations.',
         estimated_salary_range: r?.estimatedSalaryRange || null
       }));
     }
+
+    // Apply limit after computation/fallback, but never below schema minimum.
+    const capped = Array.isArray(recommendations) ? recommendations.slice(0, Math.max(limit, 5)) : [];
 
     // Best-effort persist latest computed roles (for refresh/reload). We keep this non-blocking.
     // Only persist when we have some identity to attach it to.
@@ -253,14 +273,14 @@ router.get('/roles', async (req, res) => {
           personaId: resolvedPersonaId,
           buildId: null,
           inferredTags: [],
-          roles: recommendations
+          roles: capped
         });
       } catch (_) {
         // ignore persistence failures
       }
     }
 
-    const payload = enforceResponse(RecommendationsRolesResponseSchema, { roles: recommendations });
+    const payload = enforceResponse(RecommendationsRolesResponseSchema, { roles: capped });
     return res.json(payload);
   } catch (err) {
     return sendError(res, err);
