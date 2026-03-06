@@ -737,8 +737,10 @@ async function finalizePersonaForBuild(buildId, input) {
   let createdVersion = null;
 
   if (personaId && shouldSaveFinal) {
+    // Persist explicit final artifact for persona-driven scoring/recommendations.
     savedFinal = await personasRepo.saveFinal(personaId, finalJson);
 
+    // Optional: also create a version snapshot (history/audit).
     if (parsed.createVersion) {
       createdVersion = await personasRepo.createPersonaVersion(personaId, { personaJson: finalJson });
     }

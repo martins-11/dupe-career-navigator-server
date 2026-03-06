@@ -1,6 +1,7 @@
 'use strict';
 
 const { dbQuery } = require('../../db/connection');
+const { ensureMysqlSchemaCompatible } = require('../../db/schemaSelfHeal');
 const { uuidV4 } = require('../../utils/uuid');
 
 /**
@@ -203,19 +204,29 @@ async function getLatestPersonaVersion(personaId) {
 
 // PUBLIC_INTERFACE
 async function saveDraft(personaId, draftJson) {
-  /** Save a persona draft JSON blob to MySQL persona_drafts, returning a small payload. */
+  /** Save a persona draft JSON blob to MySQL persona_drafts (persona-scoped), returning a small payload. */
   const id = uuidV4();
+  const pid = String(personaId || '').trim();
+  if (!pid) {
+    const err = new Error('personaId is required to save a draft.');
+    err.code = 'INVALID_PERSONA_ID';
+    err.httpStatus = 400;
+    throw err;
+  }
+
+  // Runtime-safe guard: if schema drift exists (persona_id missing), self-heal before executing.
+  await ensureMysqlSchemaCompatible();
 
   await dbQuery(
     `
-    INSERT INTO persona_drafts (id, persona_draft_json, alignment_score, created_at)
-    VALUES (?,?,?,?)
+    INSERT INTO persona_drafts (id, persona_id, persona_draft_json, alignment_score, created_at)
+    VALUES (?,?,?,?,?)
     `,
-    [id, JSON.stringify(draftJson ?? {}), 0, new Date()]
+    [id, pid, JSON.stringify(draftJson ?? {}), 0, new Date()]
   );
 
   return {
-    personaId,
+    personaId: pid,
     draftId: id,
     draftJson,
     updatedAt: new Date().toISOString()
@@ -224,16 +235,22 @@ async function saveDraft(personaId, draftJson) {
 
 // PUBLIC_INTERFACE
 async function getDraft(personaId) {
-  /** Get the latest saved draft for a persona. (Best-effort mapping; personaId isn't stored in table.) */
-  // Schema note: persona_drafts table doesn't include persona_id in this scaffold.
-  // Minimal behavior: return the latest draft row overall.
+  /** Get the latest saved draft for a persona (strict personaId-scoped lookup). */
+  const pid = String(personaId || '').trim();
+  if (!pid) return null;
+
+  // Runtime-safe guard: if schema drift exists (persona_id missing), self-heal before executing.
+  await ensureMysqlSchemaCompatible();
+
   const res = await dbQuery(
     `
     SELECT id, persona_draft_json as draftJson, created_at as createdAt
     FROM persona_drafts
+    WHERE persona_id = ?
     ORDER BY created_at DESC
     LIMIT 1
-    `
+    `,
+    [pid]
   );
 
   const row = res.rows[0] || null;
@@ -249,7 +266,7 @@ async function getDraft(personaId) {
   }
 
   return {
-    personaId,
+    personaId: pid,
     draftId: row.id,
     draftJson,
     updatedAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString()
@@ -258,19 +275,29 @@ async function getDraft(personaId) {
 
 // PUBLIC_INTERFACE
 async function saveFinal(personaId, finalJson) {
-  /** Save a persona final JSON blob to MySQL persona_final, returning a small payload. */
+  /** Save a persona final JSON blob to MySQL persona_final (persona-scoped), returning a small payload. */
   const id = uuidV4();
+  const pid = String(personaId || '').trim();
+  if (!pid) {
+    const err = new Error('personaId is required to save a final persona.');
+    err.code = 'INVALID_PERSONA_ID';
+    err.httpStatus = 400;
+    throw err;
+  }
+
+  // Runtime-safe guard: if schema drift exists (persona_id missing), self-heal before executing.
+  await ensureMysqlSchemaCompatible();
 
   await dbQuery(
     `
-    INSERT INTO persona_final (id, persona_final_json, alignment_score, created_at)
-    VALUES (?,?,?,?)
+    INSERT INTO persona_final (id, persona_id, persona_final_json, alignment_score, created_at)
+    VALUES (?,?,?,?,?)
     `,
-    [id, JSON.stringify(finalJson ?? {}), 0, new Date()]
+    [id, pid, JSON.stringify(finalJson ?? {}), 0, new Date()]
   );
 
   return {
-    personaId,
+    personaId: pid,
     finalId: id,
     finalJson,
     updatedAt: new Date().toISOString()
@@ -279,16 +306,32 @@ async function saveFinal(personaId, finalJson) {
 
 // PUBLIC_INTERFACE
 async function getFinal(personaId) {
-  /** Get the latest saved final for a persona. (Best-effort mapping; personaId isn't stored in table.) */
-  // Schema note: persona_final table doesn't include persona_id in this scaffold.
-  // Minimal behavior: return the latest final row overall.
+  /**
+   * Get the latest finalized persona for a given personaId (strict personaId-scoped lookup).
+   *
+   * NOTE:
+   * - persona_versions are version history; persona_final is the explicit "finalized" artifact.
+   * - This method returns ONLY persona_final to ensure /api/recommendations/initial uses the true finalized persona.
+   */
+  const pid = String(personaId || '').trim();
+  if (!pid) return null;
+
+  // Runtime-safe guard: if schema drift exists (persona_id missing), self-heal before executing.
+  await ensureMysqlSchemaCompatible();
+
   const res = await dbQuery(
     `
-    SELECT id, persona_final_json as finalJson, created_at as createdAt
+    SELECT
+      id,
+      persona_id as personaId,
+      persona_final_json as finalJson,
+      created_at as createdAt
     FROM persona_final
+    WHERE persona_id = ?
     ORDER BY created_at DESC
     LIMIT 1
-    `
+    `,
+    [pid]
   );
 
   const row = res.rows[0] || null;
@@ -304,7 +347,7 @@ async function getFinal(personaId) {
   }
 
   return {
-    personaId,
+    personaId: pid,
     finalId: row.id,
     finalJson,
     updatedAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString()

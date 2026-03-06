@@ -5,7 +5,6 @@ const { sendError } = require('../utils/errors');
 const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
 
 const recommendationsService = require('../services/recommendationsService');
-const bedrockService = require('../services/bedrockService');
 const personasRepo = require('../repositories/personasRepoAdapter');
 
 const {
@@ -15,6 +14,8 @@ const {
   RoleCompareRequestSchema,
   RoleCompareResponseSchema
 } = require('../schemas/holisticPersonaSchemas');
+
+const { generateInitialRecommendationsPersonaDrivenOnetGrounded } = require('../services/recommendationsInitialService');
 
 const router = express.Router();
 
@@ -44,15 +45,22 @@ function getInitialRecommendationsHandler() {
  * PUBLIC_INTERFACE
  * GET /api/recommendations/initial
  *
- * Post-persona initial recommendations (exactly 5 India-market roles).
+ * Persona-driven + O*NET-grounded initial recommendations (exactly 5 roles).
  *
  * Triggered by the frontend when "Finalized Persona" is reached, to populate a RecommendationGrid.
  *
- * Query params (optional):
- * - personaId: string (used to load the finalized persona; best-effort)
+ * Query params:
+ * - personaId: string (REQUIRED; used to load the finalized persona)
  *
  * Response:
- * { roles: Array<{ role_id, role_title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }> }
+ * {
+ *   roles: Array<{
+ *     role_id, role_title, industry, salary_lpa_range, experience_range,
+ *     description, key_responsibilities, required_skills,
+ *     compatibilityScore, threeTwoReport, match_metadata
+ *   }>,
+ *   meta?: object
+ * }
  */
 /**
  * Shared handler for initial recommendations.
@@ -61,20 +69,9 @@ function getInitialRecommendationsHandler() {
  */
 async function handleInitialRecommendations(req, res) {
   try {
-    /**
-     * PersonaId-driven Day 3 endpoint.
-     *
-     * Requirements (user_input_ref):
-     * 1) Fetch the Finalized Persona using personaId from the request.
-     * 2) Pass persona skills to Bedrock to generate EXACTLY 5 India-market roles (₹LPA).
-     * 3) Score each role with scoringEngine for Mastery/Growth (threeTwoReport) + compatibilityScore.
-     * 4) Return exactly 5 roles with required fields.
-     *
-     * Important contract changes:
-     * - personaId is REQUIRED (no guest-mode, no unconditional fallback).
-     * - If Bedrock fails, we may use the allowed deterministic fallback from bedrockService,
-     *   but we STILL enrich results with scoring fields.
-     */
+    // Prevent caching of persona-driven scoring results (persona can change quickly during debugging/iteration).
+    res.set('Cache-Control', 'no-store');
+
     const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
     if (!personaIdRaw) {
       const err = new Error('personaId query parameter is required.');
@@ -84,21 +81,51 @@ async function handleInitialRecommendations(req, res) {
     }
 
     // 1) Load finalized persona (strictly personaId-driven)
-    const finalWrap = await personasRepo.getFinal(personaIdRaw);
-    const finalPersona = finalWrap?.finalJson || finalWrap || null;
+    // IMPORTANT:
+    // - /api/recommendations/initial must use the FINAL persona, not personaDraft, so scoring produces
+    //   validated mastery/growth areas.
+    // - Therefore, we prefer personasRepo.getFinal(personaId) first.
+    // - As a compatibility fallback (older data), we can still use latest persona version.
+    const [personaRow, finalWrap, latestVersion] = await Promise.allSettled([
+      personasRepo.getPersonaById(personaIdRaw),
+      personasRepo.getFinal(personaIdRaw),
+      personasRepo.getLatestPersonaVersion(personaIdRaw)
+    ]);
 
-    if (!finalPersona || typeof finalPersona !== 'object') {
+    const finalWrapValue = finalWrap.status === 'fulfilled' ? finalWrap.value : null;
+    const latestVersionValue = latestVersion.status === 'fulfilled' ? latestVersion.value : null;
+
+    // Prefer explicit finalized persona blob, then fallback to versioned personaJson (if present).
+    let finalPersona =
+      (finalWrapValue && finalWrapValue.finalJson) ||
+      (latestVersionValue && latestVersionValue.personaJson) ||
+      null;
+
+    // MySQL repo may return persona_json/final_json as a string; parse if needed.
+    if (typeof finalPersona === 'string') {
+      try {
+        finalPersona = JSON.parse(finalPersona);
+      } catch (_) {
+        // leave as string
+      }
+    }
+
+    // Ensure we got a real object.
+    if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
       const err = new Error(`Finalized Persona not found for personaId=${personaIdRaw}`);
       err.code = 'final_persona_not_found';
       err.httpStatus = 404;
       throw err;
     }
 
-    // 2) Bedrock call (safe wrapper inside bedrockService handles allowed fallback)
-    const result = await bedrockService.getInitialRecommendations(finalPersona, {});
-    const roles = Array.isArray(result?.roles) ? result.roles : [];
+    // 2) O*NET-grounded + Bedrock-generated roles (exactly 5), with scored results
+    // NOTE: This must be persona-driven; no static fallback unless O*NET and/or Bedrock fail.
+    const result = await generateInitialRecommendationsPersonaDrivenOnetGrounded({
+      finalPersona,
+      personaId: personaIdRaw
+    });
 
-    // BedrockService guarantees "exactly 5" on success/fallback. If not, treat as upstream failure.
+    const roles = Array.isArray(result?.roles) ? result.roles : [];
     if (roles.length !== 5) {
       const err = new Error(`Initial recommendations generator returned ${roles.length} roles; expected exactly 5.`);
       err.code = 'initial_recommendations_invalid_count';
@@ -106,70 +133,20 @@ async function handleInitialRecommendations(req, res) {
       throw err;
     }
 
-    // 3) Scoring (Mastery/Growth tags + compatibility)
-    const { buildThreeTwoReport, scoreRoleCompatibility } = require('../services/scoringEngine');
-
-    // Support multiple final persona shapes for proficiency-bearing skills.
-    const proficiencyCandidates = [
-      finalPersona?.skills_with_proficiency,
-      finalPersona?.skillsWithProficiency,
-      finalPersona?.user_skills,
-      finalPersona?.userSkills,
-      finalPersona?.skills,
-      finalPersona?.skillProficiencies
-    ];
-
-    let userSkillsForScoring = [];
-    for (const arr of proficiencyCandidates) {
-      if (Array.isArray(arr) && arr.length > 0) {
-        userSkillsForScoring = arr;
-        break;
-      }
-    }
-
-    const scoredRoles = roles.map((r) => {
-      const requiredSkills = Array.isArray(r.required_skills)
-        ? r.required_skills
-        : Array.isArray(r.skills_required)
-          ? r.skills_required
-          : [];
-
-      const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, requiredSkills);
-      const compat = scoreRoleCompatibility(userSkillsForScoring, requiredSkills);
-
-      return {
-        role_id: r.role_id,
-        role_title: r.role_title,
-        industry: r.industry,
-        salary_lpa_range: r.salary_lpa_range,
-        experience_range: r.experience_range,
-        description: r.description,
-        key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
-        required_skills: requiredSkills,
-        threeTwoReport,
-        compatibilityScore: compat.score,
-        match_metadata: {
-          ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
-          bedrockUsedFallback: Boolean(result?.usedFallback),
-          bedrockModelId: result?.modelId || null
-        }
-      };
-    });
-
-    // Best-effort persist for refresh/reload.
+    // Best-effort persist for refresh/reload (non-blocking).
     try {
       await holisticPersonaRepo.upsertRecommendationsRoles({
         userId: null,
         personaId: personaIdRaw,
         buildId: null,
         inferredTags: [],
-        roles: scoredRoles
+        roles
       });
     } catch (_) {
       // ignore persistence failures
     }
 
-    return res.json({ roles: scoredRoles });
+    return res.json({ roles, meta: result?.meta || undefined });
   } catch (err) {
     return sendError(res, err);
   }
