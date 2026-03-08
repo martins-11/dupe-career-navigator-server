@@ -92,6 +92,58 @@ function _extractFirstJsonArray(text) {
   return null;
 }
 
+/**
+ * Attempt to normalize Bedrock output into a JSON array.
+ *
+ * Supports common model behaviors:
+ * - Raw JSON array
+ * - JSON object wrapper containing a "roles" array
+ * - JSON array wrapped in ```json fences
+ * - Text with leading/trailing commentary (via _extractFirstJsonArray)
+ */
+function _extractJsonArrayFromText(text) {
+  if (!text) return { array: null, extractedText: null, parseError: null };
+
+  let trimmed = text.trim();
+
+  // Strip markdown code fences if present.
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced && fenced[1]) {
+    trimmed = fenced[1].trim();
+  }
+
+  // Try parsing the whole payload as JSON.
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      return { array: parsed, extractedText: JSON.stringify(parsed), parseError: null };
+    }
+    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.roles)) {
+      return {
+        array: parsed.roles,
+        extractedText: JSON.stringify(parsed.roles),
+        parseError: null
+      };
+    }
+  } catch (_) {
+    // Ignore and fall back to array extraction.
+  }
+
+  const extractedText = _extractFirstJsonArray(trimmed);
+  if (!extractedText) return { array: null, extractedText: null, parseError: null };
+
+  try {
+    const parsed = JSON.parse(extractedText);
+    if (Array.isArray(parsed)) {
+      return { array: parsed, extractedText, parseError: null };
+    }
+  } catch (err) {
+    return { array: null, extractedText, parseError: err };
+  }
+
+  return { array: null, extractedText, parseError: null };
+}
+
 function _normStr(v) {
   return String(v || '').trim();
 }
@@ -258,6 +310,7 @@ function _buildStrictJsonPrompt(userPersona) {
     '',
     'OUTPUT FORMAT:',
     'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
+    'Do NOT wrap the array in an object (no {"roles": ...}).',
     'Each element MUST be an object with EXACTLY these keys:',
     '- "title": string',
     '- "industry": string',
@@ -417,26 +470,28 @@ async function generateTargetedRoles(userPersona, options = {}) {
   }
 
   const rawText = _extractClaudeText(bedrockJson);
-  const extracted = _extractFirstJsonArray(rawText);
+  const extracted = _extractJsonArrayFromText(rawText);
 
-  if (!extracted) {
+  if (!extracted.array) {
     const err = new Error('Could not extract a JSON array from Bedrock model output.');
     err.code = 'bedrock_no_json_array';
-    err.details = { rawText: rawText.slice(0, 5000) };
+    err.details = {
+      rawText: rawText.slice(0, 5000),
+      extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
+    };
     throw err;
   }
 
-  let parsed;
-  try {
-    parsed = JSON.parse(extracted);
-  } catch (e) {
-    const err = new Error(`Extracted content was not valid JSON: ${e?.message || String(e)}`);
+  if (extracted.parseError) {
+    const err = new Error(
+      `Extracted content was not valid JSON: ${extracted.parseError?.message || String(extracted.parseError)}`
+    );
     err.code = 'bedrock_invalid_extracted_json';
-    err.details = { extracted: extracted.slice(0, 5000) };
+    err.details = { extracted: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null };
     throw err;
   }
 
-  const roles = _validateAndNormalizeGeneratedRoles(parsed);
+  const roles = _validateAndNormalizeGeneratedRoles(extracted.array);
 
   // We asked for exactly 5; if the model returned fewer valid entries, surface a clear error.
   if (roles.length < 5) {
@@ -776,16 +831,27 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const bedrockJson = JSON.parse(jsonStr);
 
     const rawText = _extractClaudeText(bedrockJson);
-    const extracted = _extractFirstJsonArray(rawText);
-    if (!extracted) {
+    const extracted = _extractJsonArrayFromText(rawText);
+    if (!extracted.array) {
       const err = new Error('Could not extract a JSON array from Bedrock output (initial recommendations).');
       err.code = 'bedrock_no_json_array';
-      err.details = { rawText: rawText.slice(0, 5000) };
+      err.details = {
+        rawText: rawText.slice(0, 5000),
+        extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
+      };
       throw err;
     }
 
-    const parsed = JSON.parse(extracted);
-    const roles = _validateAndNormalizeInitialRecommendations(parsed);
+    if (extracted.parseError) {
+      const err = new Error(
+        `Extracted content was not valid JSON: ${extracted.parseError?.message || String(extracted.parseError)}`
+      );
+      err.code = 'bedrock_invalid_extracted_json';
+      err.details = { extracted: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null };
+      throw err;
+    }
+
+    const roles = _validateAndNormalizeInitialRecommendations(extracted.array);
 
     if (roles.length < 5) {
       const err = new Error(`Bedrock returned ${roles.length} valid initial recommendations; expected 5.`);
