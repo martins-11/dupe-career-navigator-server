@@ -264,11 +264,18 @@ router.get('/roles', async (req, res) => {
       const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
       const seedArr = Array.isArray(seed) ? seed : [];
       const slice = seedArr.slice(0, Math.max(limit, 5));
+      const isPersonaIdProvided = Boolean(personaIdRaw);
+
       recommendations = slice.map((r, idx) => ({
         role_id: `guest_${idx + 1}`,
         role_title: r?.roleTitle || 'Role',
         industry: r?.industry || null,
-        match_reason: 'Complete your persona to get personalized recommendations.',
+        // If the client provided a personaId, avoid signaling "persona incomplete" (which the UI may
+        // treat as a gating condition). Instead, return a neutral "fallback" reason while the
+        // finalized persona is still being persisted/propagated.
+        match_reason: isPersonaIdProvided
+          ? 'Showing fallback roles while your personalized recommendations load.'
+          : 'Complete your persona to get personalized recommendations.',
         estimated_salary_range: r?.estimatedSalaryRange || null
       }));
     }
