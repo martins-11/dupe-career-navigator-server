@@ -9,19 +9,42 @@ const https = require('https');
 const ONET_BASE_URL = 'https://services.onetcenter.org/ws';
 
 /**
- * Environment variables:
- * - ONET_USERNAME: O*NET Web Services username / account id
- * - ONET_PASSWORD: O*NET Web Services API key (password)
+ * Environment variables (supported):
+ * - ONET_USERNAME: O*NET Web Services username / account id (preferred)
+ * - ONET_PASSWORD: O*NET Web Services API key (preferred)
  *
- * IMPORTANT: These are assumed to already be configured in the environment (per task instructions).
+ * Deployment aliases (supported because some environments only expose REACT_APP_* vars):
+ * - REACT_APP_ONET_API_KEY: O*NET API key (maps to ONET_PASSWORD)
+ * - ONET_API_KEY: O*NET API key (maps to ONET_PASSWORD)
+ * - REACT_APP_ONET_USERNAME / ONET_API_KEY_USERNAME: optional username override
+ *
+ * Notes on Basic Auth for O*NET:
+ * - O*NET Web Services uses HTTP Basic Auth.
+ * - Many examples use a real account id as the username and the API key as the password.
+ * - Some deployments only provide an API key; in that case we fall back to username="apikey"
+ *   (a common convention for API-key-only Basic Auth setups) while keeping compatibility
+ *   with the explicit ONET_USERNAME/ONET_PASSWORD pair when available.
  */
 function _getOnetCredentials() {
-  const username = String(process.env.ONET_USERNAME || '').trim();
-  const password = String(process.env.ONET_PASSWORD || '').trim();
+  const password = String(
+    process.env.ONET_PASSWORD ||
+      process.env.ONET_API_KEY ||
+      process.env.REACT_APP_ONET_API_KEY ||
+      '',
+  ).trim();
+
+  // Prefer explicit username if present; otherwise fall back to "apikey" when only an API key is supplied.
+  const username = String(
+    process.env.ONET_USERNAME ||
+      process.env.ONET_API_KEY_USERNAME ||
+      process.env.REACT_APP_ONET_USERNAME ||
+      (password ? 'apikey' : '') ||
+      '',
+  ).trim();
 
   if (!username || !password) {
     const err = new Error(
-      'O*NET credentials are not configured. Set ONET_USERNAME and ONET_PASSWORD in the environment.',
+      'O*NET credentials are not configured. Set ONET_PASSWORD (or ONET_API_KEY / REACT_APP_ONET_API_KEY) and optionally ONET_USERNAME.',
     );
     err.code = 'ONET_NOT_CONFIGURED';
     err.httpStatus = 503;
