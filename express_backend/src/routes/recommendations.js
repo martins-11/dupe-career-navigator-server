@@ -80,6 +80,33 @@ async function handleInitialRecommendations(req, res) {
       throw err;
     }
 
+    /**
+     * IMPORTANT HARDENING:
+     * The frontend may call this endpoint before the finalized persona has been persisted/retrievable
+     * (race conditions, eventual consistency, DB not configured, etc).
+     *
+     * If the client can provide the finalized persona JSON directly, we should still return a
+     * Bedrock-generated (or Bedrock-fallback) recommendation set rather than forcing the UI into a
+     * placeholder/example mode.
+     *
+     * Supported additive inputs (optional):
+     * - query.finalPersonaJson: JSON-stringified final persona
+     * - body.finalPersona: final persona object (if client uses POST in some environments)
+     */
+    let finalPersonaFromRequest = null;
+    const finalPersonaJsonRaw = req.query?.finalPersonaJson
+      ? String(req.query.finalPersonaJson).trim()
+      : '';
+    if (finalPersonaJsonRaw) {
+      try {
+        finalPersonaFromRequest = JSON.parse(finalPersonaJsonRaw);
+      } catch (_) {
+        // ignore; we'll fall back to DB lookup
+      }
+    } else if (req.body?.finalPersona && typeof req.body.finalPersona === 'object') {
+      finalPersonaFromRequest = req.body.finalPersona;
+    }
+
     // 1) Load finalized persona (strictly personaId-driven)
     // IMPORTANT:
     // - /api/recommendations/initial must use the FINAL persona, not personaDraft, so scoring produces
@@ -95,10 +122,12 @@ async function handleInitialRecommendations(req, res) {
     const finalWrapValue = finalWrap.status === 'fulfilled' ? finalWrap.value : null;
     const latestVersionValue = latestVersion.status === 'fulfilled' ? latestVersion.value : null;
 
-    // Prefer explicit finalized persona blob, then fallback to versioned personaJson (if present).
+    // Prefer explicit finalized persona blob, then fallback to versioned personaJson (if present),
+    // then fallback to request-provided JSON (additive; keeps endpoint live even before persistence).
     let finalPersona =
       (finalWrapValue && finalWrapValue.finalJson) ||
       (latestVersionValue && latestVersionValue.personaJson) ||
+      finalPersonaFromRequest ||
       null;
 
     // MySQL repo may return persona_json/final_json as a string; parse if needed.
@@ -112,7 +141,9 @@ async function handleInitialRecommendations(req, res) {
 
     // Ensure we got a real object.
     if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
-      const err = new Error(`Finalized Persona not found for personaId=${personaIdRaw}`);
+      const err = new Error(
+        `Finalized Persona not found for personaId=${personaIdRaw}. Provide finalPersonaJson to generate recommendations without DB persistence.`
+      );
       err.code = 'final_persona_not_found';
       err.httpStatus = 404;
       throw err;
