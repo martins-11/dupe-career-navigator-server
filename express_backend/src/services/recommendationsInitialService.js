@@ -141,6 +141,25 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, { context: null });
 
   const roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
+
+  // Sanitize bedrock error object (if any) into a stable, non-sensitive meta field.
+  const bedrockError =
+    bedrockResult?.usedFallback && bedrockResult?.error && typeof bedrockResult.error === 'object'
+      ? {
+          code: bedrockResult.error.code || 'BEDROCK_FAILED',
+          message: bedrockResult.error.message || null,
+          name: bedrockResult.error.name || null,
+          httpStatusCode: bedrockResult.error.httpStatusCode ?? null,
+          requestId: bedrockResult.error.requestId ?? null,
+          extendedRequestId: bedrockResult.error.extendedRequestId ?? null,
+          cfId: bedrockResult.error.cfId ?? null,
+          attempts: bedrockResult.error.attempts ?? null,
+          totalRetryDelay: bedrockResult.error.totalRetryDelay ?? null,
+          fault: bedrockResult.error.fault ?? null,
+          service: bedrockResult.error.service ?? null
+        }
+      : null;
+
   const scored = _scoreRoles(finalPersona, roles).map((r) => ({
     ...r,
     match_metadata: {
@@ -153,7 +172,9 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
         source: 'none'
       },
       bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
-      bedrockModelId: bedrockResult?.modelId || null
+      bedrockModelId: bedrockResult?.modelId || null,
+      // Optional per-role visibility into the cause of fallback (useful when debugging UI cards).
+      ...(bedrockError ? { bedrockError } : {})
     }
   }));
 
@@ -165,7 +186,9 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       onetGrounded: false,
       onetError: null,
       bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
-      endpointFallbackUsed: false
+      endpointFallbackUsed: false,
+      // Primary diagnostic payload (use this to see why bedrockUsedFallback=true).
+      bedrockError
     }
   };
 }

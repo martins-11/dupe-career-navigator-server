@@ -833,9 +833,27 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       error: {
         code: err?.code || 'BEDROCK_FAILED',
         message: err?.message || String(err),
-        // Best-effort details to help diagnose environment/config issues without changing success shape.
+
+        /**
+         * Best-effort diagnostics to help identify common runtime/config failures:
+         * - missing region
+         * - invalid model id / inference profile
+         * - access denied
+         * - throttling / throughput exceeded
+         *
+         * We intentionally avoid including credentials or full request bodies.
+         */
+        name: err?.name || null,
         httpStatusCode: err?.$metadata?.httpStatusCode ?? null,
-        name: err?.name || null
+        requestId: err?.$metadata?.requestId ?? null,
+        extendedRequestId: err?.$metadata?.extendedRequestId ?? null,
+        cfId: err?.$metadata?.cfId ?? null,
+        attempts: err?.$metadata?.attempts ?? null,
+        totalRetryDelay: err?.$metadata?.totalRetryDelay ?? null,
+
+        // Sometimes AWS errors include machine-readable hints:
+        fault: err?.$fault ?? null,
+        service: err?.$service ?? null
       }
     };
   }
