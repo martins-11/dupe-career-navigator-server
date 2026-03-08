@@ -30,6 +30,20 @@ const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-be
 const DEFAULT_MODEL_ID = 'anthropic.claude-3-5-sonnet-20240620-v1:0';
 
 /**
+ * Resolve a Bedrock model id in priority order.
+ * This allows recommendations to use the same configured model id as persona generation
+ * (BEDROCK_MODEL_ID) when a dedicated recommendations model id is not provided.
+ */
+function _resolveModelId({ override = null, envKeys = [] } = {}) {
+  if (override && String(override).trim()) return String(override).trim();
+  for (const key of envKeys) {
+    const val = process.env[key];
+    if (val && String(val).trim()) return String(val).trim();
+  }
+  return DEFAULT_MODEL_ID;
+}
+
+/**
  * Extract text content from a Bedrock Claude response.
  * Claude "messages" API returns something like:
  * {
@@ -360,7 +374,10 @@ function _fallbackBedrockJsonRoles() {
  * @returns {Promise<{ roles: Array, rawText: string, prompt: string, modelId: string }>}
  */
 async function generateTargetedRoles(userPersona, options = {}) {
-  const modelId = options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID;
+  const modelId = _resolveModelId({
+    override: options.modelId,
+    envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+  });
 
   const prompt = _buildStrictJsonPrompt(userPersona);
 
@@ -491,7 +508,10 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
       roles: normalized.slice(0, 5),
       bedrockJsonRoles: fallbackBedrockJsonRoles,
       usedFallback: true,
-      modelId: options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID,
+      modelId: _resolveModelId({
+        override: options.modelId,
+        envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+      }),
       prompt: _buildStrictJsonPrompt(userPersona),
       error: { code: errorCode, message: err?.message || String(err) }
     };
@@ -723,11 +743,10 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
  */
 async function getInitialRecommendations(finalPersona, options = {}) {
   // Allow a dedicated model override for initial recommendations (often configured as an inference profile ARN/ID).
-  const modelId =
-    options.modelId ||
-    process.env.BEDROCK_RECOMMENDATIONS_MODEL_ID ||
-    process.env.BEDROCK_ROLE_MODEL_ID ||
-    DEFAULT_MODEL_ID;
+  const modelId = _resolveModelId({
+    override: options.modelId,
+    envKeys: ['BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+  });
 
   const prompt = _buildInitialRecommendationsPrompt(finalPersona, { context: options?.context || null });
 
