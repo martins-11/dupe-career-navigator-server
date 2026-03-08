@@ -15,7 +15,7 @@ const {
   RoleCompareResponseSchema
 } = require('../schemas/holisticPersonaSchemas');
 
-const { generateInitialRecommendationsPersonaDrivenOnetGrounded } = require('../services/recommendationsInitialService');
+const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = require('../services/recommendationsInitialService');
 
 const router = express.Router();
 
@@ -45,7 +45,7 @@ function getInitialRecommendationsHandler() {
  * PUBLIC_INTERFACE
  * GET /api/recommendations/initial
  *
- * Persona-driven + O*NET-grounded initial recommendations (exactly 5 roles).
+ * Persona-driven initial recommendations (exactly 5 roles), generated purely via AWS Bedrock.
  *
  * Triggered by the frontend when "Finalized Persona" is reached, to populate a RecommendationGrid.
  *
@@ -118,9 +118,9 @@ async function handleInitialRecommendations(req, res) {
       throw err;
     }
 
-    // 2) O*NET-grounded + Bedrock-generated roles (exactly 5), with scored results
-    // NOTE: This must be persona-driven; no static fallback unless O*NET and/or Bedrock fail.
-    const result = await generateInitialRecommendationsPersonaDrivenOnetGrounded({
+    // 2) Bedrock-only roles (exactly 5), with scored results.
+    // NOTE: BedrockService internally provides a deterministic fallback to keep the UI stable.
+    const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: personaIdRaw
     });

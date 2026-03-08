@@ -7,7 +7,7 @@ const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../
 const recommendationsService = require('../services/recommendationsService');
 const bedrockService = require('../services/bedrockService');
 const personasRepo = require('../repositories/personasRepoAdapter');
-const onetService = require('../services/onetService');
+
 const { validateThreeTwoBalance, buildThreeTwoReport, scoreRoleCompatibility } = require('../services/scoringEngine');
 const {
   extractFinalPersonaObject,
@@ -106,10 +106,17 @@ async function _loadRolesForFilterOptions() {
  */
 router.get('/industries', async (req, res) => {
   try {
-    // O*NET does not provide an "industry" facet in the same way our seed catalog did.
-    // For now, keep this endpoint stable and return an empty list (frontend handles it).
-    // This is intentionally an ARRAY (not {industries:[]}) per backend contract in this file.
-    return res.json([]);
+    const roles = await _loadRolesForFilterOptions();
+    const industries = Array.from(
+      new Map(
+        (Array.isArray(roles) ? roles : [])
+          .map((r) => _normalizeLabel(r?.industry))
+          .filter(Boolean)
+          .map((label) => [label.toLowerCase(), label])
+      ).values()
+    ).sort(_sortCaseInsensitive);
+
+    return res.json(Array.isArray(industries) ? industries : []);
   } catch (_) {
     return res.json([]);
   }
@@ -127,11 +134,17 @@ router.get('/industries', async (req, res) => {
  */
 router.get('/skills', async (req, res) => {
   try {
-    const seedKeyword = req.query?.seed ? String(req.query.seed).trim() : 'developer';
-    const maxRaw = req.query?.max != null ? Number(req.query.max) : 60;
-    const max = Number.isFinite(maxRaw) ? Math.max(10, Math.min(120, Math.round(maxRaw))) : 60;
+    const roles = await _loadRolesForFilterOptions();
+    const all = [];
+    for (const r of Array.isArray(roles) ? roles : []) {
+      const core = Array.isArray(r?.coreSkills) ? r.coreSkills : Array.isArray(r?.skills_required) ? r.skills_required : [];
+      for (const s of core) {
+        const label = _normalizeLabel(typeof s === 'string' ? s : s?.name || s?.skill || s?.label);
+        if (label) all.push(label);
+      }
+    }
 
-    const { skills } = await onetService.getExploreFilterOptions({ seedKeyword, max });
+    const skills = Array.from(new Map(all.map((s) => [s.toLowerCase(), s])).values()).sort(_sortCaseInsensitive);
     return res.json(Array.isArray(skills) ? skills : []);
   } catch (_) {
     // Per contract: always return [] with 200 on error
@@ -210,8 +223,12 @@ router.get('/autocomplete', async (req, res) => {
 
     if (query.length < 2) return res.json([]);
 
-    const titles = await onetService.autocompleteOccupations({ query, limit });
-    return res.json(Array.isArray(titles) ? titles : []);
+    const roles = await _loadRolesForFilterOptions();
+    const titles = _deriveUniqueTitlesFromRoles(roles);
+    const qn = query.toLowerCase();
+
+    const filtered = titles.filter((t) => t.toLowerCase().includes(qn)).slice(0, limit);
+    return res.json(filtered);
   } catch (err) {
     return sendError(res, err);
   }
