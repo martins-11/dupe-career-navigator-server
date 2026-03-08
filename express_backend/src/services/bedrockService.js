@@ -485,6 +485,29 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
     const fallbackBedrockJsonRoles = _fallbackBedrockJsonRoles();
     const normalized = _validateAndNormalizeGeneratedRoles(fallbackBedrockJsonRoles);
 
+    const errorCode = err?.code || err?.name || 'BEDROCK_FAILED';
+
+    return {
+      roles: normalized.slice(0, 5),
+      bedrockJsonRoles: fallbackBedrockJsonRoles,
+      usedFallback: true,
+      modelId: options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID,
+      prompt: _buildStrictJsonPrompt(userPersona),
+      error: { code: errorCode, message: err?.message || String(err) }
+    };
+    }
+
+    return {
+      roles: result.roles,
+      bedrockJsonRoles: null,
+      usedFallback: false,
+      modelId: result.modelId,
+      prompt: result.prompt
+    };
+  } catch (err) {
+    const fallbackBedrockJsonRoles = _fallbackBedrockJsonRoles();
+    const normalized = _validateAndNormalizeGeneratedRoles(fallbackBedrockJsonRoles);
+
     return {
       roles: normalized.slice(0, 5),
       bedrockJsonRoles: fallbackBedrockJsonRoles,
@@ -825,13 +848,15 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       });
     }
 
+    const errorCode = err?.code || err?.name || 'BEDROCK_FAILED';
+
     return {
       roles: padded.slice(0, 5),
       usedFallback: true,
       modelId,
       prompt,
       error: {
-        code: err?.code || 'BEDROCK_FAILED',
+        code: errorCode,
         message: err?.message || String(err),
 
         /**

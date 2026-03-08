@@ -113,40 +113,68 @@ async function handleInitialRecommendations(req, res) {
     //   validated mastery/growth areas.
     // - Therefore, we prefer personasRepo.getFinal(personaId) first.
     // - As a compatibility fallback (older data), we can still use latest persona version.
-    const [personaRow, finalWrap, latestVersion] = await Promise.allSettled([
+    const [personaRow, finalWrap, latestVersion, draftWrap] = await Promise.allSettled([
       personasRepo.getPersonaById(personaIdRaw),
       personasRepo.getFinal(personaIdRaw),
-      personasRepo.getLatestPersonaVersion(personaIdRaw)
+      personasRepo.getLatestPersonaVersion(personaIdRaw),
+      personasRepo.getDraft(personaIdRaw)
     ]);
 
+    const personaRowValue = personaRow.status === 'fulfilled' ? personaRow.value : null;
     const finalWrapValue = finalWrap.status === 'fulfilled' ? finalWrap.value : null;
     const latestVersionValue = latestVersion.status === 'fulfilled' ? latestVersion.value : null;
+    const draftWrapValue = draftWrap.status === 'fulfilled' ? draftWrap.value : null;
 
-    // Prefer explicit finalized persona blob, then fallback to versioned personaJson (if present),
-    // then fallback to request-provided JSON (additive; keeps endpoint live even before persistence).
+    const coercePersonaJson = (value) => {
+      if (!value) return null;
+      let next = value;
+
+      if (typeof next === 'string') {
+        try {
+          next = JSON.parse(next);
+        } catch (_) {
+          return null;
+        }
+      }
+
+      if (!next || typeof next !== 'object' || Array.isArray(next)) return null;
+
+      return (
+        next.finalJson ||
+        next.personaJson ||
+        next.final ||
+        next.persona ||
+        next.draftJson ||
+        next.draft ||
+        next
+      );
+    };
+
+    // Prefer explicit finalized persona blob, then fallback to versioned personaJson,
+    // then fallback to latest draft (if final is missing), then fallback to request-provided JSON.
     let finalPersona =
-      (finalWrapValue && finalWrapValue.finalJson) ||
-      (latestVersionValue && latestVersionValue.personaJson) ||
-      finalPersonaFromRequest ||
+      coercePersonaJson(finalWrapValue?.finalJson || finalWrapValue) ||
+      coercePersonaJson(latestVersionValue?.personaJson || latestVersionValue) ||
+      coercePersonaJson(draftWrapValue?.draftJson || draftWrapValue) ||
+      coercePersonaJson(finalPersonaFromRequest) ||
       null;
 
-    // MySQL repo may return persona_json/final_json as a string; parse if needed.
-    if (typeof finalPersona === 'string') {
-      try {
-        finalPersona = JSON.parse(finalPersona);
-      } catch (_) {
-        // leave as string
-      }
-    }
+    const usedPersonaFallback = !finalPersona;
 
-    // Ensure we got a real object.
-    if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
-      const err = new Error(
-        `Finalized Persona not found for personaId=${personaIdRaw}. Provide finalPersonaJson to generate recommendations without DB persistence.`
-      );
-      err.code = 'final_persona_not_found';
-      err.httpStatus = 404;
-      throw err;
+    if (!finalPersona) {
+      const titleFallback = String(personaRowValue?.title || 'Professional').trim() || 'Professional';
+      finalPersona = {
+        title: titleFallback,
+        summary: '',
+        skills: [],
+        validated_skills: [],
+        profile: {
+          headline: titleFallback,
+          seniority: null,
+          industry: null,
+          location: null
+        }
+      };
     }
 
     // 2) Bedrock-only roles (exactly 5), with scored results.
@@ -177,7 +205,13 @@ async function handleInitialRecommendations(req, res) {
       // ignore persistence failures
     }
 
-    return res.json({ roles, meta: result?.meta || undefined });
+    const meta = {
+      ...(result?.meta || {}),
+      endpointFallbackUsed: usedPersonaFallback,
+      personaFallbackReason: usedPersonaFallback ? 'FINAL_PERSONA_MISSING' : null
+    };
+
+    return res.json({ roles, meta });
   } catch (err) {
     return sendError(res, err);
   }
