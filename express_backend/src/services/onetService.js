@@ -33,21 +33,54 @@ function _getOnetCredentials() {
       '',
   ).trim();
 
-  // Prefer explicit username if present; otherwise fall back to "apikey" when only an API key is supplied.
+  /**
+   * Username can be configured under multiple aliases depending on environment/platform.
+   * We support a broader set here because the failure mode (ONET_NOT_CONFIGURED) otherwise looks
+   * identical to "env not loaded", which slows down troubleshooting.
+   */
   const username = String(
     process.env.ONET_USERNAME ||
+      process.env.ONET_USER ||
+      process.env.ONET_ACCOUNT_ID ||
+      process.env.ONET_API_USERNAME ||
       process.env.ONET_API_KEY_USERNAME ||
       process.env.REACT_APP_ONET_USERNAME ||
+      // Only use the API-key-only fallback username if we do have a password-like value.
       (password ? 'apikey' : '') ||
       '',
   ).trim();
 
   if (!username || !password) {
     const err = new Error(
-      'O*NET credentials are not configured. Set ONET_PASSWORD (or ONET_API_KEY / REACT_APP_ONET_API_KEY) and optionally ONET_USERNAME.',
+      'O*NET credentials are not configured. Set ONET_PASSWORD (or ONET_API_KEY / REACT_APP_ONET_API_KEY) and ONET_USERNAME (or ONET_USER / ONET_ACCOUNT_ID).',
     );
     err.code = 'ONET_NOT_CONFIGURED';
     err.httpStatus = 503;
+
+    // IMPORTANT: Do not leak secrets; only report presence/absence and the username value length.
+    err.details = {
+      missing: {
+        username: !username,
+        password: !password,
+      },
+      envPresence: {
+        ONET_USERNAME: Boolean(process.env.ONET_USERNAME),
+        ONET_USER: Boolean(process.env.ONET_USER),
+        ONET_ACCOUNT_ID: Boolean(process.env.ONET_ACCOUNT_ID),
+        ONET_API_USERNAME: Boolean(process.env.ONET_API_USERNAME),
+        ONET_API_KEY_USERNAME: Boolean(process.env.ONET_API_KEY_USERNAME),
+        REACT_APP_ONET_USERNAME: Boolean(process.env.REACT_APP_ONET_USERNAME),
+
+        ONET_PASSWORD: Boolean(process.env.ONET_PASSWORD),
+        ONET_API_KEY: Boolean(process.env.ONET_API_KEY),
+        REACT_APP_ONET_API_KEY: Boolean(process.env.REACT_APP_ONET_API_KEY),
+      },
+      resolved: {
+        usernameLength: username ? username.length : 0,
+        passwordLength: password ? password.length : 0,
+      },
+    };
+
     throw err;
   }
 
