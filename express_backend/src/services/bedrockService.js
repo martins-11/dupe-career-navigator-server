@@ -262,12 +262,34 @@ function _buildStrictJsonPrompt(userPersona) {
 }
 
 function _getBedrockClient() {
-  const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+  /**
+   * Bedrock client configuration.
+   *
+   * Credentials:
+   * - Resolved by AWS SDK v3 default provider chain (env vars, shared config, SSO, instance/role, etc.)
+   *
+   * Region:
+   * - In some preview environments, AWS credentials are present but AWS_REGION is not injected into
+   *   the Node process. Support multiple standard env var names and an explicit BEDROCK_REGION override.
+   */
+  const region =
+    process.env.BEDROCK_REGION ||
+    process.env.AWS_REGION ||
+    process.env.AWS_DEFAULT_REGION ||
+    process.env.AMAZON_REGION ||
+    process.env.AWS_SDK_REGION;
+
   if (!region) {
-    const err = new Error('Missing AWS_REGION (or AWS_DEFAULT_REGION) for BedrockRuntimeClient.');
+    const err = new Error(
+      'Missing AWS region for BedrockRuntimeClient. Set BEDROCK_REGION, AWS_REGION, or AWS_DEFAULT_REGION.'
+    );
     err.code = 'missing_aws_region';
+    err.details = {
+      tried: ['BEDROCK_REGION', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AMAZON_REGION', 'AWS_SDK_REGION']
+    };
     throw err;
   }
+
   return new BedrockRuntimeClient({ region });
 }
 
@@ -698,7 +720,12 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
  * @returns {Promise<{ roles: Array, usedFallback: boolean, modelId: string, prompt: string, error?: object }>}
  */
 async function getInitialRecommendations(finalPersona, options = {}) {
-  const modelId = options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID;
+  // Allow a dedicated model override for initial recommendations (often configured as an inference profile ARN/ID).
+  const modelId =
+    options.modelId ||
+    process.env.BEDROCK_RECOMMENDATIONS_MODEL_ID ||
+    process.env.BEDROCK_ROLE_MODEL_ID ||
+    DEFAULT_MODEL_ID;
 
   const prompt = _buildInitialRecommendationsPrompt(finalPersona, { context: options?.context || null });
 
@@ -803,7 +830,31 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       usedFallback: true,
       modelId,
       prompt,
-      error: { code: err?.code || 'BEDROCK_FAILED', message: err?.message || String(err) }
+      error: {
+        code: err?.code || 'BEDROCK_FAILED',
+        message: err?.message || String(err),
+
+        /**
+         * Best-effort diagnostics to help identify common runtime/config failures:
+         * - missing region
+         * - invalid model id / inference profile
+         * - access denied
+         * - throttling / throughput exceeded
+         *
+         * We intentionally avoid including credentials or full request bodies.
+         */
+        name: err?.name || null,
+        httpStatusCode: err?.$metadata?.httpStatusCode ?? null,
+        requestId: err?.$metadata?.requestId ?? null,
+        extendedRequestId: err?.$metadata?.extendedRequestId ?? null,
+        cfId: err?.$metadata?.cfId ?? null,
+        attempts: err?.$metadata?.attempts ?? null,
+        totalRetryDelay: err?.$metadata?.totalRetryDelay ?? null,
+
+        // Sometimes AWS errors include machine-readable hints:
+        fault: err?.$fault ?? null,
+        service: err?.$service ?? null
+      }
     };
   }
 }

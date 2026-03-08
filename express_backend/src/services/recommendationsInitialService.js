@@ -1,55 +1,15 @@
 'use strict';
 
-const onetService = require('./onetService');
 const bedrockService = require('./bedrockService');
 const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine');
-
-function _extractPersonaSkillNames(finalPersona) {
-  const p = finalPersona && typeof finalPersona === 'object' ? finalPersona : {};
-  const candidates = [p.validated_skills, p.validatedSkills, p.skills, p.core_skills, p.coreSkills];
-
-  for (const arr of candidates) {
-    if (Array.isArray(arr) && arr.length) {
-      return arr
-        .map((x) => (typeof x === 'string' ? x : x?.name || x?.skill || x?.skill_name || x?.label))
-        .map((s) => String(s || '').trim())
-        .filter(Boolean)
-        .slice(0, 30);
-    }
-  }
-
-  const profCandidates = [
-    p.skills_with_proficiency,
-    p.skillsWithProficiency,
-    p.user_skills,
-    p.userSkills,
-    p.skillProficiencies
-  ];
-  for (const arr of profCandidates) {
-    if (Array.isArray(arr) && arr.length) {
-      return arr
-        .map((x) => (typeof x === 'string' ? x : x?.name || x?.skill || x?.skill_name || x?.label))
-        .map((s) => String(s || '').trim())
-        .filter(Boolean)
-        .slice(0, 30);
-    }
-  }
-
-  return [];
-}
 
 function _extractPersonaSkillsWithProficiency(finalPersona) {
   /**
    * Extract proficiency-bearing skills from a Finalized Persona.
    *
    * IMPORTANT:
-   * - /api/recommendations/initial scoring (compatibilityScore + threeTwoReport) is only meaningful
-   *   when we have proficiency-bearing skills (name + percent).
-   * - The "finalized persona" can arrive in multiple shapes:
-   *   1) legacy: { skills_with_proficiency: [{name, proficiency}, ...] }
-   *   2) legacy: { skillProficiencies: [{skillName, proficiencyPercent}, ...] }
-   *   3) holistic-final: { skills: [{ name, proficiency }, ...] }  <-- common current format
-   *   4) other variants: user_skills, proficiencies, etc.
+   * - Compatibility scoring is only meaningful when we have proficiency-bearing skills (name + percent).
+   * - The finalized persona can arrive in multiple shapes; we support common variants.
    *
    * If we only have string skill names (no proficiency), scoring becomes 0 and threeTwoReport
    * becomes not_validated. In that case we still return roles, but we do NOT fabricate proficiencies.
@@ -107,56 +67,6 @@ function _extractPersonaSkillsWithProficiency(finalPersona) {
   return [];
 }
 
-function _uniqStringsCaseInsensitive(items) {
-  const seen = new Set();
-  const out = [];
-  for (const it of Array.isArray(items) ? items : []) {
-    const s = String(it || '').trim();
-    if (!s) continue;
-    const k = s.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(s);
-  }
-  return out;
-}
-
-function _safeSlice(arr, n) {
-  return (Array.isArray(arr) ? arr : []).slice(0, n);
-}
-
-async function _buildOnetGroundingContext(finalPersona) {
-  const p = finalPersona && typeof finalPersona === 'object' ? finalPersona : {};
-  const headline = String(p.current_role || p.currentRole || p.profile?.headline || p.title || '').trim() || '';
-  const industry = String(p.industry || p.profile?.industry || '').trim() || '';
-  const skills = _extractPersonaSkillNames(p);
-
-  const keyword = headline || industry || (skills.length ? skills[0] : '') || 'developer';
-
-  const occupations = await onetService.searchOccupations({ keyword, start: 1, end: 25 });
-  const topOccs = _safeSlice(occupations, 4);
-
-  const settled = await Promise.allSettled(
-    topOccs.map(async (o) => {
-      const details = await onetService.getOccupationDetails({ code: o.code });
-      return {
-        code: o.code,
-        title: o.title,
-        description: details.description || o.description || null,
-        tasks: _safeSlice(details.tasks, 6),
-        skills: _safeSlice(details.skills, 18)
-      };
-    })
-  );
-
-  const detailed = settled.filter((r) => r.status === 'fulfilled').map((r) => r.value);
-  const groundingSkills = _uniqStringsCaseInsensitive(
-    detailed.flatMap((d) => (Array.isArray(d.skills) ? d.skills : []))
-  ).slice(0, 40);
-
-  return { keywordUsed: keyword, occupations: detailed, groundingSkills };
-}
-
 function _ensureExactlyFiveRoles(roles) {
   const arr = Array.isArray(roles) ? roles : [];
   if (arr.length === 5) return arr;
@@ -187,16 +97,12 @@ function _scoreRoles(finalPersona, roles) {
     const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, requiredSkills);
     const compat = scoreRoleCompatibility(userSkillsForScoring, requiredSkills);
 
-    // If we have proficiencies and role skills, score should generally be > 0.
-    // We never "invent" a score; we only expose debug metadata to clarify why it is 0.
-    const compatibilityScore = compat.score;
-
     return {
       ...r,
       key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
       required_skills: requiredSkills,
       threeTwoReport,
-      compatibilityScore,
+      compatibilityScore: compat.score,
       match_metadata: {
         ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
         scoring: {
@@ -209,23 +115,17 @@ function _scoreRoles(finalPersona, roles) {
 }
 
 // PUBLIC_INTERFACE
-async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPersona, personaId } = {}) {
+async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPersona, personaId } = {}) {
   /**
-   * Generate initial recommendations:
-   * - Loads O*NET grounding context (occupations/skills/tasks) best-effort
-   * - Calls Bedrock for EXACTLY 5 roles (passing grounding context when available)
-   * - Adds compatibilityScore + threeTwoReport
+   * Generate initial recommendations (EXACTLY 5 roles) using ONLY AWS Bedrock.
    *
-   * Fallback policy (IMPORTANT):
-   * - If Bedrock succeeds => return Bedrock roles (even if Bedrock internally used its deterministic fallback).
-   * - If Bedrock fails => surface error when O*NET succeeded (502), otherwise (if O*NET also failed) surface 503.
-   * - This service MUST NOT unconditionally return generic/static roles when Bedrock is available.
+   * This refactor intentionally removes all O*NET usage/grounding.
    *
-   * Additionally:
-   * - Returns per-role match_metadata indicating:
-   *   - whether O*NET grounding was used
-   *   - whether Bedrock used its own fallback path
-   *   - whether persona proficiencies were present (and thus meaningful for scoring)
+   * Behavior:
+   * - Calls Bedrock for EXACTLY 5 roles (BedrockService has its own internal deterministic fallback).
+   * - Adds compatibilityScore + threeTwoReport (when persona proficiencies exist).
+   *
+   * @returns {Promise<{roles: Array, meta: object}>}
    */
   if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
     const err = new Error('finalPersona is required.');
@@ -235,95 +135,62 @@ async function generateInitialRecommendationsPersonaDrivenOnetGrounded({ finalPe
   }
 
   const profs = _extractPersonaSkillsWithProficiency(finalPersona);
-  const hasPersonaProficiencies =
-    Array.isArray(profs) &&
-    profs.some((x) => x && typeof x === 'object' && (x.proficiency != null || x.proficiencyPercent != null));
+  const hasPersonaProficiencies = Array.isArray(profs) && profs.length > 0;
 
-  let onetContext = null;
-  let onetError = null;
+  // Bedrock generation (safe wrapper is inside bedrockService.getInitialRecommendations)
+  const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, { context: null });
 
-  try {
-    onetContext = await _buildOnetGroundingContext(finalPersona);
-  } catch (e) {
-    onetError = e;
-    onetContext = null;
-  }
+  const roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
 
-  // Always attempt Bedrock first; only fall back (by throwing) if Bedrock fails.
-  try {
-    const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
-      context: onetContext ? { onetGrounding: onetContext } : null
-    });
+  // Sanitize bedrock error object (if any) into a stable, non-sensitive meta field.
+  const bedrockError =
+    bedrockResult?.usedFallback && bedrockResult?.error && typeof bedrockResult.error === 'object'
+      ? {
+          code: bedrockResult.error.code || 'BEDROCK_FAILED',
+          message: bedrockResult.error.message || null,
+          name: bedrockResult.error.name || null,
+          httpStatusCode: bedrockResult.error.httpStatusCode ?? null,
+          requestId: bedrockResult.error.requestId ?? null,
+          extendedRequestId: bedrockResult.error.extendedRequestId ?? null,
+          cfId: bedrockResult.error.cfId ?? null,
+          attempts: bedrockResult.error.attempts ?? null,
+          totalRetryDelay: bedrockResult.error.totalRetryDelay ?? null,
+          fault: bedrockResult.error.fault ?? null,
+          service: bedrockResult.error.service ?? null
+        }
+      : null;
 
-    const roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
-    const scored = _scoreRoles(finalPersona, roles).map((r) => ({
-      ...r,
-      match_metadata: {
-        ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
-        persona: {
-          personaId: personaId || null,
-          usedPersonaProficiencies: hasPersonaProficiencies
-        },
-        grounding: onetContext
-          ? {
-              source: 'onet',
-              keywordUsed: onetContext.keywordUsed,
-              occupationsUsed: onetContext.occupations.map((o) => ({ code: o.code, title: o.title }))
-            }
-          : {
-              source: 'none',
-              onetFailed: Boolean(onetError)
-            },
-        bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
-        bedrockModelId: bedrockResult?.modelId || null
-      }
-    }));
-
-    return {
-      roles: scored,
-      meta: {
+  const scored = _scoreRoles(finalPersona, roles).map((r) => ({
+    ...r,
+    match_metadata: {
+      ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+      persona: {
         personaId: personaId || null,
-        hasPersonaProficiencies,
-        onetGrounded: Boolean(onetContext),
-        onetError: onetError ? { code: onetError.code, message: onetError.message } : null,
-        bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
-        // Endpoint-level fallback is NOT used in the success path.
-        // BedrockService may still set usedFallback=true internally, which we surface separately.
-        endpointFallbackUsed: false
-      }
-    };
-  } catch (bedrockErr) {
-    // Bedrock failed. Per requirements: only "fallback" when Bedrock/O*NET fail.
-    // Here we fail fast (502/503) so the caller can see it's not a persona-driven success.
-    if (onetContext) {
-      const err = new Error(
-        `Bedrock failed to generate initial recommendations: ${bedrockErr?.message || String(bedrockErr)}`
-      );
-      err.code = bedrockErr?.code || 'BEDROCK_FAILED';
-      err.httpStatus = 502;
-      err.details = {
-        personaId: personaId || null,
-        onetGrounded: true,
-        onetKeywordUsed: onetContext.keywordUsed,
-        onetOccupationsUsed: onetContext.occupations.map((o) => ({ code: o.code, title: o.title }))
-      };
-      throw err;
+        usedPersonaProficiencies: hasPersonaProficiencies
+      },
+      grounding: {
+        source: 'none'
+      },
+      bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
+      bedrockModelId: bedrockResult?.modelId || null,
+      // Optional per-role visibility into the cause of fallback (useful when debugging UI cards).
+      ...(bedrockError ? { bedrockError } : {})
     }
+  }));
 
-    const err = new Error(
-      `Initial recommendations failed (Bedrock unavailable; O*NET also unavailable or not configured): ${
-        bedrockErr?.message || String(bedrockErr)
-      }`
-    );
-    err.code = 'INITIAL_RECOMMENDATIONS_UNAVAILABLE';
-    err.httpStatus = 503;
-    err.details = {
+  return {
+    roles: scored,
+    meta: {
       personaId: personaId || null,
-      bedrock: { code: bedrockErr?.code || null, message: bedrockErr?.message || String(bedrockErr) },
-      onet: onetError ? { code: onetError.code || null, message: onetError.message || String(onetError) } : null
-    };
-    throw err;
-  }
+      hasPersonaProficiencies,
+      onetGrounded: false,
+      onetError: null,
+      bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
+      endpointFallbackUsed: false,
+      // Primary diagnostic payload (use this to see why bedrockUsedFallback=true).
+      bedrockError
+    }
+  };
 }
 
-module.exports = { generateInitialRecommendationsPersonaDrivenOnetGrounded };
+module.exports = { generateInitialRecommendationsPersonaDrivenBedrockOnly };

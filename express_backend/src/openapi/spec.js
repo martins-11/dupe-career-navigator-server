@@ -1948,13 +1948,13 @@ const openapiDefinition = {
         tags: ['Recommendations'],
         summary: 'Initial persona-driven recommendations (5 roles)',
         description:
-          'Loads the Finalized Persona by personaId, uses O*NET occupations/skills as grounding context, calls Bedrock to generate EXACTLY 5 personalized role recommendations, and returns scored results (compatibilityScore + threeTwoReport).',
+          'Loads the Finalized Persona by personaId and returns EXACTLY 5 personalized role recommendations generated via AWS Bedrock, including compatibilityScore + threeTwoReport.',
         parameters: [
           {
             name: 'personaId',
             in: 'query',
             required: true,
-            schema: { type: 'string' },
+            schema: { type: 'string', minLength: 1 },
             description: 'Persona identifier used to load the Finalized Persona JSON.'
           }
         ],
@@ -1973,25 +1973,88 @@ const openapiDefinition = {
                       maxItems: 5,
                       items: {
                         type: 'object',
-                        additionalProperties: true,
+                        additionalProperties: false,
                         properties: {
-                          role_id: { type: 'string' },
-                          role_title: { type: 'string' },
-                          industry: { type: 'string' },
-                          salary_lpa_range: { type: 'string' },
-                          experience_range: { type: 'string' },
-                          description: { type: 'string' },
-                          key_responsibilities: { type: 'array', items: { type: 'string' } },
-                          required_skills: { type: 'array', items: { type: 'string' } },
-                          compatibilityScore: { type: 'integer', minimum: 0, maximum: 100 },
-                          threeTwoReport: { type: 'object', additionalProperties: true }
+                          role_id: { type: 'string', minLength: 1 },
+                          role_title: { type: 'string', minLength: 1 },
+                          industry: { type: 'string', minLength: 1 },
+                          salary_lpa_range: { type: 'string', minLength: 1, example: '₹18–₹30 LPA' },
+                          experience_range: { type: 'string', nullable: true, example: '3–5 years' },
+                          description: {
+                            type: 'string',
+                            nullable: true,
+                            example:
+                              'Designs and builds backend services and APIs for high-traffic applications. Focuses on reliability, performance, and clean integration patterns.'
+                          },
+                          key_responsibilities: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            minItems: 0,
+                            example: [
+                              'Build and maintain high-throughput APIs and background jobs',
+                              'Optimize data models and query performance for scale',
+                              'Implement monitoring, alerting, and incident-ready runbooks'
+                            ]
+                          },
+                          required_skills: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            minItems: 1,
+                            example: ['Node.js', 'Express', 'SQL', 'API Design', 'System Design', 'Observability']
+                          },
+                          compatibilityScore: { type: 'number', minimum: 0, maximum: 100, example: 74 },
+                          threeTwoReport: {
+                            type: 'object',
+                            additionalProperties: true,
+                            description: 'Report produced by scoringEngine.buildThreeTwoReport.'
+                          },
+                          match_metadata: {
+                            type: 'object',
+                            additionalProperties: true,
+                            description: 'Metadata about scoring and Bedrock fallback/model id.'
+                          }
                         },
-                        required: ['role_id', 'role_title', 'industry', 'required_skills', 'compatibilityScore', 'threeTwoReport']
+                        required: [
+                          'role_id',
+                          'role_title',
+                          'industry',
+                          'salary_lpa_range',
+                          'experience_range',
+                          'description',
+                          'key_responsibilities',
+                          'required_skills',
+                          'compatibilityScore',
+                          'threeTwoReport',
+                          'match_metadata'
+                        ]
                       }
                     },
                     meta: { type: 'object', nullable: true, additionalProperties: true }
                   },
                   required: ['roles']
+                },
+                example: {
+                  roles: [
+                    {
+                      role_id: 'bedrock-rec-backend-engineer-node-js',
+                      role_title: 'Backend Engineer (Node.js)',
+                      industry: 'Technology',
+                      salary_lpa_range: '₹22–₹38 LPA',
+                      experience_range: '3–6 years',
+                      description:
+                        'Designs and operates scalable backend services and APIs used by multiple product surfaces. Focuses on performance, reliability, and observability in production.',
+                      key_responsibilities: [
+                        'Build and maintain high-throughput APIs',
+                        'Optimize database queries and service performance',
+                        'Implement monitoring, logging, and on-call readiness'
+                      ],
+                      required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability'],
+                      compatibilityScore: 78,
+                      threeTwoReport: { status: 'ok' },
+                      match_metadata: { source: 'bedrock_initial_recommendations', bedrockUsedFallback: false }
+                    }
+                  ],
+                  meta: { bedrockUsedFallback: false }
                 }
               }
             }
@@ -2009,7 +2072,7 @@ const openapiDefinition = {
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           503: {
-            description: 'Both Bedrock and O*NET unavailable',
+            description: 'Service unavailable',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
