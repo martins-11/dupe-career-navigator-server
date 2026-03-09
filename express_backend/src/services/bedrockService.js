@@ -312,7 +312,8 @@ function _extractRolesJsonArrayFromText(text) {
   const scoreArrayCandidate = (arr) => {
     if (!Array.isArray(arr) || arr.length === 0) return -Infinity;
 
-    const sample = arr.slice(0, 8);
+    // Look at a slightly larger sample; nested arrays are often short (3–8 items).
+    const sample = arr.slice(0, 10);
     let objectCount = 0;
     let stringCount = 0;
     let roleLikeObjectCount = 0;
@@ -326,6 +327,8 @@ function _extractRolesJsonArrayFromText(text) {
         objectCount += 1;
         const keys = Object.keys(el);
         const hitCount = keys.reduce((n, k) => (roleKeyHints.has(k) ? n + 1 : n), 0);
+
+        // Require at least 2 role-ish keys to be considered role-like.
         if (hitCount >= 2) roleLikeObjectCount += 1;
       }
     }
@@ -333,28 +336,24 @@ function _extractRolesJsonArrayFromText(text) {
     /**
      * Prefer the top-level array-of-role-objects.
      *
-     * Failure mode we are preventing (per user_input_ref):
-     * - Top-level: [ {title,..., key_responsibilities:[...]} , ...]
-     * - Nested:    key_responsibilities: [ "string", "string", "string" ]
-     * A naive "first JSON array" can grab the nested string[].
+     * Key failure mode (authoritative bug report):
+     * - Model output JSON is truncated/invalid, so JSON.parse(full) fails
+     * - Substring scanning finds *balanced* nested arrays like key_responsibilities (string[])
+     * - If scoring isn't decisive enough, we can still pick the nested array
      *
-     * Scoring heuristic:
-     * - Heavily reward role-like objects.
-     * - Strongly penalize string arrays.
+     * We therefore:
+     * - Heavily reward role-like object arrays.
+     * - Heavily penalize string arrays.
+     * - Add more weight to larger arrays (top-level role list is usually length 5).
      */
     let score = 0;
 
-    // Strong preference for role-like object elements.
-    score += roleLikeObjectCount * 100;
-
-    // Still reward generic object arrays (but far less than role-like).
+    score += roleLikeObjectCount * 140;
     score += objectCount * 10;
+    score -= stringCount * 110;
 
-    // Strongly penalize arrays of strings (typical nested arrays: responsibilities/skills).
-    score -= stringCount * 80;
-
-    // Bigger arrays are slightly more likely to be the top-level role list.
-    score += Math.min(arr.length, 50) * 0.2;
+    // Larger arrays are more likely to be the outer role list (commonly 5).
+    score += Math.min(arr.length, 50) * 0.7;
 
     return score;
   };
@@ -371,11 +370,14 @@ function _extractRolesJsonArrayFromText(text) {
 
       const score = scoreArrayCandidate(parsed);
 
-      // Tie-breaker: prefer the earliest candidate in the text (usually the top-level array).
-      if (
-        score > best.score ||
-        (score === best.score && (best.startIndex == null || s < best.startIndex))
-      ) {
+      // Tie-breaker: prefer the earliest candidate in the text (usually the outermost array).
+      // Also treat "nearly equal" scores as ties to avoid jitter when JSON is truncated and only
+      // partial candidates are parseable.
+      const EPS = 15; // tolerate small scoring differences
+      const isBetter = score > best.score + EPS;
+      const isNearTie = Math.abs(score - best.score) <= EPS;
+
+      if (isBetter || (isNearTie && (best.startIndex == null || s < best.startIndex))) {
         best = { score, array: parsed, extractedText: candidateText, parseError: null, startIndex: s };
       }
     } catch (e) {
