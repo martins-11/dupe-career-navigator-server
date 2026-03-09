@@ -81,6 +81,26 @@ function _statusForError(err) {
     return 422;
   }
 
+  /**
+   * Bedrock / upstream dependency error mapping.
+   *
+   * Why:
+   * - /api/recommendations/initial runs in strict mode (no fallback) by design.
+   * - Many Bedrock failures are *not* programmer bugs and should not look like opaque 500s.
+   * - We still return a 5xx, but with a consistent ErrorResponse JSON and a more accurate status:
+   *   - 503 for missing configuration needed to reach Bedrock
+   *   - 502 for Bedrock output/availability problems
+   */
+  if (code === 'missing_aws_region') return 503;
+
+  // Common “bedrock_*” codes thrown by bedrockService parsing/validation.
+  if (typeof code === 'string' && (code.startsWith('bedrock_') || code.startsWith('BEDROCK_'))) {
+    return 502;
+  }
+
+  // Route/service-level contract violation but still an upstream/generation failure.
+  if (code === 'initial_recommendations_invalid_count') return 502;
+
   // Allow route/service to specify httpStatus directly (kept narrow + controlled)
   if (err && Number.isInteger(err.httpStatus) && [400, 404, 422, 500].includes(err.httpStatus)) {
     return err.httpStatus;
