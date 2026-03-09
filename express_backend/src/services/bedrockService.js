@@ -207,6 +207,169 @@ function _extractJsonArrayFromText(text) {
   return { array: null, extractedText, parseError: null };
 }
 
+/**
+ * Extract the best candidate JSON array for "roles" from a Bedrock/LLM text response.
+ *
+ * Why this exists:
+ * - Claude may return an array of role objects that CONTAINS nested arrays like `key_responsibilities`.
+ * - A naive "first balanced [...]" extraction can accidentally select the nested string[] instead
+ *   of the top-level object[].
+ *
+ * Strategy:
+ * - Enumerate all balanced JSON array substrings in the cleaned response.
+ * - Parse each into a JS value and score it.
+ * - Prefer arrays where elements are objects with role-like keys; avoid arrays of strings.
+ *
+ * @param {string} text
+ * @returns {{ array: any[] | null, extractedText: string | null, parseError: Error | null }}
+ */
+function _extractRolesJsonArrayFromText(text) {
+  if (!text) return { array: null, extractedText: null, parseError: null };
+
+  let trimmed = text.trim();
+
+  // Strip markdown code fences if present.
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced && fenced[1]) {
+    trimmed = fenced[1].trim();
+  }
+
+  trimmed = trimmed
+    .replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '')
+    .trim();
+
+  // If the whole payload is parseable JSON, prefer that.
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return { array: parsed, extractedText: JSON.stringify(parsed), parseError: null };
+    if (parsed && typeof parsed === 'object') {
+      for (const k of ['roles', 'recommendations', 'items', 'data', 'results', 'output']) {
+        if (Array.isArray(parsed[k])) {
+          return { array: parsed[k], extractedText: JSON.stringify(parsed[k]), parseError: null };
+        }
+      }
+    }
+  } catch (_) {
+    // ignore; fall through
+  }
+
+  // Enumerate all balanced JSON arrays in the text, respecting JSON strings.
+  const starts = [];
+  for (let i = 0; i < trimmed.length; i += 1) if (trimmed[i] === '[') starts.push(i);
+  if (starts.length === 0) return { array: null, extractedText: null, parseError: null };
+
+  const extractBalancedArrayFrom = (start) => {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = start; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') inString = false;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '[') depth += 1;
+      if (ch === ']') depth -= 1;
+
+      if (depth === 0 && i >= start) {
+        const candidate = trimmed.slice(start, i + 1).trim();
+        if (candidate.startsWith('[') && candidate.endsWith(']')) return candidate;
+        return null;
+      }
+    }
+    return null;
+  };
+
+  const roleKeyHints = new Set([
+    'title',
+    'role_title',
+    'industry',
+    'salary_lpa_range',
+    'salary_range',
+    'experience_range',
+    'required_skills',
+    'skills_required',
+    'key_responsibilities',
+    'description'
+  ]);
+
+  const scoreArrayCandidate = (arr) => {
+    if (!Array.isArray(arr) || arr.length === 0) return -Infinity;
+
+    const sample = arr.slice(0, 8);
+    let objectCount = 0;
+    let stringCount = 0;
+    let roleLikeObjectCount = 0;
+
+    for (const el of sample) {
+      if (typeof el === 'string') {
+        stringCount += 1;
+        continue;
+      }
+      if (el && typeof el === 'object' && !Array.isArray(el)) {
+        objectCount += 1;
+        const keys = Object.keys(el);
+        const hitCount = keys.reduce((n, k) => (roleKeyHints.has(k) ? n + 1 : n), 0);
+        if (hitCount >= 2) roleLikeObjectCount += 1;
+      }
+    }
+
+    // Prefer object arrays; strongly prefer role-like objects.
+    // Penalize string arrays (these are often nested responsibilities/skills arrays).
+    let score = 0;
+    score += roleLikeObjectCount * 10;
+    score += objectCount * 2;
+    score -= stringCount * 5;
+
+    // Bigger arrays are slightly more likely to be the top-level role list.
+    score += Math.min(arr.length, 20) * 0.1;
+
+    return score;
+  };
+
+  let best = { score: -Infinity, array: null, extractedText: null, parseError: null };
+
+  for (const s of starts) {
+    const candidateText = extractBalancedArrayFrom(s);
+    if (!candidateText) continue;
+
+    try {
+      const parsed = JSON.parse(candidateText);
+      if (!Array.isArray(parsed)) continue;
+
+      const score = scoreArrayCandidate(parsed);
+      if (score > best.score) {
+        best = { score, array: parsed, extractedText: candidateText, parseError: null };
+      }
+    } catch (e) {
+      // keep the first parse error around in case we find nothing better
+      if (!best.parseError) best.parseError = e;
+    }
+  }
+
+  if (!best.array) {
+    return { array: null, extractedText: null, parseError: best.parseError || null };
+  }
+
+  return { array: best.array, extractedText: best.extractedText, parseError: null };
+}
+
 function _normStr(v) {
   return String(v || '').trim();
 }
@@ -1063,7 +1226,11 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const bedrockJson = JSON.parse(jsonStr);
 
     const rawText = _extractClaudeText(bedrockJson);
-    const extracted = _extractJsonArrayFromText(rawText);
+
+    // IMPORTANT:
+    // Initial recommendations must select the TOP-LEVEL array of role objects.
+    // A generic "first array" extractor can accidentally select nested arrays like key_responsibilities (string[]).
+    const extracted = _extractRolesJsonArrayFromText(rawText);
 
     if (debugRaw) {
       debugRawText = typeof rawText === 'string' ? rawText.slice(0, 5000) : null;
