@@ -1013,6 +1013,9 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     ]
   };
 
+  // When false, we throw instead of returning deterministic fallback roles.
+  const allowFallback = options?.allowFallback !== false;
+
   // ENV-gated diagnostics (do NOT enable by default in production).
   const debugRaw = String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true';
 
@@ -1108,6 +1111,12 @@ async function getInitialRecommendations(finalPersona, options = {}) {
         extractedArrayPreview: debugExtractedArrayPreview
       };
     }
+
+    // Strict mode: DO NOT fallback; surface the real failure.
+    if (!allowFallback) {
+      throw err;
+    }
+
     /**
      * Bedrock call failed OR output was invalid. We still return 5 roles for UI stability,
      * but we must clearly mark this as a BedrockService fallback (NOT an endpoint hardcoded fallback),

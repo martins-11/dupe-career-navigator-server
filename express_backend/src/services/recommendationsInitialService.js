@@ -115,15 +115,18 @@ function _scoreRoles(finalPersona, roles) {
 }
 
 // PUBLIC_INTERFACE
-async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPersona, personaId } = {}) {
+async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPersona, personaId, options = {} } = {}) {
   /**
    * Generate initial recommendations (EXACTLY 5 roles) using ONLY AWS Bedrock.
    *
    * This refactor intentionally removes all O*NET usage/grounding.
    *
    * Behavior:
-   * - Calls Bedrock for EXACTLY 5 roles (BedrockService has its own internal deterministic fallback).
+   * - Calls Bedrock for EXACTLY 5 roles.
    * - Adds compatibilityScore + threeTwoReport (when persona proficiencies exist).
+   *
+   * options (additive):
+   * - allowFallback: boolean (default true). If false, do NOT return deterministic fallback roles; throw instead.
    *
    * @returns {Promise<{roles: Array, meta: object}>}
    */
@@ -137,8 +140,12 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   const profs = _extractPersonaSkillsWithProficiency(finalPersona);
   const hasPersonaProficiencies = Array.isArray(profs) && profs.length > 0;
 
-  // Bedrock generation (safe wrapper is inside bedrockService.getInitialRecommendations)
-  const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, { context: null });
+  // Bedrock generation.
+  // If options.allowFallback === false, bedrockService will throw on invalid output instead of returning deterministic roles.
+  const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
+    context: null,
+    allowFallback: options?.allowFallback
+  });
 
   const roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
 

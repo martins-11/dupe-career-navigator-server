@@ -159,29 +159,34 @@ async function handleInitialRecommendations(req, res) {
       coercePersonaJson(finalPersonaFromRequest) ||
       null;
 
-    const usedPersonaFallback = !finalPersona;
-
+    // In strict mode, we do NOT proceed without a real persona.
+    // Otherwise Bedrock will be invoked with a placeholder and the user will see deterministic fallback roles,
+    // which is exactly the failure mode reported.
     if (!finalPersona) {
-      const titleFallback = String(personaRowValue?.title || 'Professional').trim() || 'Professional';
-      finalPersona = {
-        title: titleFallback,
-        summary: '',
-        skills: [],
-        validated_skills: [],
-        profile: {
-          headline: titleFallback,
-          seniority: null,
-          industry: null,
-          location: null
-        }
+      const err = new Error(
+        'Final persona is missing or not retrievable for this personaId. Cannot generate persona-based recommendations.'
+      );
+      err.code = 'final_persona_missing';
+      err.httpStatus = 422;
+      err.details = {
+        personaId: personaIdRaw,
+        resolutionTried: [
+          'personasRepo.getFinal(personaId)',
+          'personasRepo.getLatestPersonaVersion(personaId)',
+          'personasRepo.getDraft(personaId)',
+          'query.finalPersonaJson / body.finalPersona'
+        ],
+        dbConfigured: typeof personasRepo.isDbConfigured === 'function' ? personasRepo.isDbConfigured() : null
       };
+      throw err;
     }
 
     // 2) Bedrock-only roles (exactly 5), with scored results.
-    // NOTE: BedrockService internally provides a deterministic fallback to keep the UI stable.
+    // IMPORTANT: strict mode (no deterministic fallback). If Bedrock fails/invalid output, we want an error response.
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
-      personaId: personaIdRaw
+      personaId: personaIdRaw,
+      options: { allowFallback: false }
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
@@ -207,8 +212,8 @@ async function handleInitialRecommendations(req, res) {
 
     const meta = {
       ...(result?.meta || {}),
-      endpointFallbackUsed: usedPersonaFallback,
-      personaFallbackReason: usedPersonaFallback ? 'FINAL_PERSONA_MISSING' : null,
+      endpointFallbackUsed: false,
+      personaFallbackReason: null,
       // Frontend uses this to show a clear warning when the response is deterministic fallback
       // (often due to missing AWS_REGION / wrong model id / Bedrock throttling / invalid JSON).
       bedrockUsedFallback: Boolean(result?.meta?.bedrockUsedFallback)
