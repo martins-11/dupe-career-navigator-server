@@ -208,7 +208,10 @@ async function handleInitialRecommendations(req, res) {
     const meta = {
       ...(result?.meta || {}),
       endpointFallbackUsed: usedPersonaFallback,
-      personaFallbackReason: usedPersonaFallback ? 'FINAL_PERSONA_MISSING' : null
+      personaFallbackReason: usedPersonaFallback ? 'FINAL_PERSONA_MISSING' : null,
+      // Frontend uses this to show a clear warning when the response is deterministic fallback
+      // (often due to missing AWS_REGION / wrong model id / Bedrock throttling / invalid JSON).
+      bedrockUsedFallback: Boolean(result?.meta?.bedrockUsedFallback)
     };
 
     return res.json({ roles, meta });

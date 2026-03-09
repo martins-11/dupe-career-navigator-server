@@ -500,7 +500,7 @@ async function generateTargetedRoles(userPersona, options = {}) {
     err.details = {
       validCount: roles.length,
       rawText: rawText.slice(0, 5000),
-      parsedPreview: Array.isArray(parsed) ? parsed.slice(0, 5) : parsed
+      extractedArrayPreview: Array.isArray(extracted.array) ? extracted.array.slice(0, 5) : null
     };
     throw err;
   }
