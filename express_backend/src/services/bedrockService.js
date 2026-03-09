@@ -81,47 +81,60 @@ function _extractFirstJsonArray(text) {
    * - Ignore brackets that appear inside JSON strings (e.g., "notes": "foo ] bar").
    * - Handle escaped quotes inside strings.
    *
-   * This prevents false early termination which previously caused bedrock_no_json_array.
+   * Additional hardening:
+   * - Scan from every '[' occurrence, not just the first. Claude may emit other bracket-like
+   *   content earlier (or a non-JSON bracket) before the real JSON array.
    */
-  const start = trimmed.indexOf('[');
-  if (start < 0) return null;
+  const candidates = [];
+  for (let idx = 0; idx < trimmed.length; idx += 1) {
+    if (trimmed[idx] === '[') candidates.push(idx);
+  }
+  if (candidates.length === 0) return null;
 
-  let depth = 0;
-  let inString = false;
-  let escape = false;
+  const tryFrom = (start) => {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
 
-  for (let i = start; i < trimmed.length; i += 1) {
-    const ch = trimmed[i];
+    for (let i = start; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
 
-    if (inString) {
-      if (escape) {
-        escape = false;
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = false;
+        }
         continue;
       }
-      if (ch === '\\') {
-        escape = true;
-        continue;
-      }
+
       if (ch === '"') {
-        inString = false;
+        inString = true;
+        continue;
       }
-      continue;
+
+      if (ch === '[') depth += 1;
+      if (ch === ']') depth -= 1;
+
+      if (depth === 0 && i >= start) {
+        const candidate = trimmed.slice(start, i + 1).trim();
+        if (candidate.startsWith('[') && candidate.endsWith(']')) return candidate;
+        return null;
+      }
     }
 
-    // Not in a string
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
+    return null;
+  };
 
-    if (ch === '[') depth += 1;
-    if (ch === ']') depth -= 1;
-
-    if (depth === 0 && i >= start) {
-      const candidate = trimmed.slice(start, i + 1).trim();
-      if (candidate.startsWith('[') && candidate.endsWith(']')) return candidate;
-      return null;
-    }
+  for (const start of candidates) {
+    const candidate = tryFrom(start);
+    if (candidate) return candidate;
   }
 
   return null;
@@ -147,18 +160,33 @@ function _extractJsonArrayFromText(text) {
     trimmed = fenced[1].trim();
   }
 
+  /**
+   * Strip common Claude "XML-ish" wrappers (Bedrock/Anthropic sometimes emits these even when asked not to).
+   * We keep this conservative: remove only known tags, leaving inner content intact.
+   */
+  trimmed = trimmed
+    .replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '')
+    .trim();
+
   // Try parsing the whole payload as JSON.
   try {
     const parsed = JSON.parse(trimmed);
     if (Array.isArray(parsed)) {
       return { array: parsed, extractedText: JSON.stringify(parsed), parseError: null };
     }
-    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.roles)) {
-      return {
-        array: parsed.roles,
-        extractedText: JSON.stringify(parsed.roles),
-        parseError: null
-      };
+
+    // Accept common wrapper keys (models sometimes return { roles: [...] } etc).
+    if (parsed && typeof parsed === 'object') {
+      const wrapperKeys = ['roles', 'recommendations', 'items', 'data', 'results', 'output'];
+      for (const k of wrapperKeys) {
+        if (Array.isArray(parsed[k])) {
+          return {
+            array: parsed[k],
+            extractedText: JSON.stringify(parsed[k]),
+            parseError: null
+          };
+        }
+      }
     }
   } catch (_) {
     // Ignore and fall back to array extraction.
@@ -257,14 +285,7 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
 function _extractPersonaProficiencies(finalizedPersona) {
   // Supports common shapes for "FinalizedPersona skills + proficiencies".
   const p = finalizedPersona && typeof finalizedPersona === 'object' ? finalizedPersona : {};
-  const candidates = [
-    p.skills_with_proficiency,
-    p.skillsWithProficiency,
-    p.user_skills,
-    p.userSkills,
-    p.skills,
-    p.proficiencies,
-  ];
+  const candidates = [p.skills_with_proficiency, p.skillsWithProficiency, p.user_skills, p.userSkills, p.skills, p.proficiencies];
 
   const out = [];
   for (const c of candidates) {
@@ -272,7 +293,12 @@ function _extractPersonaProficiencies(finalizedPersona) {
     for (const row of c) {
       if (!row || typeof row !== 'object') continue;
       const name = _normStr(row.name || row.skill || row.skill_name || row.label);
-      const prof = row.proficiency ?? row.proficiencyPercent ?? row.proficiency_percent ?? row.percent ?? row.score;
+      const prof =
+        row.proficiency ??
+        row.proficiencyPercent ??
+        row.proficiency_percent ??
+        row.percent ??
+        row.score;
       const n = Number(prof);
       if (!name || !Number.isFinite(n)) continue;
       out.push({ name, proficiency: Math.max(0, Math.min(100, Math.round(n))) });
@@ -290,26 +316,26 @@ function _extractPersonaProficiencies(finalizedPersona) {
  * - request new schema fields for the Explore UI
  */
 function _buildStrictJsonPrompt(userPersona) {
-  const personaObj = userPersona?.persona && typeof userPersona.persona === 'object' ? userPersona.persona : null;
+  const personaObj =
+    userPersona?.persona && typeof userPersona.persona === 'object' ? userPersona.persona : null;
   const requestType = _normStr(userPersona?.requestType) || 'searched';
   const query = _normStr(userPersona?.query);
 
-  const skills =
-    Array.isArray(userPersona?.skills)
-      ? userPersona.skills
-      : Array.isArray(userPersona?.validated_skills)
-        ? userPersona.validated_skills
-        : Array.isArray(userPersona?.validatedSkills)
-          ? userPersona.validatedSkills
-          : Array.isArray(userPersona?.user_skills)
-            ? userPersona.user_skills.map((s) =>
+  const skills = Array.isArray(userPersona?.skills)
+    ? userPersona.skills
+    : Array.isArray(userPersona?.validated_skills)
+      ? userPersona.validated_skills
+      : Array.isArray(userPersona?.validatedSkills)
+        ? userPersona.validatedSkills
+        : Array.isArray(userPersona?.user_skills)
+          ? userPersona.user_skills.map((s) =>
+              s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
+            )
+          : Array.isArray(userPersona?.userSkills)
+            ? userPersona.userSkills.map((s) =>
                 s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
               )
-            : Array.isArray(userPersona?.userSkills)
-              ? userPersona.userSkills.map((s) =>
-                  s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
-                )
-              : [];
+            : [];
 
   const skillsList = _asStringArray(skills).slice(0, 30);
   const skillsInline = skillsList.length > 0 ? skillsList.join(', ') : 'N/A';
@@ -324,7 +350,8 @@ function _buildStrictJsonPrompt(userPersona) {
       : 'N/A';
 
   const personaIndustry =
-    _normStr(personaObj?.industry || personaObj?.profile?.industry || userPersona?.industry || '') || 'N/A';
+    _normStr(personaObj?.industry || personaObj?.profile?.industry || userPersona?.industry || '') ||
+    'N/A';
 
   return [
     'You are a Global Recruitment Expert with deep knowledge of current market roles, skills, and compensation.',
@@ -406,8 +433,13 @@ function _fallbackBedrockJsonRoles() {
     {
       title: 'Full-Stack Software Engineer',
       industry: 'Technology',
-      description: 'Builds customer-facing web products across frontend and backend systems. Owns features end-to-end with an emphasis on reliability and iteration speed.',
-      key_responsibilities: ['Deliver full-stack features from design to production', 'Design and integrate APIs and data models', 'Improve performance, testing, and developer tooling'],
+      description:
+        'Builds customer-facing web products across frontend and backend systems. Owns features end-to-end with an emphasis on reliability and iteration speed.',
+      key_responsibilities: [
+        'Deliver full-stack features from design to production',
+        'Design and integrate APIs and data models',
+        'Improve performance, testing, and developer tooling'
+      ],
       experience_range: '3-5 years',
       salary_range: '$120k-$170k',
       required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git', 'Communication']
@@ -415,38 +447,88 @@ function _fallbackBedrockJsonRoles() {
     {
       title: 'Backend Engineer (Node.js)',
       industry: 'Technology',
-      description: 'Designs and operates scalable backend services and APIs used by multiple product surfaces. Focuses on performance, reliability, and observability in production.',
-      key_responsibilities: ['Build and maintain high-throughput APIs', 'Optimize database queries and service performance', 'Implement monitoring, logging, and on-call readiness'],
+      description:
+        'Designs and operates scalable backend services and APIs used by multiple product surfaces. Focuses on performance, reliability, and observability in production.',
+      key_responsibilities: [
+        'Build and maintain high-throughput APIs',
+        'Optimize database queries and service performance',
+        'Implement monitoring, logging, and on-call readiness'
+      ],
       experience_range: '3-6 years',
       salary_range: '$130k-$185k',
-      required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability', 'Collaboration']
+      required_skills: [
+        'Node.js',
+        'Express',
+        'SQL',
+        'API Design',
+        'Performance Tuning',
+        'Observability',
+        'Collaboration'
+      ]
     },
     {
       title: 'Data Analyst',
       industry: 'Technology',
-      description: 'Turns raw business data into actionable insights for product and operations teams. Partners with stakeholders to define metrics, dashboards, and decision frameworks.',
-      key_responsibilities: ['Define metrics and build dashboards for stakeholders', 'Analyze trends and root causes using SQL', 'Communicate insights and recommendations clearly'],
+      description:
+        'Turns raw business data into actionable insights for product and operations teams. Partners with stakeholders to define metrics, dashboards, and decision frameworks.',
+      key_responsibilities: [
+        'Define metrics and build dashboards for stakeholders',
+        'Analyze trends and root causes using SQL',
+        'Communicate insights and recommendations clearly'
+      ],
       experience_range: '2-4 years',
       salary_range: '$80k-$120k',
-      required_skills: ['SQL', 'Excel', 'Data Visualization', 'Statistics', 'Dashboards', 'Stakeholder Management']
+      required_skills: [
+        'SQL',
+        'Excel',
+        'Data Visualization',
+        'Statistics',
+        'Dashboards',
+        'Stakeholder Management'
+      ]
     },
     {
       title: 'Product Manager (Technical)',
       industry: 'Technology',
-      description: 'Leads product strategy and execution for technical initiatives that require close engineering partnership. Translates customer needs into prioritized roadmaps and measurable outcomes.',
-      key_responsibilities: ['Own roadmap and prioritize tradeoffs', 'Write clear requirements and align stakeholders', 'Measure impact via experimentation and analytics'],
+      description:
+        'Leads product strategy and execution for technical initiatives that require close engineering partnership. Translates customer needs into prioritized roadmaps and measurable outcomes.',
+      key_responsibilities: [
+        'Own roadmap and prioritize tradeoffs',
+        'Write clear requirements and align stakeholders',
+        'Measure impact via experimentation and analytics'
+      ],
       experience_range: '4-7 years',
       salary_range: '$130k-$210k',
-      required_skills: ['Roadmapping', 'Prioritization', 'User Research', 'Analytics', 'Communication', 'Stakeholder Management']
+      required_skills: [
+        'Roadmapping',
+        'Prioritization',
+        'User Research',
+        'Analytics',
+        'Communication',
+        'Stakeholder Management'
+      ]
     },
     {
       title: 'DevOps Engineer',
       industry: 'Technology',
-      description: 'Builds and maintains the infrastructure and deployment pipelines that keep services running reliably. Improves security posture, release velocity, and incident response tooling.',
-      key_responsibilities: ['Build CI/CD pipelines and deployment automation', 'Manage cloud infrastructure and incident response', 'Implement monitoring, security, and reliability best practices'],
+      description:
+        'Builds and maintains the infrastructure and deployment pipelines that keep services running reliably. Improves security posture, release velocity, and incident response tooling.',
+      key_responsibilities: [
+        'Build CI/CD pipelines and deployment automation',
+        'Manage cloud infrastructure and incident response',
+        'Implement monitoring, security, and reliability best practices'
+      ],
       experience_range: '3-6 years',
       salary_range: '$130k-$205k',
-      required_skills: ['AWS', 'Docker', 'Kubernetes', 'CI/CD', 'Monitoring', 'Infrastructure as Code', 'Incident Management']
+      required_skills: [
+        'AWS',
+        'Docker',
+        'Kubernetes',
+        'CI/CD',
+        'Monitoring',
+        'Infrastructure as Code',
+        'Incident Management'
+      ]
     }
   ];
 }
@@ -720,7 +802,8 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
       : 'N/A';
 
   // Important: validated skills are often string[], but could also be objects.
-  const validatedSkillsRaw = personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || [];
+  const validatedSkillsRaw =
+    personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || [];
   const validatedSkills = _asStringArray(
     Array.isArray(validatedSkillsRaw)
       ? validatedSkillsRaw.map((s) => (typeof s === 'string' ? s : s?.name || s?.skill || s?.skill_name || s?.label))
@@ -730,7 +813,8 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
   const validatedInline = validatedSkills.length ? validatedSkills.join(', ') : 'N/A';
 
   const personaIndustry =
-    _normStr(personaObj?.industry || personaObj?.profile?.industry || personaObj?.domain || '') || 'N/A';
+    _normStr(personaObj?.industry || personaObj?.profile?.industry || personaObj?.domain || '') ||
+    'N/A';
   const personaHeadline =
     _normStr(
       personaObj?.profile?.headline ||
@@ -766,7 +850,9 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
               : 'N/A'
           }`,
           `- groundingSkills: [${
-            Array.isArray(onetGrounding.groundingSkills) ? onetGrounding.groundingSkills.slice(0, 30).join(', ') : 'N/A'
+            Array.isArray(onetGrounding.groundingSkills)
+              ? onetGrounding.groundingSkills.slice(0, 30).join(', ')
+              : 'N/A'
           }]`,
           `- occupationTasksSample: ${
             Array.isArray(onetGrounding.occupations)
@@ -875,6 +961,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
 
     const rawText = _extractClaudeText(bedrockJson);
     const extracted = _extractJsonArrayFromText(rawText);
+
     if (!extracted.array) {
       const err = new Error('Could not extract a JSON array from Bedrock output (initial recommendations).');
       err.code = 'bedrock_no_json_array';
@@ -882,6 +969,20 @@ async function getInitialRecommendations(finalPersona, options = {}) {
         rawText: rawText.slice(0, 5000),
         extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
       };
+
+      // Optional deep diagnostics for debugging environments only.
+      // ENV (request from user/orchestrator if needed): BEDROCK_DEBUG_RAW_OUTPUT=true
+      if (String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true') {
+        // eslint-disable-next-line no-console
+        console.warn('[bedrock][initialRecommendations] JSON array extraction failed', {
+          modelId,
+          bedrockJsonKeys:
+            bedrockJson && typeof bedrockJson === 'object' ? Object.keys(bedrockJson).slice(0, 50) : null,
+          rawTextLength: typeof rawText === 'string' ? rawText.length : null,
+          rawTextPreview: typeof rawText === 'string' ? rawText.slice(0, 2000) : null
+        });
+      }
+
       throw err;
     }
 
@@ -909,7 +1010,10 @@ async function getInitialRecommendations(finalPersona, options = {}) {
      * but we must clearly mark this as a BedrockService fallback (NOT an endpoint hardcoded fallback),
      * so route/service layers can decide whether the endpoint itself "usedFallback".
      */
-    const safe = await generateTargetedRolesSafe({ persona: finalPersona, skills: [], user_skills: [] }, { modelId });
+    const safe = await generateTargetedRolesSafe(
+      { persona: finalPersona, skills: [], user_skills: [] },
+      { modelId }
+    );
 
     const roles = (Array.isArray(safe?.roles) ? safe.roles : []).slice(0, 5).map((r) => ({
       role_id: r.role_id,
