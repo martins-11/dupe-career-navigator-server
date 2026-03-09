@@ -213,7 +213,21 @@ function _normStr(v) {
 
 function _asStringArray(v) {
   if (!Array.isArray(v)) return [];
-  return v.map((x) => _normStr(x)).filter(Boolean);
+
+  /**
+   * LLMs sometimes return a list of objects for skills, e.g.:
+   * [{name:"SQL"}, {skill:"Stakeholder Management"}]
+   * Normalize those into a string[].
+   */
+  return v
+    .map((x) => {
+      if (typeof x === 'string') return _normStr(x);
+      if (x && typeof x === 'object' && !Array.isArray(x)) {
+        return _normStr(x.name || x.skill || x.skill_name || x.skillName || x.label || x.title || '');
+      }
+      return '';
+    })
+    .filter(Boolean);
 }
 
 function _validateAndNormalizeGeneratedRoles(parsed) {
@@ -781,15 +795,17 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
     const title = _normStr(r.title || r.role_title || r.roleTitle || r.role_title || r.name);
     const industry = _normStr(r.industry);
 
-    // Salary can arrive as salary_lpa_range (preferred) or salary_range.
-    const salaryRaw = _normStr(r.salary_lpa_range || r.salaryRange || r.salary_range);
+    // Salary can arrive as salary_lpa_range (preferred) OR salary_range (common model variant).
+    const salaryRaw = _normStr(
+      r.salary_lpa_range || r.salary_range || r.salaryRange || r.salaryLpaRange || r.salaryLpa || r.salary
+    );
 
     const experienceRange = _normStr(r.experience_range || r.experienceRange);
     const description = _normStr(r.description);
 
     const keyResponsibilities = _asStringArray(r.key_responsibilities || r.keyResponsibilities);
 
-    // Skills can arrive as required_skills or skills_required.
+    // Skills can arrive as required_skills or skills_required (sometimes as objects, handled by _asStringArray).
     const requiredSkills = _asStringArray(
       r.required_skills || r.skills_required || r.skillsRequired || r.requiredSkills
     );
@@ -806,8 +822,17 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
       reject('missing_industry', { title, industry: r.industry });
       continue;
     }
+    if (!salaryRaw) {
+      reject('missing_salary', { title, salary_lpa_range: r.salary_lpa_range, salary_range: r.salary_range });
+      continue;
+    }
 
-    // Enforce 5–8 skills (truncate if longer; skip if too short).
+    /**
+     * Skills rule:
+     * - Prompt asks for 5–8, but real outputs can be 5–10.
+     * - Do not reject >8; truncate to keep API stable.
+     * - Still reject <5 (not enough signal for scoring/UI).
+     */
     if (requiredSkills.length < 5) {
       reject('insufficient_required_skills', { title, requiredSkillsCount: requiredSkills.length });
       continue;
@@ -1091,6 +1116,10 @@ async function getInitialRecommendations(finalPersona, options = {}) {
           rawText: debugRawText,
           extractedText: debugExtractedText,
           extractedArrayPreview: debugExtractedArrayPreview,
+          /**
+           * Primary actionable payload:
+           * shows exactly why items were rejected (missing_salary, insufficient_required_skills, etc)
+           */
           validationStats,
           validatedCount: roles.length,
           extractedCount: Array.isArray(extracted.array) ? extracted.array.length : null

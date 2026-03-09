@@ -149,6 +149,27 @@ function sendError(res, err, opts = {}) {
     return res.status(400).json(payload);
   }
 
+  /**
+   * Upstream dependency failures (Bedrock, etc).
+   * These should not be reported as generic 500s because:
+   * - they are often configuration/runtime issues (region/model access/throttle)
+   * - callers need actionable details (requestId, validation stats) to debug
+   */
+  if (status === 502) {
+    const payload = _toErrorResponse(err, 'bad_gateway', 'Upstream dependency returned an invalid response.');
+    return res.status(502).json(payload);
+  }
+
+  if (status === 503) {
+    const payload = _toErrorResponse(err, 'service_unavailable', 'Upstream dependency is unavailable.');
+    return res.status(503).json(payload);
+  }
+
+  if (status === 504) {
+    const payload = _toErrorResponse(err, 'gateway_timeout', 'Upstream dependency timed out.');
+    return res.status(504).json(payload);
+  }
+
   // 500
   const payload = _toErrorResponse(err, 'internal_server_error', 'Internal server error.');
   return res.status(500).json(payload);
