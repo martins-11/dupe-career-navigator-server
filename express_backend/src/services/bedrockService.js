@@ -737,18 +737,28 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
     throw err;
   }
 
+  /**
+   * IMPORTANT:
+   * The initial recommendations pipeline historically had two possible upstream shapes:
+   * 1) "Bedrock prompt schema" (preferred):
+   *    { title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }
+   * 2) "API role card schema" (observed in the attached authoritative failing response):
+   *    { role_id, role_title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }
+   *
+   * Previously we only read `title` (with minor aliases) which caused 0 roles to validate when
+   * Bedrock returned `role_title`. That triggered `bedrock_insufficient_roles` and forced fallback.
+   */
   const out = [];
   const seen = new Set();
 
   for (const r of parsed) {
     if (!r || typeof r !== 'object') continue;
 
-    // Be tolerant to minor schema drift so we don't discard all roles.
-    // Prompt asks for `title`, but some models return `role_title`/`roleTitle`.
-    const title = _normStr(r.title || r.role_title || r.roleTitle);
+    // Title can arrive as title/role_title/roleTitle/role_title etc.
+    const title = _normStr(r.title || r.role_title || r.roleTitle || r.role_title);
     const industry = _normStr(r.industry);
 
-    // Prompt asks for `salary_lpa_range`, but fallbacks/LLMs sometimes return `salary_range`.
+    // Salary can arrive as salary_lpa_range (preferred) or salary_range.
     const salaryRaw = _normStr(r.salary_lpa_range || r.salaryRange || r.salary_range);
 
     const experienceRange = _normStr(r.experience_range || r.experienceRange);
@@ -756,8 +766,10 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
 
     const keyResponsibilities = _asStringArray(r.key_responsibilities || r.keyResponsibilities);
 
-    // Prompt asks for `required_skills`, but some fallbacks use `skills_required`.
-    const requiredSkills = _asStringArray(r.required_skills || r.skills_required || r.skillsRequired);
+    // Skills can arrive as required_skills or skills_required.
+    const requiredSkills = _asStringArray(
+      r.required_skills || r.skills_required || r.skillsRequired || r.requiredSkills
+    );
 
     if (!title || !industry) continue;
 
@@ -765,7 +777,7 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
     const responsibilities =
       keyResponsibilities.length >= 3 ? keyResponsibilities.slice(0, 3) : keyResponsibilities;
 
-    // Enforce 5–8 skills (truncate if longer; skip if too short)
+    // Enforce 5–8 skills (truncate if longer; skip if too short).
     if (requiredSkills.length < 5) continue;
     const skills = requiredSkills.slice(0, 8);
 
@@ -773,11 +785,17 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
     if (seen.has(key)) continue;
     seen.add(key);
 
-    out.push({
-      role_id: `bedrock-rec-${title
+    // If upstream supplied a role_id, preserve it (helps dedupe/debug); else generate one.
+    const roleIdProvided = _normStr(r.role_id || r.roleId);
+    const roleId =
+      roleIdProvided ||
+      `bedrock-rec-${title
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
-        .replace(/(^-|-$)/g, '')}`,
+        .replace(/(^-|-$)/g, '')}`;
+
+    out.push({
+      role_id: roleId,
       role_title: title,
       industry,
       salary_lpa_range: _normalizeToIndiaLpaRange(salaryRaw),
@@ -954,6 +972,14 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     ]
   };
 
+  // ENV-gated diagnostics (do NOT enable by default in production).
+  const debugRaw = String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true';
+
+  // These will be populated only when available, and only attached to thrown errors when debugRaw=true.
+  let debugRawText = null;
+  let debugExtractedText = null;
+  let debugExtractedArrayPreview = null;
+
   try {
     const client = _getBedrockClient();
     const cmd = new InvokeModelCommand({
@@ -970,6 +996,12 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const rawText = _extractClaudeText(bedrockJson);
     const extracted = _extractJsonArrayFromText(rawText);
 
+    if (debugRaw) {
+      debugRawText = typeof rawText === 'string' ? rawText.slice(0, 5000) : null;
+      debugExtractedText = extracted?.extractedText ? extracted.extractedText.slice(0, 5000) : null;
+      debugExtractedArrayPreview = Array.isArray(extracted?.array) ? extracted.array.slice(0, 5) : null;
+    }
+
     if (!extracted.array) {
       const err = new Error('Could not extract a JSON array from Bedrock output (initial recommendations).');
       err.code = 'bedrock_no_json_array';
@@ -978,9 +1010,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
         extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
       };
 
-      // Optional deep diagnostics for debugging environments only.
-      // ENV (request from user/orchestrator if needed): BEDROCK_DEBUG_RAW_OUTPUT=true
-      if (String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true') {
+      if (debugRaw) {
         // eslint-disable-next-line no-console
         console.warn('[bedrock][initialRecommendations] JSON array extraction failed', {
           modelId,
@@ -1008,11 +1038,32 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     if (roles.length < 5) {
       const err = new Error(`Bedrock returned ${roles.length} valid initial recommendations; expected 5.`);
       err.code = 'bedrock_insufficient_roles';
+      if (debugRaw) {
+        err.details = {
+          ...(err.details && typeof err.details === 'object' ? err.details : {}),
+          modelId,
+          rawText: debugRawText,
+          extractedText: debugExtractedText,
+          extractedArrayPreview: debugExtractedArrayPreview,
+          validatedCount: roles.length,
+          extractedCount: Array.isArray(extracted.array) ? extracted.array.length : null
+        };
+      }
       throw err;
     }
 
     return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
   } catch (err) {
+    // Attach env-gated diagnostics for upstream meta/error surfacing.
+    if (debugRaw && err && typeof err === 'object') {
+      err.details = {
+        ...(err.details && typeof err.details === 'object' ? err.details : {}),
+        modelId,
+        rawText: debugRawText,
+        extractedText: debugExtractedText,
+        extractedArrayPreview: debugExtractedArrayPreview
+      };
+    }
     /**
      * Bedrock call failed OR output was invalid. We still return 5 roles for UI stability,
      * but we must clearly mark this as a BedrockService fallback (NOT an endpoint hardcoded fallback),

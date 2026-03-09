@@ -156,7 +156,13 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
           attempts: bedrockResult.error.attempts ?? null,
           totalRetryDelay: bedrockResult.error.totalRetryDelay ?? null,
           fault: bedrockResult.error.fault ?? null,
-          service: bedrockResult.error.service ?? null
+          service: bedrockResult.error.service ?? null,
+          // ENV-gated deep diagnostics from bedrockService.getInitialRecommendations
+          // (only present when BEDROCK_DEBUG_RAW_OUTPUT=true).
+          details:
+            bedrockResult.error.details && typeof bedrockResult.error.details === 'object'
+              ? bedrockResult.error.details
+              : null
         }
       : null;
 
