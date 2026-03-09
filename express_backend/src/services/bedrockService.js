@@ -74,21 +74,56 @@ function _extractFirstJsonArray(text) {
   const trimmed = text.trim();
   if (trimmed.startsWith('[') && trimmed.endsWith(']')) return trimmed;
 
-  // Heuristic scan for first balanced [...] block
+  /**
+   * Robust scan for the first *top-level* balanced JSON array.
+   *
+   * Key hardening:
+   * - Ignore brackets that appear inside JSON strings (e.g., "notes": "foo ] bar").
+   * - Handle escaped quotes inside strings.
+   *
+   * This prevents false early termination which previously caused bedrock_no_json_array.
+   */
   const start = trimmed.indexOf('[');
   if (start < 0) return null;
 
   let depth = 0;
+  let inString = false;
+  let escape = false;
+
   for (let i = start; i < trimmed.length; i += 1) {
     const ch = trimmed[i];
+
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    // Not in a string
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
     if (ch === '[') depth += 1;
     if (ch === ']') depth -= 1;
-    if (depth === 0) {
+
+    if (depth === 0 && i >= start) {
       const candidate = trimmed.slice(start, i + 1).trim();
       if (candidate.startsWith('[') && candidate.endsWith(']')) return candidate;
       return null;
     }
   }
+
   return null;
 }
 
@@ -752,6 +787,14 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
   return [
     'You are a Market Intelligence Expert for the Indian job market.',
     'You deeply understand in-demand roles in India, realistic compensation bands in ₹ LPA, and technical responsibilities.',
+    '',
+    'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT)',
+    '1) Output MUST be valid JSON (RFC 8259).',
+    '2) Output MUST be a single JSON array (not an object).',
+    '3) Output MUST contain NO preamble, NO explanation, NO commentary.',
+    '4) Output MUST contain NO markdown and NO code fences (no ```).',
+    '5) Output MUST NOT include XML/HTML-like tags such as <thinking>...</thinking>.',
+    '6) Do not wrap the JSON in quotes. Do not prefix with "Here is the JSON". Do not suffix with anything.',
     '',
     'CONTEXT (FinalizedPersona):',
     `- Current role/headline: ${personaHeadline}`,
