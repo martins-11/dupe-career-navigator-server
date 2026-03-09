@@ -441,7 +441,7 @@ function _fallbackBedrockJsonRoles() {
         'Improve performance, testing, and developer tooling'
       ],
       experience_range: '3-5 years',
-      salary_range: '$120k-$170k',
+      salary_range: '₹99.6–₹141.1 LPA',
       required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git', 'Communication']
     },
     {
@@ -455,7 +455,7 @@ function _fallbackBedrockJsonRoles() {
         'Implement monitoring, logging, and on-call readiness'
       ],
       experience_range: '3-6 years',
-      salary_range: '$130k-$185k',
+      salary_range: '₹107.9–₹153.6 LPA',
       required_skills: [
         'Node.js',
         'Express',
@@ -477,7 +477,7 @@ function _fallbackBedrockJsonRoles() {
         'Communicate insights and recommendations clearly'
       ],
       experience_range: '2-4 years',
-      salary_range: '$80k-$120k',
+      salary_range: '₹66.4–₹99.6 LPA',
       required_skills: [
         'SQL',
         'Excel',
@@ -498,7 +498,7 @@ function _fallbackBedrockJsonRoles() {
         'Measure impact via experimentation and analytics'
       ],
       experience_range: '4-7 years',
-      salary_range: '$130k-$210k',
+      salary_range: '₹107.9–₹174.3 LPA',
       required_skills: [
         'Roadmapping',
         'Prioritization',
@@ -519,7 +519,7 @@ function _fallbackBedrockJsonRoles() {
         'Implement monitoring, security, and reliability best practices'
       ],
       experience_range: '3-6 years',
-      salary_range: '$130k-$205k',
+      salary_range: '₹107.9–₹170.2 LPA',
       required_skills: [
         'AWS',
         'Docker',
@@ -743,13 +743,21 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
   for (const r of parsed) {
     if (!r || typeof r !== 'object') continue;
 
-    const title = _normStr(r.title);
+    // Be tolerant to minor schema drift so we don't discard all roles.
+    // Prompt asks for `title`, but some models return `role_title`/`roleTitle`.
+    const title = _normStr(r.title || r.role_title || r.roleTitle);
     const industry = _normStr(r.industry);
-    const salaryLpa = _normStr(r.salary_lpa_range || r.salary_range);
-    const experienceRange = _normStr(r.experience_range);
+
+    // Prompt asks for `salary_lpa_range`, but fallbacks/LLMs sometimes return `salary_range`.
+    const salaryRaw = _normStr(r.salary_lpa_range || r.salaryRange || r.salary_range);
+
+    const experienceRange = _normStr(r.experience_range || r.experienceRange);
     const description = _normStr(r.description);
-    const keyResponsibilities = _asStringArray(r.key_responsibilities);
-    const requiredSkills = _asStringArray(r.required_skills);
+
+    const keyResponsibilities = _asStringArray(r.key_responsibilities || r.keyResponsibilities);
+
+    // Prompt asks for `required_skills`, but some fallbacks use `skills_required`.
+    const requiredSkills = _asStringArray(r.required_skills || r.skills_required || r.skillsRequired);
 
     if (!title || !industry) continue;
 
@@ -772,7 +780,7 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
         .replace(/(^-|-$)/g, '')}`,
       role_title: title,
       industry,
-      salary_lpa_range: _normalizeToIndiaLpaRange(salaryLpa),
+      salary_lpa_range: _normalizeToIndiaLpaRange(salaryRaw),
       experience_range: experienceRange,
       description,
       key_responsibilities: responsibilities,
