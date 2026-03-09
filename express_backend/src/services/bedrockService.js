@@ -730,7 +730,7 @@ function _normalizeToIndiaLpaRange(salaryRange) {
   return `₹${min}–₹${max} LPA`;
 }
 
-function _validateAndNormalizeInitialRecommendations(parsed) {
+function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } = {}) {
   if (!Array.isArray(parsed)) {
     const err = new Error('Bedrock initial recommendations did not return a JSON array.');
     err.code = 'bedrock_invalid_json_shape';
@@ -745,17 +745,40 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
    * 2) "API role card schema" (observed in the attached authoritative failing response):
    *    { role_id, role_title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }
    *
-   * Previously we only read `title` (with minor aliases) which caused 0 roles to validate when
-   * Bedrock returned `role_title`. That triggered `bedrock_insufficient_roles` and forced fallback.
+   * This validator must accept BOTH. Otherwise Bedrock may succeed but we incorrectly drop
+   * everything to 0 valid roles and trigger `bedrock_insufficient_roles`.
    */
+
   const out = [];
   const seen = new Set();
 
-  for (const r of parsed) {
-    if (!r || typeof r !== 'object') continue;
+  // Optional validation stats for debugging why items are being rejected.
+  const stats = {
+    inputCount: Array.isArray(parsed) ? parsed.length : 0,
+    acceptedCount: 0,
+    duplicateTitleCount: 0,
+    rejectedCount: 0,
+    // reason -> count
+    rejectedReasons: {},
+    // include first few rejects to make debugging fast (env-gated)
+    rejectedSamples: []
+  };
 
-    // Title can arrive as title/role_title/roleTitle/role_title etc.
-    const title = _normStr(r.title || r.role_title || r.roleTitle || r.role_title);
+  const reject = (reason, sample) => {
+    stats.rejectedCount += 1;
+    stats.rejectedReasons[reason] = (stats.rejectedReasons[reason] || 0) + 1;
+    if (debug && stats.rejectedSamples.length < 5 && sample) {
+      stats.rejectedSamples.push({ reason, sample });
+    }
+  };
+
+  for (const r of parsed) {
+    if (!r || typeof r !== 'object') {
+      reject('not_object', r);
+      continue;
+    }
+
+    const title = _normStr(r.title || r.role_title || r.roleTitle || r.role_title || r.name);
     const industry = _normStr(r.industry);
 
     // Salary can arrive as salary_lpa_range (preferred) or salary_range.
@@ -771,21 +794,38 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
       r.required_skills || r.skills_required || r.skillsRequired || r.requiredSkills
     );
 
-    if (!title || !industry) continue;
+    if (!title) {
+      reject('missing_title', {
+        role_id: r.role_id,
+        role_title: r.role_title,
+        title: r.title
+      });
+      continue;
+    }
+    if (!industry) {
+      reject('missing_industry', { title, industry: r.industry });
+      continue;
+    }
+
+    // Enforce 5–8 skills (truncate if longer; skip if too short).
+    if (requiredSkills.length < 5) {
+      reject('insufficient_required_skills', { title, requiredSkillsCount: requiredSkills.length });
+      continue;
+    }
+    const skills = requiredSkills.slice(0, 8);
 
     // Enforce the "exactly 3 responsibilities" rule (truncate if longer).
     const responsibilities =
       keyResponsibilities.length >= 3 ? keyResponsibilities.slice(0, 3) : keyResponsibilities;
 
-    // Enforce 5–8 skills (truncate if longer; skip if too short).
-    if (requiredSkills.length < 5) continue;
-    const skills = requiredSkills.slice(0, 8);
-
     const key = title.toLowerCase();
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      stats.duplicateTitleCount += 1;
+      reject('duplicate_title', { title });
+      continue;
+    }
     seen.add(key);
 
-    // If upstream supplied a role_id, preserve it (helps dedupe/debug); else generate one.
     const roleIdProvided = _normStr(r.role_id || r.roleId);
     const roleId =
       roleIdProvided ||
@@ -807,7 +847,8 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
     });
   }
 
-  return out;
+  stats.acceptedCount = out.length;
+  return { roles: out, stats };
 }
 
 function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
@@ -1033,7 +1074,9 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       throw err;
     }
 
-    const roles = _validateAndNormalizeInitialRecommendations(extracted.array);
+    const validated = _validateAndNormalizeInitialRecommendations(extracted.array, { debug: debugRaw });
+    const roles = Array.isArray(validated?.roles) ? validated.roles : [];
+    const validationStats = validated?.stats && typeof validated.stats === 'object' ? validated.stats : null;
 
     if (roles.length < 5) {
       const err = new Error(`Bedrock returned ${roles.length} valid initial recommendations; expected 5.`);
@@ -1045,6 +1088,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
           rawText: debugRawText,
           extractedText: debugExtractedText,
           extractedArrayPreview: debugExtractedArrayPreview,
+          validationStats,
           validatedCount: roles.length,
           extractedCount: Array.isArray(extracted.array) ? extracted.array.length : null
         };
@@ -1148,7 +1192,10 @@ async function getInitialRecommendations(finalPersona, options = {}) {
 
         // Sometimes AWS errors include machine-readable hints:
         fault: err?.$fault ?? null,
-        service: err?.$service ?? null
+        service: err?.$service ?? null,
+
+        // Env-gated deep diagnostics from thrown errors (e.g., rawText/validationStats).
+        details: err?.details && typeof err.details === 'object' ? err.details : null
       }
     };
   }
