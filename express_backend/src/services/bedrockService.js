@@ -330,20 +330,36 @@ function _extractRolesJsonArrayFromText(text) {
       }
     }
 
-    // Prefer object arrays; strongly prefer role-like objects.
-    // Penalize string arrays (these are often nested responsibilities/skills arrays).
+    /**
+     * Prefer the top-level array-of-role-objects.
+     *
+     * Failure mode we are preventing (per user_input_ref):
+     * - Top-level: [ {title,..., key_responsibilities:[...]} , ...]
+     * - Nested:    key_responsibilities: [ "string", "string", "string" ]
+     * A naive "first JSON array" can grab the nested string[].
+     *
+     * Scoring heuristic:
+     * - Heavily reward role-like objects.
+     * - Strongly penalize string arrays.
+     */
     let score = 0;
-    score += roleLikeObjectCount * 10;
-    score += objectCount * 2;
-    score -= stringCount * 5;
+
+    // Strong preference for role-like object elements.
+    score += roleLikeObjectCount * 100;
+
+    // Still reward generic object arrays (but far less than role-like).
+    score += objectCount * 10;
+
+    // Strongly penalize arrays of strings (typical nested arrays: responsibilities/skills).
+    score -= stringCount * 80;
 
     // Bigger arrays are slightly more likely to be the top-level role list.
-    score += Math.min(arr.length, 20) * 0.1;
+    score += Math.min(arr.length, 50) * 0.2;
 
     return score;
   };
 
-  let best = { score: -Infinity, array: null, extractedText: null, parseError: null };
+  let best = { score: -Infinity, array: null, extractedText: null, parseError: null, startIndex: null };
 
   for (const s of starts) {
     const candidateText = extractBalancedArrayFrom(s);
@@ -354,8 +370,13 @@ function _extractRolesJsonArrayFromText(text) {
       if (!Array.isArray(parsed)) continue;
 
       const score = scoreArrayCandidate(parsed);
-      if (score > best.score) {
-        best = { score, array: parsed, extractedText: candidateText, parseError: null };
+
+      // Tie-breaker: prefer the earliest candidate in the text (usually the top-level array).
+      if (
+        score > best.score ||
+        (score === best.score && (best.startIndex == null || s < best.startIndex))
+      ) {
+        best = { score, array: parsed, extractedText: candidateText, parseError: null, startIndex: s };
       }
     } catch (e) {
       // keep the first parse error around in case we find nothing better
@@ -958,9 +979,14 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
     const title = _normStr(r.title || r.role_title || r.roleTitle || r.role_title || r.name);
     const industry = _normStr(r.industry);
 
-    // Salary can arrive as salary_lpa_range (preferred) OR salary_range (common model variant).
+    // Salary can arrive as salary_lpa_range (prompt schema / user_input_ref) OR salary_range (common model variant).
     const salaryRaw = _normStr(
-      r.salary_lpa_range || r.salary_range || r.salaryRange || r.salaryLpaRange || r.salaryLpa || r.salary
+      r.salary_lpa_range ||
+        r.salary_range ||
+        r.salaryRange ||
+        r.salaryLpaRange ||
+        r.salaryLpa ||
+        r.salary
     );
 
     const experienceRange = _normStr(r.experience_range || r.experienceRange);
