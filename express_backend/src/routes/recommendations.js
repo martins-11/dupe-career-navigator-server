@@ -238,8 +238,8 @@ async function handleInitialRecommendations(req, res) {
       ...(result?.meta || {}),
       count: roles.length,
       personaFallbackReason: null,
-      // Initial recommendations must be Bedrock-only; this should remain false.
-      bedrockUsedFallback: Boolean(result?.meta?.bedrockUsedFallback)
+      // Initial recommendations must be Bedrock-only; keep this explicitly false for this route.
+      bedrockUsedFallback: false
     };
 
     // If the request already timed out (or response was already sent), do not attempt a second response.

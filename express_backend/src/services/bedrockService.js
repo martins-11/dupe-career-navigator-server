@@ -1498,8 +1498,15 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const roles = Array.isArray(validated?.roles) ? validated.roles : [];
     const validationStats = validated?.stats && typeof validated.stats === 'object' ? validated.stats : null;
 
-    if (roles.length < 5) {
-      const err = new Error(`Bedrock returned ${roles.length} valid initial recommendations; expected 5.`);
+    /**
+     * IMPORTANT (bugfix):
+     * Initial recommendations must succeed when Bedrock returns fewer than 5 *valid* roles.
+     * The endpoint contract for /api/recommendations/initial is "1–5 roles", and strict mode
+     * (allowFallback=false) should only throw when Bedrock fails entirely (timeout, invalid JSON, etc),
+     * not when it returns 1–4 good items.
+     */
+    if (roles.length < 1) {
+      const err = new Error('Bedrock returned 0 valid initial recommendations.');
       err.code = 'bedrock_insufficient_roles';
       if (debugRaw) {
         err.details = {
@@ -1516,6 +1523,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       throw err;
     }
 
+    // Return up to 5; do not error if fewer than 5 are valid.
     return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
   };
 
