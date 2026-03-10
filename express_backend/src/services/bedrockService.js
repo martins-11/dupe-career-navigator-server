@@ -280,20 +280,23 @@ function _extractRolesJsonArrayFromText(text) {
     for (let i = start; i < trimmed.length; i += 1) {
       const ch = trimmed[i];
 
+      // IMPORTANT BUGFIX:
+      // This must scan the *actual* model output characters. Quotes/backslashes are literal (", \),
+      // not JS-escaped sequences (\").
       if (inString) {
         if (escape) {
           escape = false;
           continue;
         }
-        if (ch === '\\\\') {
+        if (ch === '\\') {
           escape = true;
           continue;
         }
-        if (ch === '\"') inString = false;
+        if (ch === '"') inString = false;
         continue;
       }
 
-      if (ch === '\"') {
+      if (ch === '"') {
         inString = true;
         continue;
       }
@@ -317,8 +320,8 @@ function _extractRolesJsonArrayFromText(text) {
     // End-of-text: if we're still inside the array and we saw at least one completed object, salvage.
     if (arrayDepth >= 1 && lastCompletedObjectEnd > start) {
       const prefix = trimmed.slice(start, lastCompletedObjectEnd + 1).trim();
-      const withoutTrailingComma = prefix.replace(/,\\s*$/, '');
-      const synthesized = `${withoutTrailingComma}\\n]`;
+      const withoutTrailingComma = prefix.replace(/,\s*$/, '');
+      const synthesized = `${withoutTrailingComma}\n]`;
 
       try {
         const parsed = JSON.parse(synthesized);
@@ -568,7 +571,14 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
 function _extractPersonaProficiencies(finalizedPersona) {
   // Supports common shapes for "FinalizedPersona skills + proficiencies".
   const p = finalizedPersona && typeof finalizedPersona === 'object' ? finalizedPersona : {};
-  const candidates = [p.skills_with_proficiency, p.skillsWithProficiency, p.user_skills, p.userSkills, p.skills, p.proficiencies];
+  const candidates = [
+    p.skills_with_proficiency,
+    p.skillsWithProficiency,
+    p.user_skills,
+    p.userSkills,
+    p.skills,
+    p.proficiencies
+  ];
 
   const out = [];
   for (const c of candidates) {
@@ -982,7 +992,7 @@ function _normalizeToIndiaLpaRange(salaryRange) {
   if (!s) return '';
 
   // If already INR/LPA-ish, keep it.
-  if (/(₹|inr|lpa|lakhs)/i.test(s)) return s;
+  if /(₹|inr|lpa|lakhs)/i.test(s) return s;
 
   // Common "$130k-$210k" style: approximate conversion to LPA.
   // NOTE: This is best-effort; prompt asks Bedrock to output INR LPA directly.
