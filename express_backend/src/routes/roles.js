@@ -223,6 +223,38 @@ router.get('/autocomplete', async (req, res) => {
 
     if (query.length < 2) return res.json([]);
 
+    /**
+     * Persona-driven Bedrock autocomplete (additive; fixes user report).
+     * Query params (optional):
+     * - personaId / persona_id: if provided, Bedrock can tailor suggestions to the persona.
+     * - useBedrock: "true" enables Bedrock-backed suggestions (default true).
+     *
+     * Fallback:
+     * - If Bedrock fails or is disabled, fall back to catalog-derived titles.
+     */
+    const useBedrock = String(req.query?.useBedrock ?? 'true').toLowerCase() !== 'false';
+    const personaId = req.query?.personaId || req.query?.persona_id;
+
+    if (useBedrock) {
+      try {
+        const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
+        const roles = await exploreSearchRolesPersonaDriven({
+          q: query,
+          limit: Math.max(limit, 5),
+          personaId: personaId ? String(personaId).trim() : null,
+        });
+
+        const titles = (Array.isArray(roles) ? roles : [])
+          .map((r) => _normalizeLabel(r?.role_title || r?.title || ''))
+          .filter(Boolean);
+
+        const unique = Array.from(new Map(titles.map((t) => [t.toLowerCase(), t])).values()).slice(0, limit);
+        if (unique.length) return res.json(unique);
+      } catch (_) {
+        // Ignore and fall back to catalog titles (never fail autocomplete).
+      }
+    }
+
     const roles = await _loadRolesForFilterOptions();
     const titles = _deriveUniqueTitlesFromRoles(roles);
     const qn = query.toLowerCase();

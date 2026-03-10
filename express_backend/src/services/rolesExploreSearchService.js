@@ -67,22 +67,48 @@ function _decorateAndScoreRoles({ roles, scoringUserSkills }) {
     const report = buildThreeTwoReport(fuzzyUserSkills, requiredSkills);
     const compat = scoreRoleCompatibility(fuzzyUserSkills, requiredSkills);
 
+    const requiredSkillsCount = requiredSkills.length;
+    const masteryCount = Array.isArray(compat.masteryAreas) ? compat.masteryAreas.length : 0;
+    const growthCount = Array.isArray(compat.growthAreas) ? compat.growthAreas.length : 0;
+
+    const masteryScore = requiredSkillsCount ? Math.round((masteryCount / requiredSkillsCount) * 100) : 0;
+    const growthScore = requiredSkillsCount ? Math.round((growthCount / requiredSkillsCount) * 100) : 0;
+
     out.push({
       ...r,
       salary_range: normalizeSalaryToIndiaLpaRange(r.salary_range || ''),
       required_skills: requiredSkills,
+
+      // Keep existing payload, but add explicit fields the frontend rings can reliably use.
       threeTwoReport: {
         ...report,
-        compatibilityScore: compat.score
+        compatibilityScore: compat.score,
       },
       compatibilityScore: compat.score,
+      finalCompatibilityScore: Math.max(
+        0,
+        Math.min(
+          100,
+          Math.round(0.6 * (compat.score || 0) + 0.4 * (report.status === 'validated' ? 100 : 0))
+        )
+      ),
+
+      masteryAreas: compat.masteryAreas,
+      growthAreas: compat.growthAreas,
+      masteryScore,
+      growthScore,
+      masteryCount,
+      growthCount,
+
       match_metadata: {
         ...(r.match_metadata || {}),
         scoring: {
           usedFuzzyMatching: true,
-          matchedSkillCount: report.masteryAreas.length + report.growthAreas.length
-        }
-      }
+          matchedSkillCount: report.masteryAreas.length + report.growthAreas.length,
+          requiredSkillsCount,
+          threeTwoValidationScore: report.status === 'validated' ? 100 : 0,
+        },
+      },
     });
   }
 

@@ -3,6 +3,66 @@
 const bedrockService = require('./bedrockService');
 const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine');
 
+function _clampPercent(n) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+/**
+ * Build UI-friendly ring scores from 3/2 report + compatibility.
+ * - masteryScore: percent of required skills that are in masteryAreas
+ * - growthScore: percent of required skills that are in growthAreas
+ * Both are 0..100 integers.
+ */
+function _buildRingScores({ requiredSkillsCount, masteryAreas, growthAreas } = {}) {
+  const denom = Number.isFinite(requiredSkillsCount) && requiredSkillsCount > 0 ? requiredSkillsCount : 0;
+  if (!denom) {
+    return {
+      masteryScore: 0,
+      growthScore: 0,
+      masteryCount: Array.isArray(masteryAreas) ? masteryAreas.length : 0,
+      growthCount: Array.isArray(growthAreas) ? growthAreas.length : 0,
+    };
+  }
+
+  const masteryCount = Array.isArray(masteryAreas) ? masteryAreas.length : 0;
+  const growthCount = Array.isArray(growthAreas) ? growthAreas.length : 0;
+
+  return {
+    masteryScore: _clampPercent((masteryCount / denom) * 100),
+    growthScore: _clampPercent((growthCount / denom) * 100),
+    masteryCount,
+    growthCount,
+  };
+}
+
+function _threeTwoValidationScore(threeTwoReport) {
+  // Per current engine: validated => 100 else 0.
+  if (!threeTwoReport || typeof threeTwoReport !== 'object') return 0;
+  return threeTwoReport.status === 'validated' ? 100 : 0;
+}
+
+function _rerankByThreeTwoAndCompatibility(scoredRoles) {
+  const arr = Array.isArray(scoredRoles) ? [...scoredRoles] : [];
+  arr.sort((a, b) => {
+    const aThreeTwo = _threeTwoValidationScore(a?.threeTwoReport);
+    const bThreeTwo = _threeTwoValidationScore(b?.threeTwoReport);
+
+    if (bThreeTwo !== aThreeTwo) return bThreeTwo - aThreeTwo;
+
+    const aCompat = Number.isFinite(a?.compatibilityScore) ? a.compatibilityScore : -1;
+    const bCompat = Number.isFinite(b?.compatibilityScore) ? b.compatibilityScore : -1;
+
+    if (bCompat !== aCompat) return bCompat - aCompat;
+
+    // Stable deterministic fallback: keep original order (by role_id/title)
+    const aTitle = String(a?.role_title || a?.title || '');
+    const bTitle = String(b?.role_title || b?.title || '');
+    return aTitle.localeCompare(bTitle, undefined, { sensitivity: 'base' });
+  });
+  return arr;
+}
+
 function _extractPersonaSkillsWithProficiency(finalPersona) {
   /**
    * Extract proficiency-bearing skills from a Finalized Persona.
@@ -203,29 +263,62 @@ function _scoreRoles(finalPersona, roles) {
   return (Array.isArray(roles) ? roles : []).map((r) => {
     const normalized = _normalizeRoleForInitialRecommendations(r) || r;
 
-    const requiredSkills = Array.isArray(normalized.required_skills)
-      ? normalized.required_skills
-      : [];
+    const requiredSkills = Array.isArray(normalized.required_skills) ? normalized.required_skills : [];
+    const requiredSkillsCount = requiredSkills.length;
 
     // When no numeric proficiencies exist, skip scoring gracefully.
     // Do NOT fabricate proficiencies; do NOT emit misleading 0 scoring artifacts.
-    const threeTwoReport = hadUserProficiencies ? buildThreeTwoReport(userSkillsForScoring, requiredSkills) : null;
+    const threeTwoReport = hadUserProficiencies
+      ? buildThreeTwoReport(userSkillsForScoring, requiredSkills)
+      : null;
+
     const compat = hadUserProficiencies
       ? scoreRoleCompatibility(userSkillsForScoring, requiredSkills)
       : { score: null, masteryAreas: [], growthAreas: [] };
 
+    const ring = hadUserProficiencies
+      ? _buildRingScores({
+          requiredSkillsCount,
+          masteryAreas: compat.masteryAreas,
+          growthAreas: compat.growthAreas,
+        })
+      : { masteryScore: null, growthScore: null, masteryCount: 0, growthCount: 0 };
+
+    const threeTwoValidationScore = hadUserProficiencies ? _threeTwoValidationScore(threeTwoReport) : null;
+
+    // Final compatibility used for sorting / display: prioritize 3/2 validation, then skill coverage.
+    // Keep as 0..100 number when scoring is available.
+    const finalCompatibilityScore = hadUserProficiencies
+      ? _clampPercent(0.6 * (compat.score || 0) + 0.4 * (threeTwoValidationScore || 0))
+      : null;
+
     return {
       ...normalized,
+
+      // Core scoring outputs
       threeTwoReport,
       compatibilityScore: hadUserProficiencies ? compat.score : null,
+      finalCompatibilityScore,
+
+      // Explicit mastery/growth areas for UI and debugging
+      masteryAreas: hadUserProficiencies ? compat.masteryAreas : [],
+      growthAreas: hadUserProficiencies ? compat.growthAreas : [],
+
+      // Ring-friendly scores (0..100) for the UI circles
+      masteryScore: hadUserProficiencies ? ring.masteryScore : null,
+      growthScore: hadUserProficiencies ? ring.growthScore : null,
+      masteryCount: hadUserProficiencies ? ring.masteryCount : 0,
+      growthCount: hadUserProficiencies ? ring.growthCount : 0,
+
       match_metadata: {
         ...(normalized.match_metadata && typeof normalized.match_metadata === 'object' ? normalized.match_metadata : {}),
         scoring: {
           hadUserProficiencies,
-          requiredSkillsCount: requiredSkills.length,
-          scoringSkipped: !hadUserProficiencies
-        }
-      }
+          requiredSkillsCount,
+          scoringSkipped: !hadUserProficiencies,
+          threeTwoValidationScore,
+        },
+      },
     };
   });
 }
@@ -270,28 +363,31 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
       persona: {
         personaId: personaId || null,
-        usedPersonaProficiencies: hasPersonaProficiencies
+        usedPersonaProficiencies: hasPersonaProficiencies,
       },
       grounding: { source: 'none' },
       bedrockUsedFallback: false,
-      bedrockModelId: bedrockResult?.modelId || null
-    }
+      bedrockModelId: bedrockResult?.modelId || null,
+    },
   }));
 
+  const reranked = _rerankByThreeTwoAndCompatibility(scored);
+
   return {
-    roles: scored,
+    roles: reranked,
     meta: {
       personaId: personaId || null,
       hasPersonaProficiencies,
-      count: scored.length,
+      count: reranked.length,
       onetGrounded: false,
       onetError: null,
       bedrockUsedFallback: false,
       endpointFallbackUsed: false,
       endpointPaddingUsed: false,
       paddedCount: 0,
-      bedrockError: null
-    }
+      bedrockError: null,
+      rerankedBy: 'threeTwoValidation_then_compatibility',
+    },
   };
 }
 
