@@ -222,8 +222,13 @@ async function handleInitialRecommendations(req, res) {
       bedrockUsedFallback: Boolean(result?.meta?.bedrockUsedFallback)
     };
 
+    // If the request already timed out (or response was already sent), do not attempt a second response.
+    if (req.timedOut || res.headersSent) return;
+
     return res.json({ roles, meta });
   } catch (err) {
+    // If timeout middleware already responded, avoid double-send.
+    if (req.timedOut || res.headersSent) return;
     return sendError(res, err);
   }
 }

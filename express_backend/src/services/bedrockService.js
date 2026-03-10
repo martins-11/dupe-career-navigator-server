@@ -1394,7 +1394,37 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       body: Buffer.from(JSON.stringify(body))
     });
 
-    const resp = await client.send(cmd);
+    // Bedrock call timeout hardening:
+    // - Prevents requests from hanging until upstream/network timeouts.
+    // - Uses AbortController supported by AWS SDK v3.
+    const bedrockTimeoutMsRaw = Number(process.env.BEDROCK_TIMEOUT_MS || 20000);
+    const bedrockTimeoutMs =
+      Number.isFinite(bedrockTimeoutMsRaw) && bedrockTimeoutMsRaw > 0 ? bedrockTimeoutMsRaw : 20000;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), bedrockTimeoutMs);
+
+    let resp;
+    try {
+      resp = await client.send(cmd, { abortSignal: controller.signal });
+    } catch (e) {
+      // Normalize abort errors into a consistent bedrock_* code so sendError maps to 502/504 appropriately.
+      const isAbort =
+        e?.name === 'AbortError' ||
+        e?.code === 'ABORT_ERR' ||
+        String(e?.message || '').toLowerCase().includes('aborted');
+
+      if (isAbort) {
+        const err = new Error(`Bedrock request timed out after ${bedrockTimeoutMs}ms`);
+        err.code = 'bedrock_timeout';
+        err.details = { bedrockTimeoutMs };
+        throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeout);
+    }
+
     const jsonStr = Buffer.from(resp.body).toString('utf-8');
     const bedrockJson = JSON.parse(jsonStr);
 
