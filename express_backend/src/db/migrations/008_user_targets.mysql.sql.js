@@ -20,18 +20,17 @@ function getMigrationSql() {
 CREATE TABLE IF NOT EXISTS user_targets (
   id CHAR(36) PRIMARY KEY,
   user_id CHAR(36) NOT NULL,
-  role_id CHAR(36) NOT NULL,
+  role_id VARCHAR(255) NOT NULL,
   time_horizon VARCHAR(32) NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
 
   INDEX idx_user_targets_user_id_updated_at (user_id, updated_at),
-  INDEX idx_user_targets_role_id (role_id),
+  INDEX idx_user_targets_role_id (role_id)
 
-  CONSTRAINT fk_user_targets_role_id
-    FOREIGN KEY (role_id) REFERENCES roles(role_id)
-    ON DELETE RESTRICT
-    ON UPDATE CASCADE
+  -- IMPORTANT:
+  -- Do NOT add a foreign key to roles(role_id). Role identifiers are not guaranteed to be UUIDs,
+  -- and may come from multiple catalogs/sources. Persistence stores the chosen identifier as-is.
 ) ENGINE=InnoDB;
 `;
 }

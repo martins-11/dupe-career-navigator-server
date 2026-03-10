@@ -164,11 +164,19 @@ router.post('/target-role', async (req, res) => {
   }
 
   try {
-    // Ensure roles table is populated at least with seed data (best-effort).
-    // If DB isn't configured, rolesRepo.searchRoles/listRoles will be [] which is fine; we then 503 for persistence.
-    const roleExists = await rolesRepo.roleExists(parsed.data.role_id);
-    if (!roleExists) {
-      return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles table.' });
+    /**
+     * Role existence validation:
+     * - If DB roles catalog is available, validate role_id exists (helps catch client bugs/typos).
+     * - If DB is not configured, skip this check (role ids may come from seed/in-memory sources).
+     */
+    const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
+    const dbAvailable = getDbEngine() === 'mysql' && isDbConfigured() && isMysqlConfigured();
+
+    if (dbAvailable) {
+      const roleExists = await rolesRepo.roleExists(parsed.data.role_id);
+      if (!roleExists) {
+        return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles table.' });
+      }
     }
 
     const saved = await userTargetsRepo.upsertUserTargetRole({
