@@ -1394,12 +1394,42 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       body: Buffer.from(JSON.stringify(body))
     });
 
-    // Bedrock call timeout hardening:
-    // - Prevents requests from hanging until upstream/network timeouts.
-    // - Uses AbortController supported by AWS SDK v3.
+    /**
+     * Bedrock call timeout hardening (IMPORTANT):
+     * - We MUST return before the outer Express request timeout (default 30s).
+     * - Use a *tighter* Bedrock abort timeout, and (optionally) a time budget passed from the route
+     *   so we don't start a Bedrock call when there's no time left.
+     *
+     * Environment/config precedence:
+     * 1) options.timeBudgetMs (route-calculated remaining time)
+     * 2) BEDROCK_TIMEOUT_MS (default 20000)
+     *
+     * Additionally cap the timeout to BEDROCK_TIMEOUT_CAP_MS (default 12000) to reduce tail latency.
+     */
     const bedrockTimeoutMsRaw = Number(process.env.BEDROCK_TIMEOUT_MS || 20000);
-    const bedrockTimeoutMs =
+    const bedrockTimeoutDefault =
       Number.isFinite(bedrockTimeoutMsRaw) && bedrockTimeoutMsRaw > 0 ? bedrockTimeoutMsRaw : 20000;
+
+    const capRaw = Number(process.env.BEDROCK_TIMEOUT_CAP_MS || 12000);
+    const bedrockTimeoutCap =
+      Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 12000;
+
+    const budgetRaw = Number(options?.timeBudgetMs);
+    const timeBudgetMs = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : null;
+
+    // Choose timeout = min(default, cap, budget) (budget only if provided).
+    const candidates = [bedrockTimeoutDefault, bedrockTimeoutCap].filter((n) => Number.isFinite(n) && n > 0);
+    if (timeBudgetMs != null) candidates.push(timeBudgetMs);
+
+    const bedrockTimeoutMs = Math.max(1, Math.min(...candidates));
+
+    // If the caller tells us we have essentially no time, fail fast rather than invoking Bedrock.
+    if (timeBudgetMs != null && timeBudgetMs < 250) {
+      const err = new Error(`Bedrock skipped: insufficient time budget (${timeBudgetMs}ms)`);
+      err.code = 'bedrock_timeout';
+      err.details = { timeBudgetMs, bedrockTimeoutMs };
+      throw err;
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), bedrockTimeoutMs);

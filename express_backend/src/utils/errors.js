@@ -93,6 +93,9 @@ function _statusForError(err) {
    */
   if (code === 'missing_aws_region') return 503;
 
+  // Bedrock timeout should map to gateway timeout.
+  if (code === 'bedrock_timeout') return 504;
+
   // Common “bedrock_*” codes thrown by bedrockService parsing/validation.
   if (typeof code === 'string' && (code.startsWith('bedrock_') || code.startsWith('BEDROCK_'))) {
     return 502;

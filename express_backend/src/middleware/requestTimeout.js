@@ -14,6 +14,12 @@ function requestTimeout() {
     // Markers used by downstream handlers.
     req.timedOut = false;
 
+    // Expose timing metadata so downstream services can enforce a time budget
+    // (e.g., cap Bedrock invocation time to ensure we respond before timeout).
+    req.requestTimeoutMs = timeoutMs;
+    req.requestStartMs = Date.now();
+    req.requestDeadlineMs = req.requestStartMs + timeoutMs;
+
     // Use an explicit timer instead of res.setTimeout callback sending a response,
     // because res.setTimeout can still fire even if downstream sends later,
     // causing a second response attempt.

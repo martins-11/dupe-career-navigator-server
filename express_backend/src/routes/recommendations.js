@@ -183,12 +183,32 @@ async function handleInitialRecommendations(req, res) {
 
     // 2) Bedrock-only roles (exactly 5), with scored results.
     // IMPORTANT: strict mode (no deterministic fallback). If Bedrock fails/invalid output, we want an error response.
+    /**
+     * Enforce a time budget so this endpoint returns within the requestTimeout window.
+     * - Default Express timeout middleware is 30s.
+     * - We reserve a small buffer for JSON serialization + persistence best-effort.
+     * - We cap Bedrock latency via bedrockService AbortController timeout (BEDROCK_TIMEOUT_CAP_MS default 12s).
+     */
+    const now = Date.now();
+    const deadline = Number(req.requestDeadlineMs) || (now + Number(process.env.REQUEST_TIMEOUT_MS || 30000));
+    const remainingMs = Math.max(0, deadline - now);
+    const bufferMs = 750; // leave time to respond even under load
+    const timeBudgetMs = Math.max(0, remainingMs - bufferMs);
+
+    // If we are too close to timing out, fail fast.
+    if (timeBudgetMs < 500) {
+      const err = new Error('Request time budget exhausted before Bedrock invocation.');
+      err.code = 'bedrock_timeout';
+      err.details = { remainingMs, bufferMs, timeBudgetMs };
+      throw err;
+    }
+
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: personaIdRaw,
       // Bedrock-only endpoint: do not allow deterministic fallback from this route.
-      // (If Bedrock fails, surface 502/503 with details via sendError.)
-      options: {}
+      // (If Bedrock fails, surface 5xx with details via sendError.)
+      options: { timeBudgetMs }
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
