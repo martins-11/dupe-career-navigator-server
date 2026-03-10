@@ -1396,23 +1396,27 @@ async function getInitialRecommendations(finalPersona, options = {}) {
 
     /**
      * Bedrock call timeout hardening (IMPORTANT):
-     * - We MUST return before the outer Express request timeout (default 30s).
-     * - Use a *tighter* Bedrock abort timeout, and (optionally) a time budget passed from the route
-     *   so we don't start a Bedrock call when there's no time left.
+     * - We MUST return before the outer Express request timeout.
+     * - Use a route-provided time budget (options.timeBudgetMs) when available so we
+     *   don't start/continue a Bedrock call if the HTTP request is about to time out.
      *
      * Environment/config precedence:
      * 1) options.timeBudgetMs (route-calculated remaining time)
-     * 2) BEDROCK_TIMEOUT_MS (default 20000)
+     * 2) BEDROCK_TIMEOUT_MS (default 40000)
      *
-     * Additionally cap the timeout to BEDROCK_TIMEOUT_CAP_MS (default 12000) to reduce tail latency.
+     * Additionally cap the timeout to BEDROCK_TIMEOUT_CAP_MS (default 45000).
+     *
+     * NOTE:
+     * Previously the cap defaulted to 12000ms which caused premature `bedrock_timeout`
+     * for /api/recommendations/initial even when the endpoint is allowed to run longer.
      */
-    const bedrockTimeoutMsRaw = Number(process.env.BEDROCK_TIMEOUT_MS || 20000);
+    const bedrockTimeoutMsRaw = Number(process.env.BEDROCK_TIMEOUT_MS || 40000);
     const bedrockTimeoutDefault =
-      Number.isFinite(bedrockTimeoutMsRaw) && bedrockTimeoutMsRaw > 0 ? bedrockTimeoutMsRaw : 20000;
+      Number.isFinite(bedrockTimeoutMsRaw) && bedrockTimeoutMsRaw > 0 ? bedrockTimeoutMsRaw : 40000;
 
-    const capRaw = Number(process.env.BEDROCK_TIMEOUT_CAP_MS || 12000);
+    const capRaw = Number(process.env.BEDROCK_TIMEOUT_CAP_MS || 45000);
     const bedrockTimeoutCap =
-      Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 12000;
+      Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 45000;
 
     const budgetRaw = Number(options?.timeBudgetMs);
     const timeBudgetMs = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : null;

@@ -7,10 +7,25 @@ function requestTimeout() {
    * Important hardening:
    * - Ensures we send at most one response (prevents ERR_HTTP_HEADERS_SENT).
    * - Marks the request as timed out so downstream handlers can stop work/avoid responding.
+   *
+   * Timeout selection:
+   * - Global default: REQUEST_TIMEOUT_MS (30s)
+   * - For slow AI endpoints we allow a larger budget:
+   *   - REQUEST_TIMEOUT_INITIAL_RECOMMENDATIONS_MS (defaults to 45000)
    */
-  const timeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
+  const defaultTimeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
+  const initialRecommendationsTimeoutMs = Number(
+    process.env.REQUEST_TIMEOUT_INITIAL_RECOMMENDATIONS_MS || 45000
+  );
 
   return function requestTimeoutMiddleware(req, res, next) {
+    // Select a per-route timeout budget.
+    const isInitialRecommendations =
+      req.method === 'GET' && (req.path === '/api/recommendations/initial' || req.path.endsWith('/recommendations/initial'));
+
+    const timeoutMs = isInitialRecommendations
+      ? initialRecommendationsTimeoutMs
+      : defaultTimeoutMs;
     // Markers used by downstream handlers.
     req.timedOut = false;
 
