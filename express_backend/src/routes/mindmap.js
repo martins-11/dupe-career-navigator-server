@@ -436,9 +436,21 @@ router.post('/view-state', async (req, res) => {
     // This endpoint is called frequently (autosave). It must be resilient:
     // - Client bugs or race conditions should not create noisy 400s.
     // - We treat empty payloads as a no-op (200) and let callers continue using localStorage.
-    const body = req.body || {};
-    const hasUserId = body && typeof body.userId === 'string' && body.userId.trim().length > 0;
-    const hasState = body && typeof body.state === 'object' && body.state != null;
+    // - Some proxies/middleware can leave req.body as a raw string; parse it best-effort.
+    let body = req.body;
+
+    if (typeof body === 'string' && body.trim()) {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        // If body is not valid JSON, treat as no-op rather than 400 (autosave).
+        body = {};
+      }
+    }
+
+    body = body && typeof body === 'object' ? body : {};
+    const hasUserId = typeof body.userId === 'string' && body.userId.trim().length > 0;
+    const hasState = typeof body.state === 'object' && body.state != null;
 
     if (!hasUserId || !hasState) {
       return res.status(200).json({
