@@ -253,6 +253,113 @@ function _extractRolesJsonArrayFromText(text) {
     // ignore; fall through
   }
 
+  /**
+   * Truncation salvage (CRITICAL HARDENING):
+   * If the model output is truncated mid-object, full JSON.parse() fails and substring scanning can
+   * accidentally select a nested balanced array (e.g., key_responsibilities: string[]) instead of
+   * the top-level roles list (object[]).
+   *
+   * This attempts to recover the top-level array by:
+   * - Finding the first '['
+   * - Tracking string/brace/array depth
+   * - Capturing the last fully completed object '}' at arrayDepth===1
+   * - Synthesizing a valid JSON array by closing with ']'
+   */
+  const salvageTopLevelArrayIfTruncated = () => {
+    /**
+     * Prefer reconstructing from a ```json fenced block if present but missing closing fence.
+     * This is a common truncation shape in Bedrock/Claude outputs.
+     */
+    const fenceStart = trimmed.search(/```(?:json)?\s*/i);
+    const textForSalvage =
+      fenceStart >= 0 ? trimmed.slice(fenceStart).replace(/^```(?:json)?\s*/i, '') : trimmed;
+
+    const start = textForSalvage.indexOf('[');
+    if (start < 0) return null;
+
+    let inString = false;
+    let escape = false;
+    let arrayDepth = 0;
+    let objectDepth = 0;
+
+    // Index of last '}' that completed an object while inside the top-level array (arrayDepth===1).
+    let lastCompletedObjectEnd = -1;
+
+    for (let i = start; i < textForSalvage.length; i += 1) {
+      const ch = textForSalvage[i];
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') inString = false;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '[') arrayDepth += 1;
+      if (ch === ']') arrayDepth -= 1;
+
+      if (ch === '{') objectDepth += 1;
+      if (ch === '}') {
+        objectDepth -= 1;
+
+        if (objectDepth === 0 && arrayDepth === 1) {
+          lastCompletedObjectEnd = i;
+        }
+      }
+
+      // Not truncated: we found a full closing ']' for the array that started at `start`.
+      if (arrayDepth === 0 && i > start) return null;
+    }
+
+    // End-of-text: if we're still inside the array and we saw at least one completed object, salvage.
+    if (arrayDepth >= 1 && lastCompletedObjectEnd > start) {
+      const prefix = textForSalvage.slice(start, lastCompletedObjectEnd + 1).trim();
+      const withoutTrailingComma = prefix.replace(/,\s*$/, '');
+      const synthesized = `${withoutTrailingComma}\n]`;
+
+      try {
+        const parsed = JSON.parse(synthesized);
+
+        // Only accept salvage if it's plausibly the top-level role object array (array-of-objects),
+        // never a nested string[] like key_responsibilities.
+        const isArrayOfObjects =
+          Array.isArray(parsed) &&
+          parsed.length > 0 &&
+          parsed.every((x) => x && typeof x === 'object' && !Array.isArray(x));
+
+        if (!isArrayOfObjects) return null;
+
+        // Additional guard: at least one element should have role-like keys.
+        const roleLikeKeys = ['title', 'role_title', 'industry', 'salary_lpa_range', 'salary_range', 'required_skills'];
+        const looksRoleLike = parsed.some((o) =>
+          roleLikeKeys.reduce((n, k) => (Object.prototype.hasOwnProperty.call(o, k) ? n + 1 : n), 0) >= 2
+        );
+
+        if (looksRoleLike) return { parsed, text: synthesized };
+      } catch (_) {
+        return null;
+      }
+    }
+
+    return null;
+  };
+
+  const salvaged = salvageTopLevelArrayIfTruncated();
+  if (salvaged && Array.isArray(salvaged.parsed)) {
+    return { array: salvaged.parsed, extractedText: salvaged.text, parseError: null };
+  }
+
   // Enumerate all balanced JSON arrays in the text, respecting JSON strings.
   const starts = [];
   for (let i = 0; i < trimmed.length; i += 1) if (trimmed[i] === '[') starts.push(i);
@@ -299,13 +406,18 @@ function _extractRolesJsonArrayFromText(text) {
   const roleKeyHints = new Set([
     'title',
     'role_title',
+    'roleTitle',
     'industry',
     'salary_lpa_range',
     'salary_range',
+    'salaryRange',
     'experience_range',
+    'experienceRange',
     'required_skills',
     'skills_required',
+    'skillsRequired',
     'key_responsibilities',
+    'keyResponsibilities',
     'description'
   ]);
 
@@ -336,24 +448,43 @@ function _extractRolesJsonArrayFromText(text) {
     /**
      * Prefer the top-level array-of-role-objects.
      *
-     * Key failure mode (authoritative bug report):
-     * - Model output JSON is truncated/invalid, so JSON.parse(full) fails
+     * Authoritative failure mode:
      * - Substring scanning finds *balanced* nested arrays like key_responsibilities (string[])
      * - If scoring isn't decisive enough, we can still pick the nested array
      *
-     * We therefore:
-     * - Heavily reward role-like object arrays.
-     * - Heavily penalize string arrays.
-     * - Add more weight to larger arrays (top-level role list is usually length 5).
+     * Hardening:
+     * - If the sample is mostly strings and contains no objects, treat as a nested list and
+     *   massively penalize it.
+     * - Strongly reward arrays where most elements look like role objects.
      */
+    const sampleSize = sample.length || 1;
+    const objectRatio = objectCount / sampleSize;
+    const roleLikeRatio = roleLikeObjectCount / sampleSize;
+    const stringRatio = stringCount / sampleSize;
+
+    // If it's clearly a string[] (nested responsibilities/skills), avoid selecting it.
+    if (objectCount === 0 && stringCount > 0) return -100000;
+
     let score = 0;
 
-    score += roleLikeObjectCount * 140;
-    score += objectCount * 10;
-    score -= stringCount * 110;
+    // Reward role-like objects heavily.
+    score += roleLikeObjectCount * 220;
+
+    // Reward objects mildly.
+    score += objectCount * 20;
+
+    // Penalize strings heavily (nested arrays often all strings).
+    score -= stringCount * 180;
+
+    // Prefer candidates where most elements are objects/role-like.
+    score += objectRatio * 120;
+    score += roleLikeRatio * 220;
 
     // Larger arrays are more likely to be the outer role list (commonly 5).
-    score += Math.min(arr.length, 50) * 0.7;
+    score += Math.min(arr.length, 50) * 1.2;
+
+    // If the array is mostly strings, penalize further.
+    score -= stringRatio * 250;
 
     return score;
   };
@@ -787,7 +918,10 @@ async function generateTargetedRoles(userPersona, options = {}) {
   }
 
   const rawText = _extractClaudeText(bedrockJson);
-  const extracted = _extractJsonArrayFromText(rawText);
+
+  // IMPORTANT: target role generation must select the TOP-LEVEL array of role objects.
+  // A generic "first array" extractor can accidentally select nested arrays like key_responsibilities (string[]).
+  const extracted = _extractRolesJsonArrayFromText(rawText);
 
   if (!extracted.array) {
     const err = new Error('Could not extract a JSON array from Bedrock model output.');
@@ -841,8 +975,29 @@ async function generateTargetedRoles(userPersona, options = {}) {
  * @returns {Promise<{roles:Array, bedrockJsonRoles:Array, usedFallback:boolean, modelId:string, prompt:string, error?:object}>}
  */
 async function generateTargetedRolesSafe(userPersona, options = {}) {
+  /**
+   * IMPORTANT:
+   * Some callers (notably autocomplete) must be "Bedrock-only" and should NOT return deterministic
+   * fallback titles because that creates misleading, static UX.
+   *
+   * Default remains allowFallback=true to preserve existing behavior in places that prefer
+   * "always return 5 roles" (e.g. demos / non-critical flows).
+   */
+  const allowFallback = options?.allowFallback !== false;
+
   try {
     const result = await generateTargetedRoles(userPersona, options);
+
+    // If caller disallows fallback, do not pad with deterministic roles.
+    if (!allowFallback) {
+      return {
+        roles: Array.isArray(result.roles) ? result.roles : [],
+        bedrockJsonRoles: null,
+        usedFallback: false,
+        modelId: result.modelId,
+        prompt: result.prompt
+      };
+    }
 
     // Extra hardening: even if Bedrock succeeded, ensure we always return 5 roles.
     // If not, degrade gracefully to the logic-based fallback instead of letting callers 500.
@@ -871,6 +1026,21 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
       prompt: result.prompt
     };
   } catch (err) {
+    // Strict mode: do not fallback; surface empty result to caller so route can return [].
+    if (!allowFallback) {
+      return {
+        roles: [],
+        bedrockJsonRoles: null,
+        usedFallback: false,
+        modelId: _resolveModelId({
+          override: options.modelId,
+          envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+        }),
+        prompt: _buildStrictJsonPrompt(userPersona),
+        error: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) }
+      };
+    }
+
     const fallbackBedrockJsonRoles = _fallbackBedrockJsonRoles();
     const normalized = _validateAndNormalizeGeneratedRoles(fallbackBedrockJsonRoles);
 
@@ -986,6 +1156,7 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
       r.salary_lpa_range ||
         r.salary_range ||
         r.salaryRange ||
+        r.salary_lpa ||
         r.salaryLpaRange ||
         r.salaryLpa ||
         r.salary
@@ -1229,11 +1400,21 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     ]
   };
 
-  // When false, we throw instead of returning deterministic fallback roles.
+  /**
+   * When false, we throw instead of returning deterministic fallback roles.
+   * IMPORTANT: This function must NEVER return undefined. In allowFallback=true mode we must
+   * return a stable fallback payload.
+   */
   const allowFallback = options?.allowFallback !== false;
 
-  // Enforce strict mode: if allowFallback is false, disable recovery and strictly surface errors.
-  // (No code changes here: the fallback logic is below; we will eliminate fallback there.)
+  // Minimal retry for transient Bedrock issues (common after restarts / brief throttling).
+  const retries = Number.isFinite(Number(options?.retries))
+    ? Math.max(0, Math.min(2, Number(options.retries)))
+    : 1;
+
+  const retryDelayMs = Number.isFinite(Number(options?.retryDelayMs))
+    ? Math.max(0, Math.min(2000, Number(options.retryDelayMs)))
+    : 250;
 
   // ENV-gated diagnostics (do NOT enable by default in production).
   const debugRaw = String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true';
@@ -1243,7 +1424,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
   let debugExtractedText = null;
   let debugExtractedArrayPreview = null;
 
-  try {
+  const invokeOnce = async () => {
     const client = _getBedrockClient();
     const cmd = new InvokeModelCommand({
       modelId,
@@ -1252,7 +1433,71 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       body: Buffer.from(JSON.stringify(body))
     });
 
-    const resp = await client.send(cmd);
+    /**
+     * Bedrock call timeout hardening (IMPORTANT):
+     * - We MUST return before the outer Express request timeout.
+     * - Use a route-provided time budget (options.timeBudgetMs) when available so we
+     *   don't start/continue a Bedrock call if the HTTP request is about to time out.
+     *
+     * Environment/config precedence:
+     * 1) options.timeBudgetMs (route-calculated remaining time)
+     * 2) BEDROCK_TIMEOUT_MS (default 40000)
+     *
+     * Additionally cap the timeout to BEDROCK_TIMEOUT_CAP_MS (default 45000).
+     *
+     * NOTE:
+     * Previously the cap defaulted to 12000ms which caused premature `bedrock_timeout`
+     * for /api/recommendations/initial even when the endpoint is allowed to run longer.
+     */
+    const bedrockTimeoutMsRaw = Number(process.env.BEDROCK_TIMEOUT_MS || 40000);
+    const bedrockTimeoutDefault =
+      Number.isFinite(bedrockTimeoutMsRaw) && bedrockTimeoutMsRaw > 0 ? bedrockTimeoutMsRaw : 40000;
+
+    const capRaw = Number(process.env.BEDROCK_TIMEOUT_CAP_MS || 45000);
+    const bedrockTimeoutCap =
+      Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 45000;
+
+    const budgetRaw = Number(options?.timeBudgetMs);
+    const timeBudgetMs = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : null;
+
+    // Choose timeout = min(default, cap, budget) (budget only if provided).
+    const candidates = [bedrockTimeoutDefault, bedrockTimeoutCap].filter((n) => Number.isFinite(n) && n > 0);
+    if (timeBudgetMs != null) candidates.push(timeBudgetMs);
+
+    const bedrockTimeoutMs = Math.max(1, Math.min(...candidates));
+
+    // If the caller tells us we have essentially no time, fail fast rather than invoking Bedrock.
+    if (timeBudgetMs != null && timeBudgetMs < 250) {
+      const err = new Error(`Bedrock skipped: insufficient time budget (${timeBudgetMs}ms)`);
+      err.code = 'bedrock_timeout';
+      err.details = { timeBudgetMs, bedrockTimeoutMs };
+      throw err;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), bedrockTimeoutMs);
+
+    let resp;
+    try {
+      resp = await client.send(cmd, { abortSignal: controller.signal });
+    } catch (e) {
+      // Normalize abort errors into a consistent bedrock_* code so sendError maps to 502/504 appropriately.
+      const isAbort =
+        e?.name === 'AbortError' ||
+        e?.code === 'ABORT_ERR' ||
+        String(e?.message || '').toLowerCase().includes('aborted');
+
+      if (isAbort) {
+        const err = new Error(`Bedrock request timed out after ${bedrockTimeoutMs}ms`);
+        err.code = 'bedrock_timeout';
+        err.details = { bedrockTimeoutMs };
+        throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeout);
+    }
+
     const jsonStr = Buffer.from(resp.body).toString('utf-8');
     const bedrockJson = JSON.parse(jsonStr);
 
@@ -1276,18 +1521,6 @@ async function getInitialRecommendations(finalPersona, options = {}) {
         rawText: rawText.slice(0, 5000),
         extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
       };
-
-      if (debugRaw) {
-        // eslint-disable-next-line no-console
-        console.warn('[bedrock][initialRecommendations] JSON array extraction failed', {
-          modelId,
-          bedrockJsonKeys:
-            bedrockJson && typeof bedrockJson === 'object' ? Object.keys(bedrockJson).slice(0, 50) : null,
-          rawTextLength: typeof rawText === 'string' ? rawText.length : null,
-          rawTextPreview: typeof rawText === 'string' ? rawText.slice(0, 2000) : null
-        });
-      }
-
       throw err;
     }
 
@@ -1304,8 +1537,15 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const roles = Array.isArray(validated?.roles) ? validated.roles : [];
     const validationStats = validated?.stats && typeof validated.stats === 'object' ? validated.stats : null;
 
-    if (roles.length < 5) {
-      const err = new Error(`Bedrock returned ${roles.length} valid initial recommendations; expected 5.`);
+    /**
+     * IMPORTANT (bugfix):
+     * Initial recommendations must succeed when Bedrock returns fewer than 5 *valid* roles.
+     * The endpoint contract for /api/recommendations/initial is "1–5 roles", and strict mode
+     * (allowFallback=false) should only throw when Bedrock fails entirely (timeout, invalid JSON, etc),
+     * not when it returns 1–4 good items.
+     */
+    if (roles.length < 1) {
+      const err = new Error('Bedrock returned 0 valid initial recommendations.');
       err.code = 'bedrock_insufficient_roles';
       if (debugRaw) {
         err.details = {
@@ -1314,10 +1554,6 @@ async function getInitialRecommendations(finalPersona, options = {}) {
           rawText: debugRawText,
           extractedText: debugExtractedText,
           extractedArrayPreview: debugExtractedArrayPreview,
-          /**
-           * Primary actionable payload:
-           * shows exactly why items were rejected (missing_salary, insufficient_required_skills, etc)
-           */
           validationStats,
           validatedCount: roles.length,
           extractedCount: Array.isArray(extracted.array) ? extracted.array.length : null
@@ -1326,7 +1562,23 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       throw err;
     }
 
+    // Return up to 5; do not error if fewer than 5 are valid.
     return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
+  };
+
+  try {
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        return await invokeOnce();
+      } catch (err) {
+        if (attempt >= retries) throw err;
+        attempt += 1;
+        // Small deterministic backoff.
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
+    }
   } catch (err) {
     // Attach env-gated diagnostics for upstream meta/error surfacing.
     if (debugRaw && err && typeof err === 'object') {
@@ -1344,8 +1596,21 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       throw err;
     }
 
-    // Legacy fallback code path intentionally removed for strict mode: errors now propagated, never masked.
+    /**
+     * Non-strict mode: return deterministic fallback roles (stable contract).
+     * This avoids the prior bug where allowFallback=true caused an implicit undefined return,
+     * which downstream treated as "0 roles" and surfaced as intermittent 502s.
+     */
+    const fallbackRoles = _fallbackBedrockJsonRoles();
+    const validatedFallback = _validateAndNormalizeInitialRecommendations(fallbackRoles, { debug: false });
 
+    return {
+      roles: (validatedFallback?.roles || []).slice(0, 5),
+      usedFallback: true,
+      modelId,
+      prompt,
+      error: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) }
+    };
   }
 }
 

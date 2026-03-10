@@ -3,6 +3,66 @@
 const bedrockService = require('./bedrockService');
 const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine');
 
+function _clampPercent(n) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+/**
+ * Build UI-friendly ring scores from 3/2 report + compatibility.
+ * - masteryScore: percent of required skills that are in masteryAreas
+ * - growthScore: percent of required skills that are in growthAreas
+ * Both are 0..100 integers.
+ */
+function _buildRingScores({ requiredSkillsCount, masteryAreas, growthAreas } = {}) {
+  const denom = Number.isFinite(requiredSkillsCount) && requiredSkillsCount > 0 ? requiredSkillsCount : 0;
+  if (!denom) {
+    return {
+      masteryScore: 0,
+      growthScore: 0,
+      masteryCount: Array.isArray(masteryAreas) ? masteryAreas.length : 0,
+      growthCount: Array.isArray(growthAreas) ? growthAreas.length : 0,
+    };
+  }
+
+  const masteryCount = Array.isArray(masteryAreas) ? masteryAreas.length : 0;
+  const growthCount = Array.isArray(growthAreas) ? growthAreas.length : 0;
+
+  return {
+    masteryScore: _clampPercent((masteryCount / denom) * 100),
+    growthScore: _clampPercent((growthCount / denom) * 100),
+    masteryCount,
+    growthCount,
+  };
+}
+
+function _threeTwoValidationScore(threeTwoReport) {
+  // Per current engine: validated => 100 else 0.
+  if (!threeTwoReport || typeof threeTwoReport !== 'object') return 0;
+  return threeTwoReport.status === 'validated' ? 100 : 0;
+}
+
+function _rerankByThreeTwoAndCompatibility(scoredRoles) {
+  const arr = Array.isArray(scoredRoles) ? [...scoredRoles] : [];
+  arr.sort((a, b) => {
+    const aThreeTwo = _threeTwoValidationScore(a?.threeTwoReport);
+    const bThreeTwo = _threeTwoValidationScore(b?.threeTwoReport);
+
+    if (bThreeTwo !== aThreeTwo) return bThreeTwo - aThreeTwo;
+
+    const aCompat = Number.isFinite(a?.compatibilityScore) ? a.compatibilityScore : -1;
+    const bCompat = Number.isFinite(b?.compatibilityScore) ? b.compatibilityScore : -1;
+
+    if (bCompat !== aCompat) return bCompat - aCompat;
+
+    // Stable deterministic fallback: keep original order (by role_id/title)
+    const aTitle = String(a?.role_title || a?.title || '');
+    const bTitle = String(b?.role_title || b?.title || '');
+    return aTitle.localeCompare(bTitle, undefined, { sensitivity: 'base' });
+  });
+  return arr;
+}
+
 function _extractPersonaSkillsWithProficiency(finalPersona) {
   /**
    * Extract proficiency-bearing skills from a Finalized Persona.
@@ -11,8 +71,7 @@ function _extractPersonaSkillsWithProficiency(finalPersona) {
    * - Compatibility scoring is only meaningful when we have proficiency-bearing skills (name + percent).
    * - The finalized persona can arrive in multiple shapes; we support common variants.
    *
-   * If we only have string skill names (no proficiency), scoring becomes 0 and threeTwoReport
-   * becomes not_validated. In that case we still return roles, but we do NOT fabricate proficiencies.
+   * We ONLY accept numeric proficiencies. We do not infer or fabricate proficiencies from string skills.
    */
   const p = finalPersona && typeof finalPersona === 'object' ? finalPersona : {};
 
@@ -55,7 +114,8 @@ function _extractPersonaSkillsWithProficiency(finalPersona) {
         row.value ??
         null;
 
-      const n = Number(rawProf);
+      // CRITICAL: scoring must ONLY use numeric proficiency values.
+      const n = typeof rawProf === 'number' ? rawProf : Number(rawProf);
       if (!name || !Number.isFinite(n)) continue;
 
       out.push({ name, proficiency: Math.max(0, Math.min(100, Math.round(n))) });
@@ -67,66 +127,215 @@ function _extractPersonaSkillsWithProficiency(finalPersona) {
   return [];
 }
 
-function _ensureExactlyFiveRoles(roles) {
-  const arr = Array.isArray(roles) ? roles : [];
-  if (arr.length === 5) return arr;
-  if (arr.length > 5) return arr.slice(0, 5);
+function _normalizeRoleForInitialRecommendations(role) {
+  if (!role || typeof role !== 'object') return null;
 
-  const err = new Error(`Generator returned ${arr.length} roles; expected exactly 5.`);
-  err.code = 'initial_recommendations_invalid_count';
-  err.httpStatus = 502;
-  throw err;
+  // Normalize required skills to a stable 5–8 item string[] (per endpoint contract + Bedrock prompt).
+  const rawRequiredSkills = Array.isArray(role.required_skills)
+    ? role.required_skills
+    : Array.isArray(role.skills_required)
+      ? role.skills_required
+      : [];
+
+  const requiredSkills = rawRequiredSkills
+    .map((s) => String(typeof s === 'string' ? s : s?.name || s?.skill || s?.label || '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
+  return {
+    ...role,
+    key_responsibilities: Array.isArray(role.key_responsibilities) ? role.key_responsibilities.slice(0, 3) : [],
+    required_skills: requiredSkills
+  };
+}
+
+function _dedupeByRoleTitle(roles) {
+  const out = [];
+  const seen = new Set();
+
+  for (const r of Array.isArray(roles) ? roles : []) {
+    if (!r || typeof r !== 'object') continue;
+
+    const title = String(r.role_title || r.title || '').trim();
+    const key = title ? title.toLowerCase() : null;
+
+    // If we can't key it, keep it (best-effort), but still avoid pushing duplicates by identical object ref.
+    if (!key) {
+      out.push(r);
+      continue;
+    }
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+
+  return out;
+}
+
+function _markFallback(role, { reason }) {
+  const normalized = _normalizeRoleForInitialRecommendations(role);
+  if (!normalized) return null;
+
+  return {
+    ...normalized,
+    match_metadata: {
+      ...(normalized.match_metadata && typeof normalized.match_metadata === 'object' ? normalized.match_metadata : {}),
+      // Mark the role as fallback-filled at the role level (requirement).
+      isFallbackFilled: true,
+      fallbackReason: reason || 'padded_to_exactly_five'
+    }
+  };
+}
+
+function _markNonFallback(role) {
+  const normalized = _normalizeRoleForInitialRecommendations(role);
+  if (!normalized) return null;
+
+  return {
+    ...normalized,
+    match_metadata: {
+      ...(normalized.match_metadata && typeof normalized.match_metadata === 'object' ? normalized.match_metadata : {}),
+      // Explicitly mark that this role is NOT fallback-filled (helps UI determinism).
+      isFallbackFilled: false
+    }
+  };
+}
+
+function _padToExactlyFiveRoles({ bedrockRoles, fallbackCatalog }) {
+  /**
+   * Accept 1–5 Bedrock roles, and deterministically pad to exactly 5 using the fallback catalog.
+   * - Never throws for <5.
+   * - Deterministic ordering: keep Bedrock roles first, then fill in order from catalog.
+   * - Avoid duplicates by role title.
+   * - Mark padded roles with match_metadata.isFallbackFilled=true.
+   */
+  const bedrockArr = Array.isArray(bedrockRoles) ? bedrockRoles : [];
+  const fallbackArr = Array.isArray(fallbackCatalog) ? fallbackCatalog : [];
+
+  // Normalize and mark Bedrock roles as non-fallback.
+  const cleanedBedrock = bedrockArr
+    .map(_markNonFallback)
+    .filter(Boolean);
+
+  // Dedupe Bedrock first to avoid double-counting.
+  const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 5);
+
+  if (uniqueBedrock.length === 5) {
+    return { roles: uniqueBedrock, paddedCount: 0 };
+  }
+
+  const need = 5 - uniqueBedrock.length;
+
+  // Fill from fallback catalog deterministically (in the catalog order).
+  const uniqueExistingTitles = new Set(
+    uniqueBedrock
+      .map((r) => String(r.role_title || r.title || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const padded = [];
+  for (const fb of fallbackArr) {
+    if (padded.length >= need) break;
+
+    const title = String(fb?.role_title || fb?.title || '').trim();
+    const key = title ? title.toLowerCase() : null;
+
+    if (key && uniqueExistingTitles.has(key)) continue;
+
+    const marked = _markFallback(fb, { reason: 'bedrock_returned_fewer_than_five' });
+    if (!marked) continue;
+
+    if (key) uniqueExistingTitles.add(key);
+    padded.push(marked);
+  }
+
+  // Final guard: if fallback catalog was somehow too small, slice what we have (still deterministic).
+  const combined = uniqueBedrock.concat(padded).slice(0, 5);
+
+  return { roles: combined, paddedCount: Math.max(0, combined.length - uniqueBedrock.length) };
 }
 
 function _scoreRoles(finalPersona, roles) {
   const userSkillsForScoring = _extractPersonaSkillsWithProficiency(finalPersona);
+  const hadUserProficiencies = userSkillsForScoring.length > 0;
 
-  return roles.map((r) => {
-    // Normalize required skills to a stable 5–8 item string[] (per endpoint contract + Bedrock prompt).
-    const rawRequiredSkills = Array.isArray(r.required_skills)
-      ? r.required_skills
-      : Array.isArray(r.skills_required)
-        ? r.skills_required
-        : [];
+  return (Array.isArray(roles) ? roles : []).map((r) => {
+    const normalized = _normalizeRoleForInitialRecommendations(r) || r;
 
-    const requiredSkills = rawRequiredSkills
-      .map((s) => String(typeof s === 'string' ? s : s?.name || s?.skill || s?.label || '').trim())
-      .filter(Boolean)
-      .slice(0, 8);
+    const requiredSkills = Array.isArray(normalized.required_skills) ? normalized.required_skills : [];
+    const requiredSkillsCount = requiredSkills.length;
 
-    const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, requiredSkills);
-    const compat = scoreRoleCompatibility(userSkillsForScoring, requiredSkills);
+    // When no numeric proficiencies exist, skip scoring gracefully.
+    // Do NOT fabricate proficiencies; do NOT emit misleading 0 scoring artifacts.
+    const threeTwoReport = hadUserProficiencies
+      ? buildThreeTwoReport(userSkillsForScoring, requiredSkills)
+      : null;
+
+    const compat = hadUserProficiencies
+      ? scoreRoleCompatibility(userSkillsForScoring, requiredSkills)
+      : { score: null, masteryAreas: [], growthAreas: [] };
+
+    const ring = hadUserProficiencies
+      ? _buildRingScores({
+          requiredSkillsCount,
+          masteryAreas: compat.masteryAreas,
+          growthAreas: compat.growthAreas,
+        })
+      : { masteryScore: null, growthScore: null, masteryCount: 0, growthCount: 0 };
+
+    const threeTwoValidationScore = hadUserProficiencies ? _threeTwoValidationScore(threeTwoReport) : null;
+
+    // Final compatibility used for sorting / display: prioritize 3/2 validation, then skill coverage.
+    // Keep as 0..100 number when scoring is available.
+    const finalCompatibilityScore = hadUserProficiencies
+      ? _clampPercent(0.6 * (compat.score || 0) + 0.4 * (threeTwoValidationScore || 0))
+      : null;
 
     return {
-      ...r,
-      key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
-      required_skills: requiredSkills,
+      ...normalized,
+
+      // Core scoring outputs
       threeTwoReport,
-      compatibilityScore: compat.score,
+      compatibilityScore: hadUserProficiencies ? compat.score : null,
+      finalCompatibilityScore,
+
+      // Explicit mastery/growth areas for UI and debugging
+      masteryAreas: hadUserProficiencies ? compat.masteryAreas : [],
+      growthAreas: hadUserProficiencies ? compat.growthAreas : [],
+
+      // Ring-friendly scores (0..100) for the UI circles
+      masteryScore: hadUserProficiencies ? ring.masteryScore : null,
+      growthScore: hadUserProficiencies ? ring.growthScore : null,
+      masteryCount: hadUserProficiencies ? ring.masteryCount : 0,
+      growthCount: hadUserProficiencies ? ring.growthCount : 0,
+
       match_metadata: {
-        ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+        ...(normalized.match_metadata && typeof normalized.match_metadata === 'object' ? normalized.match_metadata : {}),
         scoring: {
-          hadUserProficiencies: userSkillsForScoring.length > 0,
-          requiredSkillsCount: requiredSkills.length
-        }
-      }
+          hadUserProficiencies,
+          requiredSkillsCount,
+          scoringSkipped: !hadUserProficiencies,
+          threeTwoValidationScore,
+        },
+      },
     };
   });
 }
 
 /**
  * PUBLIC_INTERFACE
- * Generate initial recommendations (EXACTLY 5 roles) using ONLY AWS Bedrock.
+ * Generate initial recommendations (Bedrock-only; returns 1–5 roles).
  *
- * This function has been hardened for "strict mode" – all fallback is forcibly disabled.
- * Any Bedrock or persona validation error will be surfaced directly; deterministic fallback roles no longer exist.
+ * Behavior:
+ * - Returns ONLY roles produced by Bedrock (after normalization + dedupe).
+ * - Allows returning fewer than 5 roles; NO deterministic padding/fill is applied.
+ * - Bedrock internal fallback is disabled; if Bedrock fails entirely, this function throws.
+ * - Scoring uses ONLY numeric proficiencies; if none exist, scoring is skipped gracefully.
  */
 async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPersona, personaId, options = {} } = {}) {
-  // Harden: force fallback to be disallowed at all times, regardless of input.
-  const strictOptions = { ...options, allowFallback: false };
-
   if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
-    const err = new Error('finalPersona is required for recommendations; fallback is disallowed.');
+    const err = new Error('finalPersona is required for recommendations.');
     err.code = 'missing_final_persona';
     err.httpStatus = 400;
     throw err;
@@ -135,66 +344,52 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   const profs = _extractPersonaSkillsWithProficiency(finalPersona);
   const hasPersonaProficiencies = Array.isArray(profs) && profs.length > 0;
 
-  // Strict: call Bedrock, which will throw on invalid output, never returning fallback.
   const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
     context: null,
-    allowFallback: false // override any caller option
+    allowFallback: false,
+    ...(options && typeof options === 'object' ? options : {})
   });
 
-  // If Bedrock throws, will never reach here; scoring will match only genuine results.
-  const roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
+  // Normalize and mark Bedrock roles as non-fallback, then dedupe and cap to 5.
+  const cleanedBedrock = (Array.isArray(bedrockResult?.roles) ? bedrockResult.roles : [])
+    .map(_markNonFallback)
+    .filter(Boolean);
 
-  // For strict mode, no fallback, surface errors only if real Bedrock errors.
-  const bedrockError =
-    bedrockResult?.usedFallback && bedrockResult?.error && typeof bedrockResult.error === 'object'
-      ? {
-          code: bedrockResult.error.code || 'BEDROCK_FAILED',
-          message: bedrockResult.error.message || null,
-          name: bedrockResult.error.name || null,
-          httpStatusCode: bedrockResult.error.httpStatusCode ?? null,
-          requestId: bedrockResult.error.requestId ?? null,
-          extendedRequestId: bedrockResult.error.extendedRequestId ?? null,
-          cfId: bedrockResult.error.cfId ?? null,
-          attempts: bedrockResult.error.attempts ?? null,
-          totalRetryDelay: bedrockResult.error.totalRetryDelay ?? null,
-          fault: bedrockResult.error.fault ?? null,
-          service: bedrockResult.error.service ?? null,
-          details:
-            bedrockResult.error.details && typeof bedrockResult.error.details === 'object'
-              ? bedrockResult.error.details
-              : null
-        }
-      : null;
+  const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 5);
 
-  const scored = _scoreRoles(finalPersona, roles).map((r) => ({
+  const scored = _scoreRoles(finalPersona, uniqueBedrock).map((r) => ({
     ...r,
     match_metadata: {
       ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
       persona: {
         personaId: personaId || null,
-        usedPersonaProficiencies: hasPersonaProficiencies
+        usedPersonaProficiencies: hasPersonaProficiencies,
       },
-      grounding: {
-        source: 'none'
-      },
-      bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
+      grounding: { source: 'none' },
+      bedrockUsedFallback: false,
       bedrockModelId: bedrockResult?.modelId || null,
-      ...(bedrockError ? { bedrockError } : {})
-    }
+    },
   }));
 
+  const reranked = _rerankByThreeTwoAndCompatibility(scored);
+
   return {
-    roles: scored,
+    roles: reranked,
     meta: {
       personaId: personaId || null,
       hasPersonaProficiencies,
+      count: reranked.length,
       onetGrounded: false,
       onetError: null,
-      bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
+      bedrockUsedFallback: false,
       endpointFallbackUsed: false,
-      bedrockError
-    }
+      endpointPaddingUsed: false,
+      paddedCount: 0,
+      bedrockError: null,
+      rerankedBy: 'threeTwoValidation_then_compatibility',
+    },
   };
 }
 
 module.exports = { generateInitialRecommendationsPersonaDrivenBedrockOnly };
+

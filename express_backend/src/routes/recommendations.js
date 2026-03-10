@@ -183,15 +183,39 @@ async function handleInitialRecommendations(req, res) {
 
     // 2) Bedrock-only roles (exactly 5), with scored results.
     // IMPORTANT: strict mode (no deterministic fallback). If Bedrock fails/invalid output, we want an error response.
+    /**
+     * Enforce a time budget so this endpoint returns within the requestTimeout window.
+     * - Default Express timeout middleware is 30s.
+     * - We reserve a small buffer for JSON serialization + persistence best-effort.
+     * - We cap Bedrock latency via bedrockService AbortController timeout (BEDROCK_TIMEOUT_CAP_MS default 12s).
+     */
+    const now = Date.now();
+    const deadline = Number(req.requestDeadlineMs) || (now + Number(process.env.REQUEST_TIMEOUT_MS || 30000));
+    const remainingMs = Math.max(0, deadline - now);
+    const bufferMs = 750; // leave time to respond even under load
+    const timeBudgetMs = Math.max(0, remainingMs - bufferMs);
+
+    // If we are too close to timing out, fail fast.
+    if (timeBudgetMs < 500) {
+      const err = new Error('Request time budget exhausted before Bedrock invocation.');
+      err.code = 'bedrock_timeout';
+      err.details = { remainingMs, bufferMs, timeBudgetMs };
+      throw err;
+    }
+
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: personaIdRaw,
-      options: { allowFallback: false }
+      // Bedrock-only endpoint: do not allow deterministic fallback from this route.
+      // (If Bedrock fails, surface 5xx with details via sendError.)
+      options: { timeBudgetMs }
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
-    if (roles.length !== 5) {
-      const err = new Error(`Initial recommendations generator returned ${roles.length} roles; expected exactly 5.`);
+    if (roles.length < 1 || roles.length > 5) {
+      const err = new Error(
+        `Initial recommendations generator returned ${roles.length} roles; expected 1–5 Bedrock-generated roles.`
+      );
       err.code = 'initial_recommendations_invalid_count';
       err.httpStatus = 502;
       throw err;
@@ -212,15 +236,19 @@ async function handleInitialRecommendations(req, res) {
 
     const meta = {
       ...(result?.meta || {}),
-      endpointFallbackUsed: false,
+      count: roles.length,
       personaFallbackReason: null,
-      // Frontend uses this to show a clear warning when the response is deterministic fallback
-      // (often due to missing AWS_REGION / wrong model id / Bedrock throttling / invalid JSON).
-      bedrockUsedFallback: Boolean(result?.meta?.bedrockUsedFallback)
+      // Initial recommendations must be Bedrock-only; keep this explicitly false for this route.
+      bedrockUsedFallback: false
     };
+
+    // If the request already timed out (or response was already sent), do not attempt a second response.
+    if (req.timedOut || res.headersSent) return;
 
     return res.json({ roles, meta });
   } catch (err) {
+    // If timeout middleware already responded, avoid double-send.
+    if (req.timedOut || res.headersSent) return;
     return sendError(res, err);
   }
 }
