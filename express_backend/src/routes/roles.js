@@ -224,43 +224,39 @@ router.get('/autocomplete', async (req, res) => {
     if (query.length < 2) return res.json([]);
 
     /**
-     * Persona-driven Bedrock autocomplete (additive; fixes user report).
-     * Query params (optional):
-     * - personaId / persona_id: if provided, Bedrock can tailor suggestions to the persona.
-     * - useBedrock: "true" enables Bedrock-backed suggestions (default true).
+     * Bedrock-only autocomplete (per task requirements: no static catalog sources, no fallback).
      *
-     * Fallback:
-     * - If Bedrock fails or is disabled, fall back to catalog-derived titles.
+     * Query params:
+     * - q: string (>=2 chars)
+     * - limit: number (default 6; max 20)
+     * - personaId / persona_id: optional persona id for persona-aware suggestions
+     *
+     * Response:
+     * - string[] (role titles)
+     *
+     * Failure behavior:
+     * - If Bedrock fails/unavailable, return [] (HTTP 200) rather than catalog/static titles.
      */
-    const useBedrock = String(req.query?.useBedrock ?? 'true').toLowerCase() !== 'false';
     const personaId = req.query?.personaId || req.query?.persona_id;
 
-    if (useBedrock) {
-      try {
-        const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
-        const roles = await exploreSearchRolesPersonaDriven({
-          q: query,
-          limit: Math.max(limit, 5),
-          personaId: personaId ? String(personaId).trim() : null,
-        });
+    try {
+      const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
+      const roles = await exploreSearchRolesPersonaDriven({
+        q: query,
+        limit: Math.max(limit, 5),
+        personaId: personaId ? String(personaId).trim() : null,
+      });
 
-        const titles = (Array.isArray(roles) ? roles : [])
-          .map((r) => _normalizeLabel(r?.role_title || r?.title || ''))
-          .filter(Boolean);
+      const titles = (Array.isArray(roles) ? roles : [])
+        .map((r) => _normalizeLabel(r?.role_title || r?.title || ''))
+        .filter(Boolean);
 
-        const unique = Array.from(new Map(titles.map((t) => [t.toLowerCase(), t])).values()).slice(0, limit);
-        if (unique.length) return res.json(unique);
-      } catch (_) {
-        // Ignore and fall back to catalog titles (never fail autocomplete).
-      }
+      const unique = Array.from(new Map(titles.map((t) => [t.toLowerCase(), t])).values()).slice(0, limit);
+      return res.json(unique);
+    } catch (e) {
+      // Bedrock-only contract: do not return catalog/static suggestions.
+      return res.json([]);
     }
-
-    const roles = await _loadRolesForFilterOptions();
-    const titles = _deriveUniqueTitlesFromRoles(roles);
-    const qn = query.toLowerCase();
-
-    const filtered = titles.filter((t) => t.toLowerCase().includes(qn)).slice(0, limit);
-    return res.json(filtered);
   } catch (err) {
     return sendError(res, err);
   }
@@ -293,31 +289,23 @@ router.get('/autocomplete', async (req, res) => {
  */
 router.get('/search', async (req, res) => {
   try {
-    // 1. ADD THIS LOG: See if the request even reaches the backend
-    console.log(">>> Explore Search Request Received:", req.query);
-
     const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
 
     const q = String(req.query?.q || '').trim();
-    // 2. Ensure we capture the ID correctly (check both camelCase and snake_case)
     const personaId = req.query?.personaId || req.query?.persona_id;
 
-    if (!personaId) {
-      console.warn("!!! No PersonaId provided. Results will be generic.");
-    }
-
-    const rows = await exploreSearchRolesPersonaDriven({ 
-      q, 
-      limit: 30, 
-      personaId: personaId ? String(personaId).trim() : null 
+    const rows = await exploreSearchRolesPersonaDriven({
+      q,
+      limit: 30,
+      personaId: personaId ? String(personaId).trim() : null,
     });
 
-    console.log(`>>> Success: Found ${rows?.length} roles.`);
-    return res.json(rows);
+    // Bedrock-only contract: always return a JSON array.
+    return res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    // 3. LOG THE ACTUAL ERROR: This will tell us why the network response is empty
-    console.error("xxx SEARCH ROUTE FAILED:", err);
-    return res.status(500).json({ error: err.message, bedrockUsedFallback: true });
+    // Bedrock-only contract: do NOT return fallback/static roles. Return [] with debug flag.
+    console.error('[roles.search] Bedrock-driven search failed:', err?.message || err);
+    return res.json([]);
   }
 });
 module.exports = router;

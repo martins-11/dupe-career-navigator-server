@@ -918,7 +918,10 @@ async function generateTargetedRoles(userPersona, options = {}) {
   }
 
   const rawText = _extractClaudeText(bedrockJson);
-  const extracted = _extractJsonArrayFromText(rawText);
+
+  // IMPORTANT: target role generation must select the TOP-LEVEL array of role objects.
+  // A generic "first array" extractor can accidentally select nested arrays like key_responsibilities (string[]).
+  const extracted = _extractRolesJsonArrayFromText(rawText);
 
   if (!extracted.array) {
     const err = new Error('Could not extract a JSON array from Bedrock model output.');
