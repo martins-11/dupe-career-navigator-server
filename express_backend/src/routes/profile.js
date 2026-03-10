@@ -2,6 +2,7 @@
 
 const express = require('express');
 const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
+const { isDbConfigured } = require('../db/connection');
 
 const router = express.Router();
 
@@ -31,13 +32,18 @@ router.get('/roles', async (req, res) => {
    *   persistence?: { available: boolean }
    * }
    */
-  const userId = String(req.query?.user_id || '').trim();
+  // Support both query param spellings:
+  // - mindmap uses user_id today
+  // - other parts of the app sometimes use userId
+  const userId = String(req.query?.user_id || req.query?.userId || '').trim();
   if (!userId) {
     return res.status(400).json({
       error: 'validation_error',
-      message: 'user_id query parameter is required.',
+      message: 'user_id (or userId) query parameter is required.',
     });
   }
+
+  const persistenceAvailable = Boolean(isDbConfigured());
 
   try {
     const [current, target] = await Promise.all([
@@ -62,7 +68,7 @@ router.get('/roles', async (req, res) => {
             updatedAt: target.updatedAt || null,
           }
         : null,
-      persistence: { available: true },
+      persistence: { available: persistenceAvailable },
     });
   } catch (e) {
     // Degrade gracefully: do not break UI boot flows, but DO log so failures aren't silent.
