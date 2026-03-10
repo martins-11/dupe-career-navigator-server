@@ -433,7 +433,24 @@ const ViewStateLoadQuerySchema = z
  */
 router.post('/view-state', async (req, res) => {
   try {
-    const parsed = ViewStateSaveBodySchema.safeParse(req.body || {});
+    // Provide clearer validation errors than the generic ZodError for common client mistakes.
+    // This endpoint is called frequently (autosave), so we want stable error messages.
+    const body = req.body || {};
+    const hasUserId = body && typeof body.userId === 'string' && body.userId.trim().length > 0;
+    const hasState = body && typeof body.state === 'object' && body.state != null;
+
+    if (!hasUserId || !hasState) {
+      return res.status(400).json({
+        error: 'validation_error',
+        message: 'Missing required fields for view-state save.',
+        details: {
+          userId: hasUserId ? 'ok' : 'required',
+          state: hasState ? 'ok' : 'required'
+        }
+      });
+    }
+
+    const parsed = ViewStateSaveBodySchema.safeParse(body);
     if (!parsed.success) {
       const err = new Error('Invalid request body.');
       err.name = 'ZodError';
@@ -451,8 +468,7 @@ router.post('/view-state', async (req, res) => {
     let usedFallback = false;
     let viewState = null;
     if (dbCapable) {
-      // Adapter will still fallback on runtime DB failures; we detect fallback by comparing
-      // whether the adapter could use mysqlRepo (best-effort heuristic via try/catch below).
+      // Adapter will still fallback on runtime DB failures.
       try {
         viewState = await mindmapViewStateRepo.saveViewState({ userId, mapKey, state });
       } catch (_) {
@@ -495,6 +511,16 @@ router.post('/view-state', async (req, res) => {
  */
 router.get('/view-state', async (req, res) => {
   try {
+    // Be tolerant: if userId is missing/empty, treat as "no saved state" rather than failing.
+    // This prevents UI boot flows from breaking when a caller hasn't resolved a user key yet.
+    const userIdRaw = req.query?.userId;
+    const userId =
+      typeof userIdRaw === 'string' && userIdRaw.trim().length > 0 ? userIdRaw.trim() : null;
+
+    if (!userId) {
+      return res.json({ status: 'ok', viewState: null });
+    }
+
     const parsed = ViewStateLoadQuerySchema.safeParse(req.query || {});
     if (!parsed.success) {
       const err = new Error('Invalid query parameters.');
@@ -503,7 +529,6 @@ router.get('/view-state', async (req, res) => {
       throw err;
     }
 
-    const { userId } = parsed.data;
     const mapKey = parsed.data.mapKey ? String(parsed.data.mapKey) : 'default';
 
     const viewState = await mindmapViewStateRepo.loadViewState({ userId, mapKey });
