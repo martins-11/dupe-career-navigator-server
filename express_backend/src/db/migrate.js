@@ -34,6 +34,7 @@ const { getMigrationSql: getMysqlPersonaFinalSql } = require('./migrations/005_p
 const { getMigrationSql: getMysqlHolisticPersonaApiSql } = require('./migrations/006_holistic_persona_api.mysql.sql');
 const { getMigrationSql: getMysqlRolesCatalogSql } = require('./migrations/007_roles_catalog.mysql.sql');
 const { getMigrationSql: getMysqlUserTargetsSql } = require('./migrations/008_user_targets.mysql.sql');
+const { getMigrationSql: getMysqlMindmapViewStateSql } = require('./migrations/009_mindmap_view_state.mysql.sql');
 
 function _splitSqlStatements(sql) {
   /**
@@ -90,7 +91,8 @@ async function runMigrations() {
         { name: '005_persona_final', sql: getMysqlPersonaFinalSql() },
         { name: '006_holistic_persona_api', sql: getMysqlHolisticPersonaApiSql() },
         { name: '007_roles_catalog', sql: getMysqlRolesCatalogSql() },
-        { name: '008_user_targets', sql: getMysqlUserTargetsSql() }
+        { name: '008_user_targets', sql: getMysqlUserTargetsSql() },
+        { name: '009_mindmap_view_state', sql: getMysqlMindmapViewStateSql() }
       ];
 
       for (const m of migrations) {

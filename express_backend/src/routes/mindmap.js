@@ -5,6 +5,7 @@ const { z } = require('zod');
 const { sendError } = require('../utils/errors');
 const rolesRepo = require('../repositories/rolesRepoAdapter');
 const recommendationsService = require('../services/recommendationsService');
+const mindmapViewStateRepo = require('../repositories/mindmapViewStateRepoAdapter');
 
 const router = express.Router();
 
@@ -370,6 +371,147 @@ router.get('/nodes/:id', async (req, res) => {
     const details = _buildDetailsForNode(found, { centerNode });
 
     return res.json(details);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * Body schema for POST /api/mindmap/view-state
+ */
+const ViewStateSaveBodySchema = z
+  .object({
+    userId: z.string().min(1),
+    mapKey: z.string().min(1).default('default'),
+    state: z
+      .object({
+        zoom: z.number().optional(),
+        pan: z
+          .object({
+            x: z.number(),
+            y: z.number()
+          })
+          .optional(),
+        // Persist which nodes are expanded/open in the UI.
+        expandedNodeIds: z.array(z.string().min(1)).optional(),
+        // Optional: any UI-specific preferences (filters etc).
+        ui: z.record(z.any()).optional()
+      })
+      .passthrough()
+  })
+  .strict();
+
+/**
+ * Query schema for GET /api/mindmap/view-state
+ */
+const ViewStateLoadQuerySchema = z
+  .object({
+    userId: z.string().min(1),
+    mapKey: z.string().min(1).optional()
+  })
+  .strict();
+
+/**
+ * PUBLIC_INTERFACE
+ * POST /api/mindmap/view-state
+ *
+ * Saves mind map view state (zoom/pan/expanded nodes) so the UI can restore it later.
+ *
+ * Request body:
+ * {
+ *   userId: string,
+ *   mapKey?: string, // optional namespace (default "default")
+ *   state: { zoom?, pan?, expandedNodeIds?, ui? }
+ * }
+ *
+ * Response:
+ * {
+ *   status: "ok",
+ *   persistence: { type: "mysql"|"memory", usedFallback: boolean },
+ *   viewState: { userId, mapKey, state, updatedAt }
+ * }
+ */
+router.post('/view-state', async (req, res) => {
+  try {
+    const parsed = ViewStateSaveBodySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      const err = new Error('Invalid request body.');
+      err.name = 'ZodError';
+      err.issues = parsed.error.issues;
+      throw err;
+    }
+
+    const { userId, mapKey, state } = parsed.data;
+
+    // Determine whether DB is intended to be used (informational only).
+    const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
+    const engine = getDbEngine();
+    const dbCapable = engine === 'mysql' && isDbConfigured() && isMysqlConfigured();
+
+    let usedFallback = false;
+    let viewState = null;
+    if (dbCapable) {
+      // Adapter will still fallback on runtime DB failures; we detect fallback by comparing
+      // whether the adapter could use mysqlRepo (best-effort heuristic via try/catch below).
+      try {
+        viewState = await mindmapViewStateRepo.saveViewState({ userId, mapKey, state });
+      } catch (_) {
+        usedFallback = true;
+        viewState = await mindmapViewStateRepo.saveViewState({ userId, mapKey, state });
+      }
+    } else {
+      usedFallback = true;
+      viewState = await mindmapViewStateRepo.saveViewState({ userId, mapKey, state });
+    }
+
+    return res.status(200).json({
+      status: 'ok',
+      persistence: {
+        type: usedFallback ? 'memory' : 'mysql',
+        usedFallback
+      },
+      viewState
+    });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/mindmap/view-state?userId=...&mapKey=...
+ *
+ * Loads the latest saved mind map view state for the user.
+ *
+ * Response:
+ * {
+ *   status: "ok",
+ *   viewState: { userId, mapKey, state, updatedAt } | null
+ * }
+ *
+ * Notes:
+ * - Returns 200 with viewState=null when no saved state exists.
+ * - Gracefully falls back to in-memory storage when DB is unavailable.
+ */
+router.get('/view-state', async (req, res) => {
+  try {
+    const parsed = ViewStateLoadQuerySchema.safeParse(req.query || {});
+    if (!parsed.success) {
+      const err = new Error('Invalid query parameters.');
+      err.name = 'ZodError';
+      err.issues = parsed.error.issues;
+      throw err;
+    }
+
+    const { userId } = parsed.data;
+    const mapKey = parsed.data.mapKey ? String(parsed.data.mapKey) : 'default';
+
+    const viewState = await mindmapViewStateRepo.loadViewState({ userId, mapKey });
+
+    return res.json({
+      status: 'ok',
+      viewState: viewState || null
+    });
   } catch (err) {
     return sendError(res, err);
   }
