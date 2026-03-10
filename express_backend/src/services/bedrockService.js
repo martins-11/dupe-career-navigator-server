@@ -1614,8 +1614,164 @@ async function getInitialRecommendations(finalPersona, options = {}) {
   }
 }
 
+/**
+ * Build prompt to extract the user's CURRENT role from resume/perf-review text.
+ * We require strict JSON-only output for reliable parsing.
+ */
+function _buildCurrentRoleExtractionPrompt({ text, hints = {} }) {
+  const snippet = String(text || '').trim().slice(0, 12000); // keep prompt bounded
+  const hintName = _normStr(hints?.name || '');
+  const hintIndustry = _normStr(hints?.industry || '');
+
+  return [
+    'You are an expert career coach.',
+    '',
+    'TASK:',
+    'Given the following user documents text, identify the user’s CURRENT ROLE (job title) as a short title.',
+    'If the role is not explicitly present, infer the most likely role based on responsibilities/skills, but keep it conservative.',
+    '',
+    'OUTPUT FORMAT (STRICT):',
+    'Return ONLY valid JSON (no markdown, no commentary):',
+    '{ "currentRoleTitle": string | null, "confidence": "high"|"medium"|"low", "evidence": string }',
+    '',
+    'RULES:',
+    '- currentRoleTitle MUST be a concise job title (max 80 chars).',
+    '- If you cannot determine the role, set currentRoleTitle=null.',
+    '- evidence should quote or reference a short phrase from the text.',
+    '',
+    `HINTS (optional): name=${hintName || 'N/A'}; industry=${hintIndustry || 'N/A'}`,
+    '',
+    'DOCUMENT TEXT:',
+    snippet,
+  ].join('\n');
+}
+
+/**
+ * Extract JSON object from model output (defensive against wrappers/fences).
+ */
+function _extractFirstJsonObject(text) {
+  if (!text) return null;
+  let trimmed = String(text).trim();
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced && fenced[1]) trimmed = fenced[1].trim();
+
+  trimmed = trimmed.replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '').trim();
+
+  // Fast path
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
+
+  // Balanced scan, respecting strings
+  const starts = [];
+  for (let i = 0; i < trimmed.length; i += 1) if (trimmed[i] === '{') starts.push(i);
+  if (starts.length === 0) return null;
+
+  const extractFrom = (start) => {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = start; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      if (ch === '}') depth -= 1;
+      if (depth === 0 && i > start) {
+        const candidate = trimmed.slice(start, i + 1).trim();
+        if (candidate.startsWith('{') && candidate.endsWith('}')) return candidate;
+        return null;
+      }
+    }
+    return null;
+  };
+
+  for (const s of starts) {
+    const c = extractFrom(s);
+    if (c) return c;
+  }
+  return null;
+}
+
+// PUBLIC_INTERFACE
+async function extractCurrentRoleFromText({ text, hints = {}, options = {} }) {
+  /**
+   * Extract a user's current role title from ingested documents text using Bedrock.
+   *
+   * @param {{text: string, hints?: {name?: string, industry?: string}, options?: {modelId?: string}}}
+   * @returns {Promise<{ currentRoleTitle: string|null, confidence: string, evidence: string, rawText: string, prompt: string, modelId: string }>}
+   */
+  const modelId = _resolveModelId({
+    override: options?.modelId,
+    envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID'],
+  });
+
+  const prompt = _buildCurrentRoleExtractionPrompt({ text, hints });
+
+  const body = {
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 300,
+    temperature: 0.1,
+    messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+  };
+
+  const client = _getBedrockClient();
+  const cmd = new InvokeModelCommand({
+    modelId,
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: Buffer.from(JSON.stringify(body)),
+  });
+
+  const resp = await client.send(cmd);
+  const jsonStr = Buffer.from(resp.body).toString('utf-8');
+  const bedrockJson = JSON.parse(jsonStr);
+  const rawText = _extractClaudeText(bedrockJson);
+
+  const objText = _extractFirstJsonObject(rawText);
+  if (!objText) {
+    const err = new Error('Could not extract JSON object from Bedrock output (current role extraction).');
+    err.code = 'bedrock_no_json_object';
+    err.details = { rawText: rawText.slice(0, 5000) };
+    throw err;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(objText);
+  } catch (e) {
+    const err = new Error(`Invalid JSON from Bedrock current role extraction: ${e?.message || String(e)}`);
+    err.code = 'bedrock_invalid_extracted_json';
+    err.details = { extracted: objText.slice(0, 5000) };
+    throw err;
+  }
+
+  const titleRaw = parsed?.currentRoleTitle;
+  const currentRoleTitle =
+    typeof titleRaw === 'string' && titleRaw.trim() ? titleRaw.trim().slice(0, 80) : null;
+
+  const confidence = _normStr(parsed?.confidence || 'low') || 'low';
+  const evidence = _normStr(parsed?.evidence || '');
+
+  return { currentRoleTitle, confidence, evidence, rawText, prompt, modelId };
+}
+
 module.exports = {
   generateTargetedRoles,
   generateTargetedRolesSafe,
-  getInitialRecommendations
+  getInitialRecommendations,
+  extractCurrentRoleFromText,
 };

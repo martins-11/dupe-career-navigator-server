@@ -210,6 +210,7 @@ function _buildDetailsForNode(node, { centerNode }) {
  */
 const GraphQuerySchema = z
   .object({
+    user_id: z.string().min(1).optional(),
     currentRoleTitle: z.string().min(1).optional(),
     // Optional filters
     minSalaryLpa: z.coerce.number().optional(),
@@ -252,10 +253,22 @@ router.get('/graph', async (req, res) => {
     const q = parsed.data;
     const limit = Number.isFinite(q.limit) ? q.limit : 18;
 
-    // Center node: user current role (for now derived from query; later can be derived from persona).
+    // Center node: user's current role (prefer persisted extraction when user_id is provided).
+    let currentRoleTitle = _normalizeLabel(q.currentRoleTitle || 'Current Role');
+
+    if (q.user_id) {
+      try {
+        const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
+        const current = await userTargetsRepo.getLatestUserCurrentRole({ userId: String(q.user_id) });
+        if (current?.currentRoleTitle) currentRoleTitle = _normalizeLabel(current.currentRoleTitle);
+      } catch (_) {
+        // ignore; fallback to query param label
+      }
+    }
+
     const centerRole = {
       roleId: 'current',
-      roleTitle: _normalizeLabel(q.currentRoleTitle || 'Current Role'),
+      roleTitle: currentRoleTitle,
       industry: null,
       coreSkills: [] // can be populated later from persona finalized skills.
     };

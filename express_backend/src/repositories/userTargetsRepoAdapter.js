@@ -49,7 +49,37 @@ async function getLatestUserTargetRole({ userId }) {
   return memoryRepo.getLatestUserTargetRole({ userId });
 }
 
+// PUBLIC_INTERFACE
+async function upsertUserCurrentRole({ userId, currentRoleTitle, source }) {
+  /** Persist a user's current role extraction (MySQL when available; otherwise memory fallback). */
+  if (_isMysqlOnline()) {
+    try {
+      return await mysqlRepo.upsertUserCurrentRole({ userId, currentRoleTitle, source });
+    } catch (_) {
+      return memoryRepo.upsertUserCurrentRole({ userId, currentRoleTitle, source });
+    }
+  }
+  return memoryRepo.upsertUserCurrentRole({ userId, currentRoleTitle, source });
+}
+
+// PUBLIC_INTERFACE
+async function getLatestUserCurrentRole({ userId }) {
+  /** Fetch latest user's current role extraction (MySQL when available; otherwise memory fallback). */
+  if (_isMysqlOnline()) {
+    try {
+      const row = await mysqlRepo.getLatestUserCurrentRole({ userId });
+      if (row) return row;
+      return memoryRepo.getLatestUserCurrentRole({ userId });
+    } catch (_) {
+      return memoryRepo.getLatestUserCurrentRole({ userId });
+    }
+  }
+  return memoryRepo.getLatestUserCurrentRole({ userId });
+}
+
 module.exports = {
   upsertUserTargetRole,
-  getLatestUserTargetRole
+  getLatestUserTargetRole,
+  upsertUserCurrentRole,
+  getLatestUserCurrentRole,
 };
