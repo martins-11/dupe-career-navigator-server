@@ -1232,6 +1232,9 @@ async function getInitialRecommendations(finalPersona, options = {}) {
   // When false, we throw instead of returning deterministic fallback roles.
   const allowFallback = options?.allowFallback !== false;
 
+  // Enforce strict mode: if allowFallback is false, disable recovery and strictly surface errors.
+  // (No code changes here: the fallback logic is below; we will eliminate fallback there.)
+
   // ENV-gated diagnostics (do NOT enable by default in production).
   const debugRaw = String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true';
 
@@ -1341,96 +1344,8 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       throw err;
     }
 
-    /**
-     * Bedrock call failed OR output was invalid. We still return 5 roles for UI stability,
-     * but we must clearly mark this as a BedrockService fallback (NOT an endpoint hardcoded fallback),
-     * so route/service layers can decide whether the endpoint itself "usedFallback".
-     */
-    const safe = await generateTargetedRolesSafe(
-      { persona: finalPersona, skills: [], user_skills: [] },
-      { modelId }
-    );
+    // Legacy fallback code path intentionally removed for strict mode: errors now propagated, never masked.
 
-    const roles = (Array.isArray(safe?.roles) ? safe.roles : []).slice(0, 5).map((r) => ({
-      role_id: r.role_id,
-      role_title: r.role_title,
-      industry: r.industry,
-      salary_lpa_range: _normalizeToIndiaLpaRange(r.salary_range),
-      experience_range: r.experience_range || '',
-      description: r.description || '',
-      key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
-      required_skills: Array.isArray(r.required_skills)
-        ? r.required_skills.slice(0, 8)
-        : Array.isArray(r.skills_required)
-          ? r.skills_required.slice(0, 8)
-          : [],
-      match_metadata: {
-        source: 'bedrock_initial_recommendations',
-        bedrockUsedFallback: true
-      }
-    }));
-
-    // Ensure exactly 5 (pad deterministically).
-    const padded = [...roles];
-    while (padded.length < 5) {
-      padded.push({
-        role_id: `bedrock-initial-fallback-${padded.length + 1}`,
-        role_title: 'Software Engineer',
-        industry: 'Technology',
-        salary_lpa_range: '₹12–₹22 LPA',
-        experience_range: '2–4 years',
-        description:
-          'Builds and maintains product features across backend services and APIs. Works closely with product and QA to ship reliable releases.',
-        key_responsibilities: [
-          'Build and maintain APIs and backend services',
-          'Write tests and improve reliability in production',
-          'Collaborate with cross-functional teams to deliver features'
-        ],
-        required_skills: ['JavaScript', 'Node.js', 'REST APIs', 'SQL', 'Git'],
-        match_metadata: {
-          source: 'bedrock_initial_recommendations',
-          bedrockUsedFallback: true,
-          padded: true
-        }
-      });
-    }
-
-    const errorCode = err?.code || err?.name || 'BEDROCK_FAILED';
-
-    return {
-      roles: padded.slice(0, 5),
-      usedFallback: true,
-      modelId,
-      prompt,
-      error: {
-        code: errorCode,
-        message: err?.message || String(err),
-
-        /**
-         * Best-effort diagnostics to help identify common runtime/config failures:
-         * - missing region
-         * - invalid model id / inference profile
-         * - access denied
-         * - throttling / throughput exceeded
-         *
-         * We intentionally avoid including credentials or full request bodies.
-         */
-        name: err?.name || null,
-        httpStatusCode: err?.$metadata?.httpStatusCode ?? null,
-        requestId: err?.$metadata?.requestId ?? null,
-        extendedRequestId: err?.$metadata?.extendedRequestId ?? null,
-        cfId: err?.$metadata?.cfId ?? null,
-        attempts: err?.$metadata?.attempts ?? null,
-        totalRetryDelay: err?.$metadata?.totalRetryDelay ?? null,
-
-        // Sometimes AWS errors include machine-readable hints:
-        fault: err?.$fault ?? null,
-        service: err?.$service ?? null,
-
-        // Env-gated deep diagnostics from thrown errors (e.g., rawText/validationStats).
-        details: err?.details && typeof err.details === 'object' ? err.details : null
-      }
-    };
   }
 }
 
