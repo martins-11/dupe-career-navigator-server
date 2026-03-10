@@ -167,31 +167,44 @@ router.post('/target-role', async (req, res) => {
     /**
      * Role existence validation:
      * - If DB roles catalog is available, validate role_id exists (helps catch client bugs/typos).
-     * - If DB is not configured, skip this check (role ids may come from seed/in-memory sources).
+     * - Additionally accept ids that exist in the seed catalog (DEFAULT_ROLES_CATALOG) because
+     *   the Explore/mindmap flows can operate without a seeded DB.
+     *
+     * IMPORTANT: role_id is not guaranteed to be a UUID.
      */
     const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
     const dbAvailable = getDbEngine() === 'mysql' && isDbConfigured() && isMysqlConfigured();
 
+    const roleId = String(parsed.data.role_id).trim();
+
+    const seed = require('../services/recommendationsService')?.DEFAULT_ROLES_CATALOG;
+    const seedHasRole =
+      Array.isArray(seed) &&
+      seed.some((r) => {
+        const seedId = String(r?.roleId || r?.role_id || r?.id || '').trim();
+        const seedTitle = String(r?.roleTitle || r?.role_title || r?.title || '').trim();
+        // Seed catalog often doesn't provide roleId; accept title-derived ids too.
+        return (seedId && seedId === roleId) || (!seedId && seedTitle && seedTitle === roleId);
+      });
+
     if (dbAvailable) {
-      const roleExists = await rolesRepo.roleExists(parsed.data.role_id);
-      if (!roleExists) {
-        return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles table.' });
+      const roleExists = await rolesRepo.roleExists(roleId);
+      if (!roleExists && !seedHasRole) {
+        return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles catalog.' });
       }
     }
+    // If DB is not available, allow saving (memory fallback will persist).
 
     const saved = await userTargetsRepo.upsertUserTargetRole({
       userId: parsed.data.user_id,
-      roleId: parsed.data.role_id,
+      roleId,
       timeHorizon: parsed.data.time_horizon
     });
 
-    if (!saved) {
-      return res.status(503).json({ error: 'db_unavailable', message: 'Database not configured for persistence.' });
-    }
-
     return res.status(201).json({
       status: 'ok',
-      target: saved
+      target: saved,
+      persistence: { type: dbAvailable ? 'mysql' : 'memory' }
     });
   } catch (err) {
     return handleRepoError(res, err);
