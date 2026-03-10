@@ -187,9 +187,24 @@ router.post('/target-role', async (req, res) => {
         return (seedId && seedId === roleId) || (!seedId && seedTitle && seedTitle === roleId);
       });
 
+    /**
+     * If DB is available, validate role existence.
+     *
+     * IMPORTANT:
+     * - The roles catalog table stores UUID role_ids (seeded/generated).
+     * - Explore search/recommendations can return Bedrock-generated roles with ids like:
+     *     bedrock-<slug> or bedrock-rec-<slug>
+     *   These will not exist in the roles table, but they are still legitimate “targetable” roles.
+     *
+     * Therefore:
+     * - Accept if found in DB roles table OR seed catalog OR known Bedrock id prefix.
+     * - Still reject obvious typos/unknown ids to preserve guardrails.
+     */
+    const isBedrockRoleId = /^bedrock(?:-rec)?-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(roleId);
+
     if (dbAvailable) {
       const roleExists = await rolesRepo.roleExists(roleId);
-      if (!roleExists && !seedHasRole) {
+      if (!roleExists && !seedHasRole && !isBedrockRoleId) {
         return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles catalog.' });
       }
     }
