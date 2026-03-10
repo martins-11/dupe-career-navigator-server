@@ -91,7 +91,7 @@ describe('recommendationsInitialService (Bedrock-only, no deterministic padding)
     jest.dontMock('../../src/services/bedrockService');
   });
 
-  test('when persona has no numeric proficiencies, scoring is skipped gracefully and roles are still Bedrock-only', async () => {
+  test('when persona has no numeric proficiencies, backend emits deterministic fallback compatibility and mastery/growth tags', async () => {
     jest.resetModules();
 
     jest.doMock('../../src/services/bedrockService', () => ({
@@ -130,10 +130,26 @@ describe('recommendationsInitialService (Bedrock-only, no deterministic padding)
 
     for (const r of result.roles) {
       expect(r?.match_metadata?.isFallbackFilled).toBe(false);
-      expect(r.compatibilityScore).toBeNull();
-      expect(r.threeTwoReport).toBeNull();
+
+      // Now required by UI: non-null scores for ring rendering
+      expect(typeof r.compatibilityScore).toBe('number');
+      expect(typeof r.finalCompatibilityScore).toBe('number');
+      expect(r.compatibilityScore).toBeGreaterThanOrEqual(0);
+      expect(r.compatibilityScore).toBeLessThanOrEqual(100);
+
+      // Fallback 3/2 tags are provided, but validation remains not_validated
+      expect(r.threeTwoReport).toBeTruthy();
+      expect(r.threeTwoReport.status).toBe('not_validated');
+
+      expect(Array.isArray(r.masteryAreas)).toBe(true);
+      expect(Array.isArray(r.growthAreas)).toBe(true);
+      expect(r.masteryAreas.length).toBeLessThanOrEqual(3);
+      expect(r.growthAreas.length).toBeLessThanOrEqual(2);
+
+      // Metadata indicates fallback mode was used
       expect(r.match_metadata?.scoring?.hadUserProficiencies).toBe(false);
-      expect(r.match_metadata?.scoring?.scoringSkipped).toBe(true);
+      expect(r.match_metadata?.scoring?.scoringSkipped).toBe(false);
+      expect(r.match_metadata?.scoring?.fallbackMode).toBe('overlap_without_proficiency');
     }
 
     expect(result.meta).toBeTruthy();
