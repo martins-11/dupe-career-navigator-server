@@ -252,9 +252,13 @@ describe('bedrock initial recommendations extraction (unit)', () => {
 
     for (const r of result.roles) {
       expect(r && typeof r).toBe('object');
+      expect(Array.isArray(r)).toBe(false);
       expect(typeof r.role_title).toBe('string');
       expect(r.role_title.length).toBeGreaterThan(0);
     }
+
+    // Critical regression: ensure we did NOT accidentally extract nested key_responsibilities (string[]).
+    expect(result.roles.some((x) => typeof x === 'string')).toBe(false);
 
     process.env.BEDROCK_DEBUG_RAW_OUTPUT = originalEnv;
     jest.dontMock('@aws-sdk/client-bedrock-runtime');

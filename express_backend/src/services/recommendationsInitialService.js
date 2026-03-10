@@ -131,6 +131,9 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
    * We keep Bedrock as the preferred generator, but when it fails we return a deterministic
    * 5-role set that is still persona-driven via the scoring engine.
    */
+  // Bedrock service is responsible for parsing/repairing/truncation recovery.
+  // We keep Bedrock's internal fallback disabled so the endpoint can accurately
+  // report whether Bedrock succeeded (bedrockUsedFallback=false) vs. endpoint fallback.
   const strictOptions = { ...options, allowFallback: false };
 
   if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
@@ -235,12 +238,13 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   try {
     bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
       context: null,
-      allowFallback: false // never use bedrockService's internal fallback; we control fallback here
+      allowFallback: false // strict: do not let bedrockService silently swap in deterministic roles
     });
 
     roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
   } catch (err) {
-    // Bedrock unavailable/invalid output: use deterministic roles instead of failing the endpoint.
+    // Bedrock truly failed (after extraction + truncation recovery + validation).
+    // Only then do we use deterministic roles.
     endpointFallbackUsed = true;
     roles = fallbackRoles;
 

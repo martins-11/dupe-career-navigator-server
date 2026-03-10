@@ -266,7 +266,15 @@ function _extractRolesJsonArrayFromText(text) {
    * - Synthesizing a valid JSON array by closing with ']'
    */
   const salvageTopLevelArrayIfTruncated = () => {
-    const start = trimmed.indexOf('[');
+    /**
+     * Prefer reconstructing from a ```json fenced block if present but missing closing fence.
+     * This is a common truncation shape in Bedrock/Claude outputs.
+     */
+    const fenceStart = trimmed.search(/```(?:json)?\s*/i);
+    const textForSalvage =
+      fenceStart >= 0 ? trimmed.slice(fenceStart).replace(/^```(?:json)?\s*/i, '') : trimmed;
+
+    const start = textForSalvage.indexOf('[');
     if (start < 0) return null;
 
     let inString = false;
@@ -277,8 +285,8 @@ function _extractRolesJsonArrayFromText(text) {
     // Index of last '}' that completed an object while inside the top-level array (arrayDepth===1).
     let lastCompletedObjectEnd = -1;
 
-    for (let i = start; i < trimmed.length; i += 1) {
-      const ch = trimmed[i];
+    for (let i = start; i < textForSalvage.length; i += 1) {
+      const ch = textForSalvage[i];
 
       if (inString) {
         if (escape) {
@@ -289,11 +297,11 @@ function _extractRolesJsonArrayFromText(text) {
           escape = true;
           continue;
         }
-        if (ch === '\"') inString = false;
+        if (ch === '"') inString = false;
         continue;
       }
 
-      if (ch === '\"') {
+      if (ch === '"') {
         inString = true;
         continue;
       }
@@ -316,21 +324,29 @@ function _extractRolesJsonArrayFromText(text) {
 
     // End-of-text: if we're still inside the array and we saw at least one completed object, salvage.
     if (arrayDepth >= 1 && lastCompletedObjectEnd > start) {
-      const prefix = trimmed.slice(start, lastCompletedObjectEnd + 1).trim();
-      const withoutTrailingComma = prefix.replace(/,\\s*$/, '');
-      const synthesized = `${withoutTrailingComma}\\n]`;
+      const prefix = textForSalvage.slice(start, lastCompletedObjectEnd + 1).trim();
+      const withoutTrailingComma = prefix.replace(/,\s*$/, '');
+      const synthesized = `${withoutTrailingComma}\n]`;
 
       try {
         const parsed = JSON.parse(synthesized);
 
-        // CRITICAL: only accept salvage if it's plausibly the top-level role object array,
-        // not a nested string[] like key_responsibilities.
-        const isRoleObjectArray =
+        // Only accept salvage if it's plausibly the top-level role object array (array-of-objects),
+        // never a nested string[] like key_responsibilities.
+        const isArrayOfObjects =
           Array.isArray(parsed) &&
           parsed.length > 0 &&
           parsed.every((x) => x && typeof x === 'object' && !Array.isArray(x));
 
-        if (isRoleObjectArray) return { parsed, text: synthesized };
+        if (!isArrayOfObjects) return null;
+
+        // Additional guard: at least one element should have role-like keys.
+        const roleLikeKeys = ['title', 'role_title', 'industry', 'salary_lpa_range', 'salary_range', 'required_skills'];
+        const looksRoleLike = parsed.some((o) =>
+          roleLikeKeys.reduce((n, k) => (Object.prototype.hasOwnProperty.call(o, k) ? n + 1 : n), 0) >= 2
+        );
+
+        if (looksRoleLike) return { parsed, text: synthesized };
       } catch (_) {
         return null;
       }
