@@ -224,39 +224,40 @@ router.get('/autocomplete', async (req, res) => {
     if (query.length < 2) return res.json([]);
 
     /**
-     * Bedrock-only autocomplete (per task requirements: no static catalog sources, no fallback).
+     * Bedrock-only autocomplete.
      *
-     * Query params:
-     * - q: string (>=2 chars)
-     * - limit: number (default 6; max 20)
-     * - personaId / persona_id: optional persona id for persona-aware suggestions
-     *
-     * Response:
-     * - string[] (role titles)
-     *
-     * Failure behavior:
-     * - If Bedrock fails/unavailable, return [] (HTTP 200) rather than catalog/static titles.
+     * Bugfix requirements:
+     * - Stop swallowing Bedrock failures into an empty array with HTTP 200 (was hiding errors).
+     * - When Bedrock succeeds, ensure we actually return its suggestions.
+     * - Propagate diagnostics via `bedrockError` meta so the UI can show meaningful feedback.
      */
     const personaId = req.query?.personaId || req.query?.persona_id;
 
+    const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
     try {
-      const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
       const roles = await exploreSearchRolesPersonaDriven({
         q: query,
-        // Honor caller limit for autocomplete; do not force 5 here.
         limit,
         personaId: personaId ? String(personaId).trim() : null,
       });
 
       const titles = (Array.isArray(roles) ? roles : [])
-        .map((r) => _normalizeLabel(r?.role_title || r?.title || ''))
+        .map((r) => _normalizeLabel(r?.role_title || r?.title || r?.roleTitle || ''))
         .filter(Boolean);
 
       const unique = Array.from(new Map(titles.map((t) => [t.toLowerCase(), t])).values()).slice(0, limit);
       return res.json(unique);
-    } catch (e) {
-      // Bedrock-only contract: do not return catalog/static suggestions.
-      return res.json([]);
+    } catch (err) {
+      const { buildBedrockErrorMeta } = require('../utils/bedrockErrorMeta');
+      console.error('[roles.autocomplete] Bedrock-driven autocomplete failed:', err);
+
+      // Return a JSON error (not HTML), and include bedrockError meta for UI diagnostics.
+      // Use sendError for consistent status mapping (502/503/504).
+      err.details = {
+        ...(err.details && typeof err.details === 'object' ? err.details : {}),
+        bedrockError: buildBedrockErrorMeta(err),
+      };
+      return sendError(res, err);
     }
   } catch (err) {
     return sendError(res, err);
@@ -301,12 +302,18 @@ router.get('/search', async (req, res) => {
       personaId: personaId ? String(personaId).trim() : null,
     });
 
-    // Bedrock-only contract: always return a JSON array.
+    // Bedrock-only contract: always return a JSON array on success.
     return res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    // Bedrock-only contract: do NOT return fallback/static roles. Return [] with debug flag.
-    console.error('[roles.search] Bedrock-driven search failed:', err?.message || err);
-    return res.json([]);
+    const { buildBedrockErrorMeta } = require('../utils/bedrockErrorMeta');
+    console.error('[roles.search] Bedrock-driven search failed:', err);
+
+    // Stop returning HTTP 200 with [] on upstream failures; propagate a useful JSON error.
+    err.details = {
+      ...(err.details && typeof err.details === 'object' ? err.details : {}),
+      bedrockError: buildBedrockErrorMeta(err),
+    };
+    return sendError(res, err);
   }
 });
 module.exports = router;
