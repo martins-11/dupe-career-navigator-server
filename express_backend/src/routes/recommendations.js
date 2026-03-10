@@ -186,7 +186,9 @@ async function handleInitialRecommendations(req, res) {
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: personaIdRaw,
-      options: { allowFallback: true }
+      // Bedrock-only endpoint: do not allow deterministic fallback from this route.
+      // (If Bedrock fails, surface 502/503 with details via sendError.)
+      options: {}
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];

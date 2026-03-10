@@ -1361,11 +1361,21 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     ]
   };
 
-  // When false, we throw instead of returning deterministic fallback roles.
+  /**
+   * When false, we throw instead of returning deterministic fallback roles.
+   * IMPORTANT: This function must NEVER return undefined. In allowFallback=true mode we must
+   * return a stable fallback payload.
+   */
   const allowFallback = options?.allowFallback !== false;
 
-  // Enforce strict mode: if allowFallback is false, disable recovery and strictly surface errors.
-  // (No code changes here: the fallback logic is below; we will eliminate fallback there.)
+  // Minimal retry for transient Bedrock issues (common after restarts / brief throttling).
+  const retries = Number.isFinite(Number(options?.retries))
+    ? Math.max(0, Math.min(2, Number(options.retries)))
+    : 1;
+
+  const retryDelayMs = Number.isFinite(Number(options?.retryDelayMs))
+    ? Math.max(0, Math.min(2000, Number(options.retryDelayMs)))
+    : 250;
 
   // ENV-gated diagnostics (do NOT enable by default in production).
   const debugRaw = String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true';
@@ -1375,7 +1385,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
   let debugExtractedText = null;
   let debugExtractedArrayPreview = null;
 
-  try {
+  const invokeOnce = async () => {
     const client = _getBedrockClient();
     const cmd = new InvokeModelCommand({
       modelId,
@@ -1408,18 +1418,6 @@ async function getInitialRecommendations(finalPersona, options = {}) {
         rawText: rawText.slice(0, 5000),
         extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
       };
-
-      if (debugRaw) {
-        // eslint-disable-next-line no-console
-        console.warn('[bedrock][initialRecommendations] JSON array extraction failed', {
-          modelId,
-          bedrockJsonKeys:
-            bedrockJson && typeof bedrockJson === 'object' ? Object.keys(bedrockJson).slice(0, 50) : null,
-          rawTextLength: typeof rawText === 'string' ? rawText.length : null,
-          rawTextPreview: typeof rawText === 'string' ? rawText.slice(0, 2000) : null
-        });
-      }
-
       throw err;
     }
 
@@ -1446,10 +1444,6 @@ async function getInitialRecommendations(finalPersona, options = {}) {
           rawText: debugRawText,
           extractedText: debugExtractedText,
           extractedArrayPreview: debugExtractedArrayPreview,
-          /**
-           * Primary actionable payload:
-           * shows exactly why items were rejected (missing_salary, insufficient_required_skills, etc)
-           */
           validationStats,
           validatedCount: roles.length,
           extractedCount: Array.isArray(extracted.array) ? extracted.array.length : null
@@ -1459,6 +1453,21 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     }
 
     return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
+  };
+
+  try {
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        return await invokeOnce();
+      } catch (err) {
+        if (attempt >= retries) throw err;
+        attempt += 1;
+        // Small deterministic backoff.
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
+    }
   } catch (err) {
     // Attach env-gated diagnostics for upstream meta/error surfacing.
     if (debugRaw && err && typeof err === 'object') {
@@ -1476,8 +1485,21 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       throw err;
     }
 
-    // Legacy fallback code path intentionally removed for strict mode: errors now propagated, never masked.
+    /**
+     * Non-strict mode: return deterministic fallback roles (stable contract).
+     * This avoids the prior bug where allowFallback=true caused an implicit undefined return,
+     * which downstream treated as "0 roles" and surfaced as intermittent 502s.
+     */
+    const fallbackRoles = _fallbackBedrockJsonRoles();
+    const validatedFallback = _validateAndNormalizeInitialRecommendations(fallbackRoles, { debug: false });
 
+    return {
+      roles: (validatedFallback?.roles || []).slice(0, 5),
+      usedFallback: true,
+      modelId,
+      prompt,
+      error: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) }
+    };
   }
 }
 
