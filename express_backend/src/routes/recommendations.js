@@ -190,8 +190,10 @@ async function handleInitialRecommendations(req, res) {
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
-    if (roles.length !== 5) {
-      const err = new Error(`Initial recommendations generator returned ${roles.length} roles; expected exactly 5.`);
+    if (roles.length < 1 || roles.length > 5) {
+      const err = new Error(
+        `Initial recommendations generator returned ${roles.length} roles; expected 1–5 Bedrock-generated roles.`
+      );
       err.code = 'initial_recommendations_invalid_count';
       err.httpStatus = 502;
       throw err;
@@ -212,10 +214,9 @@ async function handleInitialRecommendations(req, res) {
 
     const meta = {
       ...(result?.meta || {}),
-      endpointFallbackUsed: false,
+      count: roles.length,
       personaFallbackReason: null,
-      // Frontend uses this to show a clear warning when the response is deterministic fallback
-      // (often due to missing AWS_REGION / wrong model id / Bedrock throttling / invalid JSON).
+      // Initial recommendations must be Bedrock-only; this should remain false.
       bedrockUsedFallback: Boolean(result?.meta?.bedrockUsedFallback)
     };
 
