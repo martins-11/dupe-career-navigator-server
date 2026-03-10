@@ -82,6 +82,11 @@ app.use('/orchestration', orchestrationRouter);
 app.use('/documents', documentsRouter);
 app.use('/personas', personasRouter);
 
+// Compatibility mount:
+// Frontend (and OpenAPI contract) call /api/personas/*, but historically personas router lived at /personas/*.
+// Mounting both keeps existing clients working and makes /api/personas/target-role reachable.
+app.use('/api/personas', personasRouter);
+
 app.use('/api/recommendations', recommendationsRouter);
 
 // Safety-net mount: ensure GET /api/recommendations/initial is reachable exactly here,
