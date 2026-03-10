@@ -141,7 +141,10 @@ router.get('/:id/versions/latest', async (req, res) => {
   }
 });
 
-// PUBLIC_INTERFACE
+/**
+ * PUBLIC_INTERFACE
+ * POST /personas/target-role
+ */
 router.post('/target-role', async (req, res) => {
   /**
    * Persist the user's selected target future role.
@@ -182,6 +185,49 @@ router.post('/target-role', async (req, res) => {
       status: 'ok',
       target: saved
     });
+  } catch (err) {
+    return handleRepoError(res, err);
+  }
+});
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /personas/target-role?user_id=<uuid>
+ *
+ * Returns the latest saved target role selection for the user.
+ * This supports the "target role retrieval" requirement and enables the frontend to
+ * restore persisted choice and drive the mind map details view.
+ */
+router.get('/target-role', async (req, res) => {
+  const userId = String(req.query?.user_id || '').trim();
+  if (!userId) {
+    return res.status(400).json({
+      error: 'validation_error',
+      message: 'user_id query parameter is required.'
+    });
+  }
+
+  // Basic UUID shape check to fail fast (keeps consistent API errors).
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!uuidRe.test(userId)) {
+    return res.status(400).json({
+      error: 'validation_error',
+      message: 'user_id must be a valid uuid.'
+    });
+  }
+
+  try {
+    const latest = await userTargetsRepo.getLatestUserTargetRole({ userId });
+
+    // If DB isn't configured, adapter returns null; treat as 503 because this is a persistence-backed read.
+    if (!latest) {
+      return res.status(503).json({
+        error: 'db_unavailable',
+        message: 'Database not configured for persistence.'
+      });
+    }
+
+    return res.json({ status: 'ok', target: latest });
   } catch (err) {
     return handleRepoError(res, err);
   }

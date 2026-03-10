@@ -38,6 +38,7 @@ const pathsRouter = require('./routes/paths');
 const planRouter = require('./routes/plan');
 const profileRouter = require('./routes/profile');
 const rolesRouter = require('./routes/roles');
+const mindmapRouter = require('./routes/mindmap');
 
 const app = express();
 
@@ -95,6 +96,7 @@ app.use('/api/paths', pathsRouter);
 app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
 app.use('/api/roles', rolesRouter);
+app.use('/api/mindmap', mindmapRouter);
 
 /**
  * Ensure the API surface never returns HTML 404 pages.
