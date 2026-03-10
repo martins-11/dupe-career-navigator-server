@@ -253,6 +253,89 @@ function _extractRolesJsonArrayFromText(text) {
     // ignore; fall through
   }
 
+  /**
+   * Truncation salvage (CRITICAL HARDENING):
+   * If the model output is truncated mid-object, full JSON.parse() fails and substring scanning can
+   * accidentally select a nested balanced array (e.g., key_responsibilities: string[]) instead of
+   * the top-level roles list (object[]).
+   *
+   * This attempts to recover the top-level array by:
+   * - Finding the first '['
+   * - Tracking string/brace/array depth
+   * - Capturing the last fully completed object '}' at arrayDepth===1
+   * - Synthesizing a valid JSON array by closing with ']'
+   */
+  const salvageTopLevelArrayIfTruncated = () => {
+    const start = trimmed.indexOf('[');
+    if (start < 0) return null;
+
+    let inString = false;
+    let escape = false;
+    let arrayDepth = 0;
+    let objectDepth = 0;
+
+    // Index of last '}' that completed an object while inside the top-level array (arrayDepth===1).
+    let lastCompletedObjectEnd = -1;
+
+    for (let i = start; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '\"') inString = false;
+        continue;
+      }
+
+      if (ch === '\"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '[') arrayDepth += 1;
+      if (ch === ']') arrayDepth -= 1;
+
+      if (ch === '{') objectDepth += 1;
+      if (ch === '}') {
+        objectDepth -= 1;
+
+        if (objectDepth === 0 && arrayDepth === 1) {
+          lastCompletedObjectEnd = i;
+        }
+      }
+
+      // Not truncated: we found a full closing ']' for the array that started at `start`.
+      if (arrayDepth === 0 && i > start) return null;
+    }
+
+    // End-of-text: if we're still inside the array and we saw at least one completed object, salvage.
+    if (arrayDepth >= 1 && lastCompletedObjectEnd > start) {
+      const prefix = trimmed.slice(start, lastCompletedObjectEnd + 1).trim();
+      const withoutTrailingComma = prefix.replace(/,\\s*$/, '');
+      const synthesized = `${withoutTrailingComma}\\n]`;
+
+      try {
+        const parsed = JSON.parse(synthesized);
+        if (Array.isArray(parsed)) return { parsed, text: synthesized };
+      } catch (_) {
+        return null;
+      }
+    }
+
+    return null;
+  };
+
+  const salvaged = salvageTopLevelArrayIfTruncated();
+  if (salvaged && Array.isArray(salvaged.parsed)) {
+    return { array: salvaged.parsed, extractedText: salvaged.text, parseError: null };
+  }
+
   // Enumerate all balanced JSON arrays in the text, respecting JSON strings.
   const starts = [];
   for (let i = 0; i < trimmed.length; i += 1) if (trimmed[i] === '[') starts.push(i);
