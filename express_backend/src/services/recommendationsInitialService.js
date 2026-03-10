@@ -260,63 +260,147 @@ function _scoreRoles(finalPersona, roles) {
   const userSkillsForScoring = _extractPersonaSkillsWithProficiency(finalPersona);
   const hadUserProficiencies = userSkillsForScoring.length > 0;
 
+  /**
+   * When persona proficiencies are missing, we still need to provide non-null
+   * compatibility scores and meaningful mastery/growth tags so the frontend can render.
+   *
+   * This fallback mode is deterministic and conservative:
+   * - compatibilityScore: % of required_skills that exist in persona skills (string overlap)
+   * - masteryAreas: first 3 matched required skills
+   * - growthAreas: next 2 matched required skills
+   * - threeTwoReport: not_validated (we cannot validate thresholds without proficiencies)
+   *
+   * We also mark scoring metadata so consumers can distinguish inferred vs proficiency-based output.
+   */
+  const personaSkillStrings = (() => {
+    const p = finalPersona && typeof finalPersona === 'object' ? finalPersona : {};
+    const candidates = [p.skills, p.validated_skills, p.validatedSkills, p.skill_names, p.skillNames];
+    for (const arr of candidates) {
+      if (!Array.isArray(arr) || !arr.length) continue;
+      const out = [];
+      for (const row of arr) {
+        if (typeof row === 'string') {
+          const s = row.trim();
+          if (s) out.push(s);
+        } else if (row && typeof row === 'object' && !Array.isArray(row)) {
+          const s = String(row.name || row.skill || row.label || '').trim();
+          if (s) out.push(s);
+        }
+      }
+      if (out.length) return out;
+    }
+    return [];
+  })();
+
+  const personaNorm = new Set(personaSkillStrings.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean));
+
   return (Array.isArray(roles) ? roles : []).map((r) => {
     const normalized = _normalizeRoleForInitialRecommendations(r) || r;
 
     const requiredSkills = Array.isArray(normalized.required_skills) ? normalized.required_skills : [];
     const requiredSkillsCount = requiredSkills.length;
 
-    // When no numeric proficiencies exist, skip scoring gracefully.
-    // Do NOT fabricate proficiencies; do NOT emit misleading 0 scoring artifacts.
-    const threeTwoReport = hadUserProficiencies
-      ? buildThreeTwoReport(userSkillsForScoring, requiredSkills)
-      : null;
+    if (hadUserProficiencies) {
+      const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, requiredSkills);
+      const compat = scoreRoleCompatibility(userSkillsForScoring, requiredSkills);
 
-    const compat = hadUserProficiencies
-      ? scoreRoleCompatibility(userSkillsForScoring, requiredSkills)
-      : { score: null, masteryAreas: [], growthAreas: [] };
+      const ring = _buildRingScores({
+        requiredSkillsCount,
+        masteryAreas: compat.masteryAreas,
+        growthAreas: compat.growthAreas,
+      });
 
-    const ring = hadUserProficiencies
-      ? _buildRingScores({
-          requiredSkillsCount,
-          masteryAreas: compat.masteryAreas,
-          growthAreas: compat.growthAreas,
-        })
-      : { masteryScore: null, growthScore: null, masteryCount: 0, growthCount: 0 };
+      const threeTwoValidationScore = _threeTwoValidationScore(threeTwoReport);
+      const finalCompatibilityScore = _clampPercent(0.6 * (compat.score || 0) + 0.4 * (threeTwoValidationScore || 0));
 
-    const threeTwoValidationScore = hadUserProficiencies ? _threeTwoValidationScore(threeTwoReport) : null;
+      return {
+        ...normalized,
 
-    // Final compatibility used for sorting / display: prioritize 3/2 validation, then skill coverage.
-    // Keep as 0..100 number when scoring is available.
-    const finalCompatibilityScore = hadUserProficiencies
-      ? _clampPercent(0.6 * (compat.score || 0) + 0.4 * (threeTwoValidationScore || 0))
-      : null;
+        // Core scoring outputs
+        threeTwoReport,
+        compatibilityScore: compat.score,
+        finalCompatibilityScore,
+
+        // Explicit mastery/growth areas for UI and debugging
+        masteryAreas: compat.masteryAreas,
+        growthAreas: compat.growthAreas,
+
+        // Ring-friendly scores (0..100) for the UI circles
+        masteryScore: ring.masteryScore,
+        growthScore: ring.growthScore,
+        masteryCount: ring.masteryCount,
+        growthCount: ring.growthCount,
+
+        match_metadata: {
+          ...(normalized.match_metadata && typeof normalized.match_metadata === 'object' ? normalized.match_metadata : {}),
+          scoring: {
+            hadUserProficiencies,
+            requiredSkillsCount,
+            scoringSkipped: false,
+            threeTwoValidationScore,
+            fallbackMode: 'none',
+          },
+        },
+      };
+    }
+
+    // Fallback mode (no numeric proficiencies)
+    const requiredNorm = requiredSkills.map((s) => String(s || '').trim()).filter(Boolean);
+    const matched = requiredNorm.filter((s) => personaNorm.has(s.toLowerCase()));
+
+    const masteryAreas = matched.slice(0, 3);
+    const growthAreas = matched.slice(3, 5);
+
+    const coveredCount = new Set(matched.map((s) => s.toLowerCase())).size;
+    const denom = requiredNorm.length > 0 ? new Set(requiredNorm.map((s) => s.toLowerCase())).size : 0;
+    const compatibilityScore = denom ? _clampPercent((coveredCount / denom) * 100) : 0;
+
+    const ring = _buildRingScores({
+      requiredSkillsCount: denom,
+      masteryAreas,
+      growthAreas,
+    });
+
+    // No proficiency => cannot validate 3/2. Keep deterministic but honest.
+    const threeTwoReport = {
+      status: 'not_validated',
+      masteryAreas,
+      growthAreas,
+      score: 0,
+    };
+
+    // In fallback, we use compatibilityScore directly (do not mix in 3/2 validation).
+    const finalCompatibilityScore = compatibilityScore;
 
     return {
       ...normalized,
 
-      // Core scoring outputs
+      // Core scoring outputs (NON-NULL for frontend ring rendering)
       threeTwoReport,
-      compatibilityScore: hadUserProficiencies ? compat.score : null,
+      compatibilityScore,
       finalCompatibilityScore,
 
-      // Explicit mastery/growth areas for UI and debugging
-      masteryAreas: hadUserProficiencies ? compat.masteryAreas : [],
-      growthAreas: hadUserProficiencies ? compat.growthAreas : [],
+      // Explicit mastery/growth areas for UI and debugging (NON-EMPTY when overlap exists)
+      masteryAreas,
+      growthAreas,
 
       // Ring-friendly scores (0..100) for the UI circles
-      masteryScore: hadUserProficiencies ? ring.masteryScore : null,
-      growthScore: hadUserProficiencies ? ring.growthScore : null,
-      masteryCount: hadUserProficiencies ? ring.masteryCount : 0,
-      growthCount: hadUserProficiencies ? ring.growthCount : 0,
+      masteryScore: ring.masteryScore,
+      growthScore: ring.growthScore,
+      masteryCount: ring.masteryCount,
+      growthCount: ring.growthCount,
 
       match_metadata: {
         ...(normalized.match_metadata && typeof normalized.match_metadata === 'object' ? normalized.match_metadata : {}),
         scoring: {
           hadUserProficiencies,
-          requiredSkillsCount,
-          scoringSkipped: !hadUserProficiencies,
-          threeTwoValidationScore,
+          requiredSkillsCount: denom,
+          scoringSkipped: false,
+          threeTwoValidationScore: null,
+          fallbackMode: 'overlap_without_proficiency',
+          fallbackInputs: {
+            personaSkillCount: personaNorm.size,
+          },
         },
       },
     };

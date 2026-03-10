@@ -38,6 +38,7 @@ const pathsRouter = require('./routes/paths');
 const planRouter = require('./routes/plan');
 const profileRouter = require('./routes/profile');
 const rolesRouter = require('./routes/roles');
+const mindmapRouter = require('./routes/mindmap');
 
 const app = express();
 
@@ -81,6 +82,11 @@ app.use('/orchestration', orchestrationRouter);
 app.use('/documents', documentsRouter);
 app.use('/personas', personasRouter);
 
+// Compatibility mount:
+// Frontend (and OpenAPI contract) call /api/personas/*, but historically personas router lived at /personas/*.
+// Mounting both keeps existing clients working and makes /api/personas/target-role reachable.
+app.use('/api/personas', personasRouter);
+
 app.use('/api/recommendations', recommendationsRouter);
 
 // Safety-net mount: ensure GET /api/recommendations/initial is reachable exactly here,
@@ -95,6 +101,7 @@ app.use('/api/paths', pathsRouter);
 app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
 app.use('/api/roles', rolesRouter);
+app.use('/api/mindmap', mindmapRouter);
 
 /**
  * Ensure the API surface never returns HTML 404 pages.

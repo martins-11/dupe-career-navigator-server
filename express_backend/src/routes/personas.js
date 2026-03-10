@@ -141,7 +141,10 @@ router.get('/:id/versions/latest', async (req, res) => {
   }
 });
 
-// PUBLIC_INTERFACE
+/**
+ * PUBLIC_INTERFACE
+ * POST /personas/target-role
+ */
 router.post('/target-role', async (req, res) => {
   /**
    * Persist the user's selected target future role.
@@ -161,28 +164,121 @@ router.post('/target-role', async (req, res) => {
   }
 
   try {
-    // Ensure roles table is populated at least with seed data (best-effort).
-    // If DB isn't configured, rolesRepo.searchRoles/listRoles will be [] which is fine; we then 503 for persistence.
-    const roleExists = await rolesRepo.roleExists(parsed.data.role_id);
-    if (!roleExists) {
-      return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles table.' });
+    /**
+     * Role existence validation:
+     * - If DB roles catalog is available, validate role_id exists (helps catch client bugs/typos).
+     * - Additionally accept ids that exist in the seed catalog (DEFAULT_ROLES_CATALOG) because
+     *   the Explore/mindmap flows can operate without a seeded DB.
+     *
+     * IMPORTANT: role_id is not guaranteed to be a UUID.
+     */
+    const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
+    const dbAvailable = getDbEngine() === 'mysql' && isDbConfigured() && isMysqlConfigured();
+
+    const roleId = String(parsed.data.role_id).trim();
+
+    const seed = require('../services/recommendationsService')?.DEFAULT_ROLES_CATALOG;
+    const seedHasRole =
+      Array.isArray(seed) &&
+      seed.some((r) => {
+        const seedId = String(r?.roleId || r?.role_id || r?.id || '').trim();
+        const seedTitle = String(r?.roleTitle || r?.role_title || r?.title || '').trim();
+        // Seed catalog often doesn't provide roleId; accept title-derived ids too.
+        return (seedId && seedId === roleId) || (!seedId && seedTitle && seedTitle === roleId);
+      });
+
+    /**
+     * If DB is available, validate role existence.
+     *
+     * IMPORTANT:
+     * - The roles catalog table stores UUID role_ids (seeded/generated).
+     * - Explore search/recommendations can return Bedrock-generated roles with ids like:
+     *     bedrock-<slug> or bedrock-rec-<slug>
+     *   These will not exist in the roles table, but they are still legitimate “targetable” roles.
+     *
+     * Therefore:
+     * - Accept if found in DB roles table OR seed catalog OR known Bedrock id prefix.
+     * - Still reject obvious typos/unknown ids to preserve guardrails.
+     */
+    const isBedrockRoleId = /^bedrock(?:-rec)?-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(roleId);
+
+    if (dbAvailable) {
+      const roleExists = await rolesRepo.roleExists(roleId);
+      if (!roleExists && !seedHasRole && !isBedrockRoleId) {
+        return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles catalog.' });
+      }
     }
+    // If DB is not available, allow saving (memory fallback will persist).
 
     const saved = await userTargetsRepo.upsertUserTargetRole({
       userId: parsed.data.user_id,
-      roleId: parsed.data.role_id,
+      roleId,
       timeHorizon: parsed.data.time_horizon
     });
 
-    if (!saved) {
-      return res.status(503).json({ error: 'db_unavailable', message: 'Database not configured for persistence.' });
-    }
-
     return res.status(201).json({
       status: 'ok',
-      target: saved
+      target: saved,
+      persistence: { type: dbAvailable ? 'mysql' : 'memory' }
     });
   } catch (err) {
+    return handleRepoError(res, err);
+  }
+});
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /personas/target-role?user_id=<uuid>
+ *
+ * Returns the latest saved target role selection for the user.
+ * This supports the "target role retrieval" requirement and enables the frontend to
+ * restore persisted choice and drive the mind map details view.
+ */
+router.get('/target-role', async (req, res) => {
+  const userId = String(req.query?.user_id || '').trim();
+  if (!userId) {
+    return res.status(400).json({
+      error: 'validation_error',
+      message: 'user_id query parameter is required.'
+    });
+  }
+
+  try {
+    const latest = await userTargetsRepo.getLatestUserTargetRole({ userId });
+
+    /**
+     * Graceful behavior when DB is unavailable/unconfigured:
+     * - The frontend uses personaId (or "anonymous") as a best-effort user key today.
+     * - DB-backed persistence may not be configured in early scaffolding.
+     *
+     * So for GET we treat "no DB/no record" as a non-fatal condition and return:
+     *   200 { status:"ok", target:null, persistence:{...} }
+     *
+     * This allows the UI to fall back to localStorage without surfacing backend errors.
+     */
+    if (!latest) {
+      return res.json({
+        status: 'ok',
+        target: null,
+        persistence: { available: false }
+      });
+    }
+
+    return res.json({
+      status: 'ok',
+      target: latest,
+      persistence: { available: true }
+    });
+  } catch (err) {
+    // If this looks like a DB connectivity/config issue, degrade gracefully (same as no record).
+    const msg = String(err && err.message ? err.message : err);
+    if (/db_unavailable/i.test(msg) || /database/i.test(msg) || /mysql/i.test(msg) || /connection/i.test(msg)) {
+      return res.json({
+        status: 'ok',
+        target: null,
+        persistence: { available: false }
+      });
+    }
     return handleRepoError(res, err);
   }
 });

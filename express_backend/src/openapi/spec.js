@@ -44,7 +44,8 @@ const openapiDefinition = {
     { name: 'Paths', description: 'Career path exploration endpoints (placeholder endpoints).' },
     { name: 'Plan', description: 'Planning/milestones endpoints (placeholder endpoints).' },
     { name: 'Profile', description: 'Profile scoring endpoints (placeholder endpoints).' },
-    { name: 'Roles', description: 'Roles catalog search and selection endpoints.' }
+    { name: 'Roles', description: 'Roles catalog search and selection endpoints.' },
+    { name: 'MindMap', description: 'Mind map graph endpoints for interactive career path exploration.' }
   ],
   servers: [
     {
@@ -861,6 +862,70 @@ const openapiDefinition = {
           target: { type: 'object', additionalProperties: true }
         },
         required: ['status', 'target']
+      },
+
+      PersonaTargetRoleGetResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          status: { type: 'string', enum: ['ok'] },
+          target: { type: 'object', additionalProperties: true }
+        },
+        required: ['status', 'target']
+      },
+
+      MindMapNode: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1 },
+          type: { type: 'string', enum: ['current_role', 'role'] },
+          label: { type: 'string', minLength: 1 },
+          level: { type: 'integer', minimum: 0 },
+          data: { type: 'object', additionalProperties: true }
+        },
+        required: ['id', 'type', 'label', 'level', 'data']
+      },
+
+      MindMapEdge: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1 },
+          source: { type: 'string', minLength: 1 },
+          target: { type: 'string', minLength: 1 },
+          type: { type: 'string', example: 'progression' },
+          label: { type: 'string', nullable: true },
+          data: { type: 'object', additionalProperties: true }
+        },
+        required: ['id', 'source', 'target', 'type', 'data']
+      },
+
+      MindMapNodeDetails: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1 },
+          title: { type: 'string', minLength: 1 },
+          industry: { type: 'string', nullable: true },
+          requiredSkills: { type: 'array', items: { type: 'string' } },
+          averageSalary: { type: 'string', nullable: true },
+          transitionTimeline: { type: 'string', nullable: true },
+          skillGap: { type: 'object', additionalProperties: true }
+        },
+        required: ['id', 'title', 'requiredSkills', 'averageSalary', 'transitionTimeline', 'skillGap']
+      },
+
+      MindMapGraphResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          meta: { type: 'object', additionalProperties: true },
+          nodes: { type: 'array', items: { $ref: '#/components/schemas/MindMapNode' } },
+          edges: { type: 'array', items: { $ref: '#/components/schemas/MindMapEdge' } },
+          detailsByNodeId: { type: 'object', additionalProperties: { $ref: '#/components/schemas/MindMapNodeDetails' } }
+        },
+        required: ['meta', 'nodes', 'edges', 'detailsByNodeId']
       }
     },
     parameters: {
@@ -2330,6 +2395,145 @@ const openapiDefinition = {
           },
           503: {
             description: 'DB unavailable',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      },
+      get: {
+        tags: ['Roles'],
+        summary: 'Get latest persisted target role selection',
+        description: 'Returns the latest saved target role selection for a given user_id.',
+        parameters: [
+          {
+            name: 'user_id',
+            in: 'query',
+            required: true,
+            schema: { type: 'string', format: 'uuid' },
+            description: 'User id (uuid).'
+          }
+        ],
+        responses: {
+          200: {
+            description: 'Latest selection',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/PersonaTargetRoleGetResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/mindmap/graph': {
+      get: {
+        tags: ['MindMap'],
+        summary: 'Get mind map graph data (nodes/edges + per-node details)',
+        description:
+          'Returns mind map graph data for interactive visualization (zoom/pan) including per-node drill-down details. Supports filtering by salary range, skill similarity, and time horizon.',
+        parameters: [
+          {
+            name: 'currentRoleTitle',
+            in: 'query',
+            required: false,
+            schema: { type: 'string' },
+            description: 'Current role title to display as the center node.'
+          },
+          {
+            name: 'minSalaryLpa',
+            in: 'query',
+            required: false,
+            schema: { type: 'number' },
+            description: 'Minimum salary (LPA) filter.'
+          },
+          {
+            name: 'maxSalaryLpa',
+            in: 'query',
+            required: false,
+            schema: { type: 'number' },
+            description: 'Maximum salary (LPA) filter.'
+          },
+          {
+            name: 'minSkillSimilarity',
+            in: 'query',
+            required: false,
+            schema: { type: 'number', minimum: 0, maximum: 100 },
+            description: 'Minimum skill similarity score (0-100).'
+          },
+          {
+            name: 'timeHorizon',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: ['Near', 'Mid', 'Far'] },
+            description: 'Filter branches by time horizon.'
+          },
+          {
+            name: 'limit',
+            in: 'query',
+            required: false,
+            schema: { type: 'integer', minimum: 3, maximum: 100 },
+            description: 'Maximum nodes to return (including center).'
+          }
+        ],
+        responses: {
+          200: {
+            description: 'Mind map graph',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/MindMapGraphResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/mindmap/nodes/{id}': {
+      get: {
+        tags: ['MindMap'],
+        summary: 'Get details payload for a mind map node',
+        parameters: [
+          {
+            name: 'id',
+            in: 'path',
+            required: true,
+            schema: { type: 'string' },
+            description: 'Node id (role id) to fetch details for.'
+          }
+        ],
+        responses: {
+          200: {
+            description: 'Node details',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/MindMapNodeDetails' } }
+            }
+          },
+          404: {
+            description: 'Node not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          400: {
+            description: 'Validation error',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           },
           500: {

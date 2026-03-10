@@ -7,8 +7,53 @@ const { normalizeText } = require('./normalizationService');
 const buildsService = require('./buildsService');
 const workflowService = require('./workflowService');
 const aiRunsRepo = require('../repositories/aiRunsRepoAdapter');
+const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
 const { uuidV4 } = require('../utils/uuid');
 const personaService = require('./personaService');
+
+/**
+ * Best-effort display normalization for persona "header" fields.
+ * We treat `full_name` as the person's name, and role/title fields separately.
+ */
+function _cleanStr(s) {
+  return String(s ?? '').trim();
+}
+
+function _looksLikePersonName(s) {
+  const v = _cleanStr(s);
+  if (!v) return false;
+  if (v.length > 60) return false;
+  if (/[0-9]/.test(v)) return false;
+  if (/[@]/.test(v)) return false;
+
+  // "First Last" or "First Middle Last" style (2-4 tokens)
+  const parts = v.split(/\s+/).filter(Boolean);
+  if (parts.length < 2 || parts.length > 4) return false;
+
+  return parts.every((p) => /^[A-Za-z][A-Za-z.'-]*$/.test(p));
+}
+
+function _looksLikeRoleOrHeadline(s) {
+  const v = _cleanStr(s).toLowerCase();
+  if (!v) return false;
+
+  // If it contains typical role keywords, treat as role-ish.
+  if (
+    /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product|research|scientist|intern)\b/.test(
+      v
+    )
+  ) {
+    return true;
+  }
+
+  // "X — Y" headline patterns are not names.
+  if (/[—-]\s+/.test(v) && v.split(/\s+/).length >= 3) return true;
+
+  // Long sentence-like strings are not names.
+  if (v.length > 80) return true;
+
+  return false;
+}
 
 /**
  * Orchestration service (in-memory).
@@ -582,12 +627,19 @@ async function extractAndNormalizeForBuild(buildId, input) {
 // PUBLIC_INTERFACE
 async function generatePersonaDraftForBuild(buildId, input) {
   /**
-   * Generate a persona draft for a build using placeholder AI (no external credentials).
+   * Generate a persona draft for a build using Bedrock-backed personaService.generatePersonaDraft().
    *
-   * Also optionally:
-   * - creates a persona (memory) if none exists and autoCreatePersona is enabled
-   * - saves a draft blob via personasRepo.saveDraft
-   * - optionally creates a persona version
+   * Bugfix requirement:
+   * - Ensure the "current role/designation" is actually populated in the returned + persisted draft
+   *   (and therefore visible in draft/final persona views).
+   *
+   * Approach:
+   * - Extract (name, role) from the exact same sourceText used for persona generation.
+   * - If role is blank, fall back to the latest persisted user current role (user_targets) when userId exists.
+   * - Inject role into commonly used fields across evolving schemas:
+   *   - v2: current_role + full_name (already emitted by personaService, but keep defensive)
+   *   - legacy-ish: professional_title
+   *   - display: title/headline if present but empty
    */
   const parsed = OrchestrationGenerateRequest.parse(input || {});
   const orch = _ensure(buildId);
@@ -638,16 +690,77 @@ async function generatePersonaDraftForBuild(buildId, input) {
   });
 
   try {
-    const { persona: personaDraft, mode, warnings } = await personaService.generatePersonaDraft(sourceText, {
-      context
-    });
+    const result = await personaService.generatePersonaDraft(sourceText, { context });
 
-    // Extract stable display fields from the same source text used for persona generation.
-    // This is what the frontend should display (role/designation + optional name).
+    // personaService may return a structured fallback: { error: 'AI_GENERATION_FAILED', retryable: true }
+    if (result && typeof result === 'object' && result.error === 'AI_GENERATION_FAILED') {
+      const err = new Error('AI persona generation failed.');
+      err.code = 'AI_GENERATION_FAILED';
+      err.httpStatus = 502;
+      err.details = { retryable: true };
+      throw err;
+    }
+
+    const { persona: basePersonaDraft, mode, warnings } = result;
+
     const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
     const extracted = extractNameAndCurrentRole(sourceText);
+    const extractedName = extracted?.name || '';
+    const extractedRole = extracted?.role || '';
 
-    // Persist draft (in-memory; adapter supports saveDraft)
+    // If heuristic extraction didn't yield a role, fall back to persisted user current role (if available).
+    let roleFromUserTargets = '';
+    if (!extractedRole && orch.userId) {
+      try {
+        const latest = await userTargetsRepo.getLatestUserCurrentRole({ userId: String(orch.userId) });
+        roleFromUserTargets = latest?.currentRoleTitle ? String(latest.currentRoleTitle).trim() : '';
+      } catch (_) {
+        roleFromUserTargets = '';
+      }
+    }
+
+    // Final candidate values (may still be empty).
+    const resolvedRole = _cleanStr(extractedRole || roleFromUserTargets || '');
+    const resolvedName = _cleanStr(extractedName || '');
+
+    // If base draft already has fields, keep them. Only fill missing values.
+    const baseFullName = basePersonaDraft?.full_name;
+    const baseTitle = basePersonaDraft?.title;
+    const baseHeadline = basePersonaDraft?.profile?.headline;
+    const baseCurrentRole = basePersonaDraft?.current_role;
+    const baseProfessionalTitle = basePersonaDraft?.professional_title;
+
+    // Do NOT allow title/headline-like strings to populate full_name.
+    // If extraction didn't yield a plausible person name, leave full_name empty (UI should fall back).
+    const safeNameCandidate = _looksLikePersonName(resolvedName) ? resolvedName : '';
+
+    const personaDraft =
+      basePersonaDraft && typeof basePersonaDraft === 'object'
+        ? {
+            ...basePersonaDraft,
+
+            // Person name: only set when we have a plausible name.
+            full_name: _cleanStr(baseFullName) ? baseFullName : safeNameCandidate,
+
+            // Role / designation: prefer explicit existing values, else fill from resolvedRole.
+            current_role: _cleanStr(baseCurrentRole) ? baseCurrentRole : resolvedRole,
+            professional_title: _cleanStr(baseProfessionalTitle) ? baseProfessionalTitle : resolvedRole,
+
+            // Display title: OK to be a composed string, but must never be used as "name".
+            title:
+              typeof baseTitle === 'string' && baseTitle.trim()
+                ? baseTitle
+                : safeNameCandidate && resolvedRole
+                  ? `${safeNameCandidate} — ${resolvedRole}`
+                  : resolvedRole
+                    ? `${resolvedRole} Persona (Draft)`
+                    : typeof baseHeadline === 'string' && baseHeadline.trim()
+                      ? baseHeadline
+                      : baseTitle
+          }
+        : basePersonaDraft;
+
+    // Persist draft (in-memory or DB; adapter supports saveDraft)
     // Re-generate semantics:
     // - if createVersion is true, archive the PREVIOUS draft (if present) as a version
     // - then save the NEW draft as the active draft
@@ -660,7 +773,9 @@ async function generatePersonaDraftForBuild(buildId, input) {
         const existingDraft = await personasRepo.getDraft(personaId);
         const existingDraftJson = existingDraft?.draftJson ?? null;
         if (existingDraftJson) {
-          createdVersion = await personasRepo.createPersonaVersion(personaId, { personaJson: existingDraftJson });
+          createdVersion = await personasRepo.createPersonaVersion(personaId, {
+            personaJson: existingDraftJson
+          });
         }
       }
 
@@ -678,12 +793,10 @@ async function generatePersonaDraftForBuild(buildId, input) {
       personaDraft,
       lastAiRunId: aiRun.id,
 
-      // Make extracted fields available to the UI via orchestration record.
-      // Keep them on a stable "artifacts" envelope so the UI can safely expand later.
       artifacts: {
         ...(orch.artifacts || {}),
-        extractedName: extracted?.name || '',
-        extractedRole: extracted?.role || ''
+        extractedName: resolvedName,
+        extractedRole: resolvedRole
       }
     });
 
@@ -699,9 +812,8 @@ async function generatePersonaDraftForBuild(buildId, input) {
       createdVersion,
       orchestration: next,
 
-      // Convenience echoes (additive; does not break existing clients).
-      extractedName: extracted?.name || '',
-      extractedRole: extracted?.role || ''
+      extractedName: resolvedName,
+      extractedRole: resolvedRole
     };
   } catch (err) {
     await aiRunsRepo.updateAiRun(aiRun.id, {

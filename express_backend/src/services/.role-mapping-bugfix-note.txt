@@ -1,0 +1,4 @@
+Bugfix note (2026-03-10):
+- Orchestration draft generation now injects resolved current role/name into the persona draft payload before persistence/return.
+- Resolved role is derived from heuristic extraction first, then falls back to latest user_targets currentRoleTitle when userId exists.
+- Fields populated defensively: current_role, professional_title, full_name, and (if empty) title.

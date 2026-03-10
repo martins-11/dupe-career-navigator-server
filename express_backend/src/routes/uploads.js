@@ -10,6 +10,8 @@ const documentsRepo = require('../repositories/documentsRepoAdapter');
 const { extractTextFromUploadedFile } = require('../services/extractionService');
 const { normalizeText } = require('../services/normalizationService');
 const { DOCUMENT_CATEGORY_VALUES, normalizeDocumentCategory } = require('../models/documentCategories');
+const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
+const bedrockService = require('../services/bedrockService');
 
 const router = express.Router();
 
@@ -362,6 +364,78 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
         }
       }
     });
+
+    /**
+     * Current role extraction/persistence (best-effort, non-blocking):
+     * - Only attempt when we have a userId and meaningful text.
+     * - Prefer resume/performance_review categories (most likely to include a current title).
+     * - Persist into user_targets as a "current role" record so Mindmap/Personas can show it.
+     *
+     * ENV REQUIRED for real Bedrock:
+     * - AWS_REGION/AWS credentials as per bedrockService docs.
+     */
+    if (userId && normalizedText.trim() && (category === 'resume' || category === 'performance_review')) {
+      /**
+       * Current role extraction/persistence (best-effort, non-blocking):
+       * - Primary: Bedrock JSON extraction (when configured/available)
+       * - Fallback: local heuristic extractor (nameRoleExtraction) so we still persist something usable
+       *
+       * Why:
+       * - The UI expects "current role/designation" to exist for draft/final persona display.
+       * - Bedrock can be unconfigured, throttled, or return null; we should not end up with an empty role in those cases.
+       */
+      try {
+        let saved = false;
+
+        // 1) Try Bedrock extraction first.
+        try {
+          const extracted = await bedrockService.extractCurrentRoleFromText({
+            text: normalizedText,
+            hints: { name: extractedEmployeeName || null },
+            options: { modelId: process.env.BEDROCK_ROLE_MODEL_ID || process.env.BEDROCK_MODEL_ID || null }
+          });
+
+          if (extracted?.currentRoleTitle) {
+            await userTargetsRepo.upsertUserCurrentRole({
+              userId: String(userId),
+              currentRoleTitle: extracted.currentRoleTitle,
+              source: 'bedrock'
+            });
+            saved = true;
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn('[uploads] Bedrock current role extraction failed (will fallback)', {
+            userId,
+            category,
+            message: e?.message,
+            code: e?.code
+          });
+        }
+
+        // 2) Fallback to heuristic extraction if Bedrock didn't produce a title.
+        if (!saved) {
+          const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+          const heuristic = extractNameAndCurrentRole(normalizedText);
+
+          if (heuristic?.role && String(heuristic.role).trim()) {
+            await userTargetsRepo.upsertUserCurrentRole({
+              userId: String(userId),
+              currentRoleTitle: String(heuristic.role).trim(),
+              source: 'heuristic'
+            });
+          }
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[uploads] current role persistence failed (best-effort)', {
+          userId,
+          category,
+          message: e?.message,
+          code: e?.code
+        });
+      }
+    }
   }
 
   return { doc, extraction, normalizedText, extractedEmployeeName };
@@ -499,7 +573,8 @@ function handleMultiUpload({ routeName, sourceDefault }) {
       let fileSummaries;
 
       try {
-        const userId = req.body?.userId || null;
+        // Accept both camelCase and snake_case for compatibility with frontend/API callers.
+        const userId = req.body?.userId || req.body?.user_id || null;
         const source = req.body?.source || sourceDefault || null;
 
         // eslint-disable-next-line no-console

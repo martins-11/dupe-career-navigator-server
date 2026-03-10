@@ -2,7 +2,7 @@
 
 const rolesRepo = require('../repositories/rolesRepoAdapter');
 const personasRepo = require('../repositories/personasRepoAdapter');
-const { buildThreeTwoReport } = require('./scoringEngine');
+const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine');
 
 /**
  * Shared default roles catalog (in-memory seed).
@@ -406,10 +406,39 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
           .filter((x) => (pivot ? true : x.industryMatched))
           .filter((x) => x.titleAligned || x.progressionOk);
 
-  const top = [...fallbackPool].sort((a, b) => b.score - a.score).slice(0, 5);
+  // Day 3: build recommendations with compatibility scoring and rank by compatibilityScore first.
+  const enriched = [...fallbackPool]
+    .map((x) => {
+      const requiredSkills = x.role.coreSkills || [];
+      const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, requiredSkills);
+      const compat = scoreRoleCompatibility(userSkillsForScoring, requiredSkills);
 
-  const recommendations = top.map((x) => {
-    const threeTwoReport = buildThreeTwoReport(userSkillsForScoring, x.role.coreSkills || []);
+      const masteryCount = Array.isArray(compat.masteryAreas) ? compat.masteryAreas.length : 0;
+      const growthCount = Array.isArray(compat.growthAreas) ? compat.growthAreas.length : 0;
+
+      return {
+        x,
+        threeTwoReport: {
+          ...threeTwoReport,
+          compatibilityScore: compat.score,
+        },
+        compatibilityScore: compat.score,
+        masteryAreas: compat.masteryAreas,
+        growthAreas: compat.growthAreas,
+        masteryCount,
+        growthCount,
+      };
+    })
+    .sort((a, b) => {
+      // Primary: compatibilityScore, then fallback legacy score for tie-break.
+      const cs = (b.compatibilityScore || 0) - (a.compatibilityScore || 0);
+      if (cs !== 0) return cs;
+      return (b.x?.score || 0) - (a.x?.score || 0);
+    })
+    .slice(0, 5);
+
+  const recommendations = enriched.map((row) => {
+    const { x, threeTwoReport, compatibilityScore, masteryAreas, growthAreas, masteryCount, growthCount } = row;
 
     return {
       role_id: x.role.roleId,
@@ -419,11 +448,17 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
         overlapSkills: x.overlap,
         industryMatched: x.industryMatched,
         titleAligned: x.titleAligned,
-        progressionOk: x.progressionOk
+        progressionOk: x.progressionOk,
       }),
       estimated_salary_range: x.role.estimatedSalaryRange || null,
-      // Day 3 additive field
-      threeTwoReport
+
+      // Day 3 additive fields (frontend display + overrides)
+      threeTwoReport,
+      compatibilityScore,
+      masteryAreas,
+      growthAreas,
+      masteryCount,
+      growthCount,
     };
   });
 
@@ -435,11 +470,11 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
         current_role: personaCurrentRole || null,
         industry: personaIndustry || null,
         seniority_level: personaSeniority || null,
-        validated_skills_count: personaSkills.length
+        validated_skills_count: personaSkills.length,
       },
       pivot: Boolean(pivot),
-      candidatesConsidered: roles.length
-    }
+      candidatesConsidered: roles.length,
+    },
   };
 }
 
