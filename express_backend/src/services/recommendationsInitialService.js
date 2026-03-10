@@ -114,21 +114,19 @@ function _scoreRoles(finalPersona, roles) {
   });
 }
 
-// PUBLIC_INTERFACE
-async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPersona, personaId } = {}) {
-  /**
-   * Generate initial recommendations (EXACTLY 5 roles) using ONLY AWS Bedrock.
-   *
-   * This refactor intentionally removes all O*NET usage/grounding.
-   *
-   * Behavior:
-   * - Calls Bedrock for EXACTLY 5 roles (BedrockService has its own internal deterministic fallback).
-   * - Adds compatibilityScore + threeTwoReport (when persona proficiencies exist).
-   *
-   * @returns {Promise<{roles: Array, meta: object}>}
-   */
+/**
+ * PUBLIC_INTERFACE
+ * Generate initial recommendations (EXACTLY 5 roles) using ONLY AWS Bedrock.
+ *
+ * This function has been hardened for "strict mode" – all fallback is forcibly disabled.
+ * Any Bedrock or persona validation error will be surfaced directly; deterministic fallback roles no longer exist.
+ */
+async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPersona, personaId, options = {} } = {}) {
+  // Harden: force fallback to be disallowed at all times, regardless of input.
+  const strictOptions = { ...options, allowFallback: false };
+
   if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
-    const err = new Error('finalPersona is required.');
+    const err = new Error('finalPersona is required for recommendations; fallback is disallowed.');
     err.code = 'missing_final_persona';
     err.httpStatus = 400;
     throw err;
@@ -137,12 +135,16 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   const profs = _extractPersonaSkillsWithProficiency(finalPersona);
   const hasPersonaProficiencies = Array.isArray(profs) && profs.length > 0;
 
-  // Bedrock generation (safe wrapper is inside bedrockService.getInitialRecommendations)
-  const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, { context: null });
+  // Strict: call Bedrock, which will throw on invalid output, never returning fallback.
+  const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
+    context: null,
+    allowFallback: false // override any caller option
+  });
 
+  // If Bedrock throws, will never reach here; scoring will match only genuine results.
   const roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
 
-  // Sanitize bedrock error object (if any) into a stable, non-sensitive meta field.
+  // For strict mode, no fallback, surface errors only if real Bedrock errors.
   const bedrockError =
     bedrockResult?.usedFallback && bedrockResult?.error && typeof bedrockResult.error === 'object'
       ? {
@@ -156,7 +158,11 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
           attempts: bedrockResult.error.attempts ?? null,
           totalRetryDelay: bedrockResult.error.totalRetryDelay ?? null,
           fault: bedrockResult.error.fault ?? null,
-          service: bedrockResult.error.service ?? null
+          service: bedrockResult.error.service ?? null,
+          details:
+            bedrockResult.error.details && typeof bedrockResult.error.details === 'object'
+              ? bedrockResult.error.details
+              : null
         }
       : null;
 
@@ -173,7 +179,6 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       },
       bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
       bedrockModelId: bedrockResult?.modelId || null,
-      // Optional per-role visibility into the cause of fallback (useful when debugging UI cards).
       ...(bedrockError ? { bedrockError } : {})
     }
   }));
@@ -187,7 +192,6 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       onetError: null,
       bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
       endpointFallbackUsed: false,
-      // Primary diagnostic payload (use this to see why bedrockUsedFallback=true).
       bedrockError
     }
   };

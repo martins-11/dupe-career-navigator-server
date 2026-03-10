@@ -30,6 +30,20 @@ const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-be
 const DEFAULT_MODEL_ID = 'anthropic.claude-3-5-sonnet-20240620-v1:0';
 
 /**
+ * Resolve a Bedrock model id in priority order.
+ * This allows recommendations to use the same configured model id as persona generation
+ * (BEDROCK_MODEL_ID) when a dedicated recommendations model id is not provided.
+ */
+function _resolveModelId({ override = null, envKeys = [] } = {}) {
+  if (override && String(override).trim()) return String(override).trim();
+  for (const key of envKeys) {
+    const val = process.env[key];
+    if (val && String(val).trim()) return String(val).trim();
+  }
+  return DEFAULT_MODEL_ID;
+}
+
+/**
  * Extract text content from a Bedrock Claude response.
  * Claude "messages" API returns something like:
  * {
@@ -60,22 +74,323 @@ function _extractFirstJsonArray(text) {
   const trimmed = text.trim();
   if (trimmed.startsWith('[') && trimmed.endsWith(']')) return trimmed;
 
-  // Heuristic scan for first balanced [...] block
-  const start = trimmed.indexOf('[');
-  if (start < 0) return null;
+  /**
+   * Robust scan for the first *top-level* balanced JSON array.
+   *
+   * Key hardening:
+   * - Ignore brackets that appear inside JSON strings (e.g., "notes": "foo ] bar").
+   * - Handle escaped quotes inside strings.
+   *
+   * Additional hardening:
+   * - Scan from every '[' occurrence, not just the first. Claude may emit other bracket-like
+   *   content earlier (or a non-JSON bracket) before the real JSON array.
+   */
+  const candidates = [];
+  for (let idx = 0; idx < trimmed.length; idx += 1) {
+    if (trimmed[idx] === '[') candidates.push(idx);
+  }
+  if (candidates.length === 0) return null;
 
-  let depth = 0;
-  for (let i = start; i < trimmed.length; i += 1) {
-    const ch = trimmed[i];
-    if (ch === '[') depth += 1;
-    if (ch === ']') depth -= 1;
-    if (depth === 0) {
-      const candidate = trimmed.slice(start, i + 1).trim();
-      if (candidate.startsWith('[') && candidate.endsWith(']')) return candidate;
-      return null;
+  const tryFrom = (start) => {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = start; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '[') depth += 1;
+      if (ch === ']') depth -= 1;
+
+      if (depth === 0 && i >= start) {
+        const candidate = trimmed.slice(start, i + 1).trim();
+        if (candidate.startsWith('[') && candidate.endsWith(']')) return candidate;
+        return null;
+      }
+    }
+
+    return null;
+  };
+
+  for (const start of candidates) {
+    const candidate = tryFrom(start);
+    if (candidate) return candidate;
+  }
+
+  return null;
+}
+
+/**
+ * Attempt to normalize Bedrock output into a JSON array.
+ *
+ * Supports common model behaviors:
+ * - Raw JSON array
+ * - JSON object wrapper containing a "roles" array
+ * - JSON array wrapped in ```json fences
+ * - Text with leading/trailing commentary (via _extractFirstJsonArray)
+ */
+function _extractJsonArrayFromText(text) {
+  if (!text) return { array: null, extractedText: null, parseError: null };
+
+  let trimmed = text.trim();
+
+  // Strip markdown code fences if present.
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced && fenced[1]) {
+    trimmed = fenced[1].trim();
+  }
+
+  /**
+   * Strip common Claude "XML-ish" wrappers (Bedrock/Anthropic sometimes emits these even when asked not to).
+   * We keep this conservative: remove only known tags, leaving inner content intact.
+   */
+  trimmed = trimmed
+    .replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '')
+    .trim();
+
+  // Try parsing the whole payload as JSON.
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      return { array: parsed, extractedText: JSON.stringify(parsed), parseError: null };
+    }
+
+    // Accept common wrapper keys (models sometimes return { roles: [...] } etc).
+    if (parsed && typeof parsed === 'object') {
+      const wrapperKeys = ['roles', 'recommendations', 'items', 'data', 'results', 'output'];
+      for (const k of wrapperKeys) {
+        if (Array.isArray(parsed[k])) {
+          return {
+            array: parsed[k],
+            extractedText: JSON.stringify(parsed[k]),
+            parseError: null
+          };
+        }
+      }
+    }
+  } catch (_) {
+    // Ignore and fall back to array extraction.
+  }
+
+  const extractedText = _extractFirstJsonArray(trimmed);
+  if (!extractedText) return { array: null, extractedText: null, parseError: null };
+
+  try {
+    const parsed = JSON.parse(extractedText);
+    if (Array.isArray(parsed)) {
+      return { array: parsed, extractedText, parseError: null };
+    }
+  } catch (err) {
+    return { array: null, extractedText, parseError: err };
+  }
+
+  return { array: null, extractedText, parseError: null };
+}
+
+/**
+ * Extract the best candidate JSON array for "roles" from a Bedrock/LLM text response.
+ *
+ * Why this exists:
+ * - Claude may return an array of role objects that CONTAINS nested arrays like `key_responsibilities`.
+ * - A naive "first balanced [...]" extraction can accidentally select the nested string[] instead
+ *   of the top-level object[].
+ *
+ * Strategy:
+ * - Enumerate all balanced JSON array substrings in the cleaned response.
+ * - Parse each into a JS value and score it.
+ * - Prefer arrays where elements are objects with role-like keys; avoid arrays of strings.
+ *
+ * @param {string} text
+ * @returns {{ array: any[] | null, extractedText: string | null, parseError: Error | null }}
+ */
+function _extractRolesJsonArrayFromText(text) {
+  if (!text) return { array: null, extractedText: null, parseError: null };
+
+  let trimmed = text.trim();
+
+  // Strip markdown code fences if present.
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced && fenced[1]) {
+    trimmed = fenced[1].trim();
+  }
+
+  trimmed = trimmed
+    .replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '')
+    .trim();
+
+  // If the whole payload is parseable JSON, prefer that.
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return { array: parsed, extractedText: JSON.stringify(parsed), parseError: null };
+    if (parsed && typeof parsed === 'object') {
+      for (const k of ['roles', 'recommendations', 'items', 'data', 'results', 'output']) {
+        if (Array.isArray(parsed[k])) {
+          return { array: parsed[k], extractedText: JSON.stringify(parsed[k]), parseError: null };
+        }
+      }
+    }
+  } catch (_) {
+    // ignore; fall through
+  }
+
+  // Enumerate all balanced JSON arrays in the text, respecting JSON strings.
+  const starts = [];
+  for (let i = 0; i < trimmed.length; i += 1) if (trimmed[i] === '[') starts.push(i);
+  if (starts.length === 0) return { array: null, extractedText: null, parseError: null };
+
+  const extractBalancedArrayFrom = (start) => {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = start; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') inString = false;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '[') depth += 1;
+      if (ch === ']') depth -= 1;
+
+      if (depth === 0 && i >= start) {
+        const candidate = trimmed.slice(start, i + 1).trim();
+        if (candidate.startsWith('[') && candidate.endsWith(']')) return candidate;
+        return null;
+      }
+    }
+    return null;
+  };
+
+  const roleKeyHints = new Set([
+    'title',
+    'role_title',
+    'industry',
+    'salary_lpa_range',
+    'salary_range',
+    'experience_range',
+    'required_skills',
+    'skills_required',
+    'key_responsibilities',
+    'description'
+  ]);
+
+  const scoreArrayCandidate = (arr) => {
+    if (!Array.isArray(arr) || arr.length === 0) return -Infinity;
+
+    // Look at a slightly larger sample; nested arrays are often short (3–8 items).
+    const sample = arr.slice(0, 10);
+    let objectCount = 0;
+    let stringCount = 0;
+    let roleLikeObjectCount = 0;
+
+    for (const el of sample) {
+      if (typeof el === 'string') {
+        stringCount += 1;
+        continue;
+      }
+      if (el && typeof el === 'object' && !Array.isArray(el)) {
+        objectCount += 1;
+        const keys = Object.keys(el);
+        const hitCount = keys.reduce((n, k) => (roleKeyHints.has(k) ? n + 1 : n), 0);
+
+        // Require at least 2 role-ish keys to be considered role-like.
+        if (hitCount >= 2) roleLikeObjectCount += 1;
+      }
+    }
+
+    /**
+     * Prefer the top-level array-of-role-objects.
+     *
+     * Key failure mode (authoritative bug report):
+     * - Model output JSON is truncated/invalid, so JSON.parse(full) fails
+     * - Substring scanning finds *balanced* nested arrays like key_responsibilities (string[])
+     * - If scoring isn't decisive enough, we can still pick the nested array
+     *
+     * We therefore:
+     * - Heavily reward role-like object arrays.
+     * - Heavily penalize string arrays.
+     * - Add more weight to larger arrays (top-level role list is usually length 5).
+     */
+    let score = 0;
+
+    score += roleLikeObjectCount * 140;
+    score += objectCount * 10;
+    score -= stringCount * 110;
+
+    // Larger arrays are more likely to be the outer role list (commonly 5).
+    score += Math.min(arr.length, 50) * 0.7;
+
+    return score;
+  };
+
+  let best = { score: -Infinity, array: null, extractedText: null, parseError: null, startIndex: null };
+
+  for (const s of starts) {
+    const candidateText = extractBalancedArrayFrom(s);
+    if (!candidateText) continue;
+
+    try {
+      const parsed = JSON.parse(candidateText);
+      if (!Array.isArray(parsed)) continue;
+
+      const score = scoreArrayCandidate(parsed);
+
+      // Tie-breaker: prefer the earliest candidate in the text (usually the outermost array).
+      // Also treat "nearly equal" scores as ties to avoid jitter when JSON is truncated and only
+      // partial candidates are parseable.
+      const EPS = 15; // tolerate small scoring differences
+      const isBetter = score > best.score + EPS;
+      const isNearTie = Math.abs(score - best.score) <= EPS;
+
+      if (isBetter || (isNearTie && (best.startIndex == null || s < best.startIndex))) {
+        best = { score, array: parsed, extractedText: candidateText, parseError: null, startIndex: s };
+      }
+    } catch (e) {
+      // keep the first parse error around in case we find nothing better
+      if (!best.parseError) best.parseError = e;
     }
   }
-  return null;
+
+  if (!best.array) {
+    return { array: null, extractedText: null, parseError: best.parseError || null };
+  }
+
+  return { array: best.array, extractedText: best.extractedText, parseError: null };
 }
 
 function _normStr(v) {
@@ -84,7 +399,21 @@ function _normStr(v) {
 
 function _asStringArray(v) {
   if (!Array.isArray(v)) return [];
-  return v.map((x) => _normStr(x)).filter(Boolean);
+
+  /**
+   * LLMs sometimes return a list of objects for skills, e.g.:
+   * [{name:"SQL"}, {skill:"Stakeholder Management"}]
+   * Normalize those into a string[].
+   */
+  return v
+    .map((x) => {
+      if (typeof x === 'string') return _normStr(x);
+      if (x && typeof x === 'object' && !Array.isArray(x)) {
+        return _normStr(x.name || x.skill || x.skill_name || x.skillName || x.label || x.title || '');
+      }
+      return '';
+    })
+    .filter(Boolean);
 }
 
 function _validateAndNormalizeGeneratedRoles(parsed) {
@@ -156,14 +485,7 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
 function _extractPersonaProficiencies(finalizedPersona) {
   // Supports common shapes for "FinalizedPersona skills + proficiencies".
   const p = finalizedPersona && typeof finalizedPersona === 'object' ? finalizedPersona : {};
-  const candidates = [
-    p.skills_with_proficiency,
-    p.skillsWithProficiency,
-    p.user_skills,
-    p.userSkills,
-    p.skills,
-    p.proficiencies,
-  ];
+  const candidates = [p.skills_with_proficiency, p.skillsWithProficiency, p.user_skills, p.userSkills, p.skills, p.proficiencies];
 
   const out = [];
   for (const c of candidates) {
@@ -171,7 +493,12 @@ function _extractPersonaProficiencies(finalizedPersona) {
     for (const row of c) {
       if (!row || typeof row !== 'object') continue;
       const name = _normStr(row.name || row.skill || row.skill_name || row.label);
-      const prof = row.proficiency ?? row.proficiencyPercent ?? row.proficiency_percent ?? row.percent ?? row.score;
+      const prof =
+        row.proficiency ??
+        row.proficiencyPercent ??
+        row.proficiency_percent ??
+        row.percent ??
+        row.score;
       const n = Number(prof);
       if (!name || !Number.isFinite(n)) continue;
       out.push({ name, proficiency: Math.max(0, Math.min(100, Math.round(n))) });
@@ -189,26 +516,26 @@ function _extractPersonaProficiencies(finalizedPersona) {
  * - request new schema fields for the Explore UI
  */
 function _buildStrictJsonPrompt(userPersona) {
-  const personaObj = userPersona?.persona && typeof userPersona.persona === 'object' ? userPersona.persona : null;
+  const personaObj =
+    userPersona?.persona && typeof userPersona.persona === 'object' ? userPersona.persona : null;
   const requestType = _normStr(userPersona?.requestType) || 'searched';
   const query = _normStr(userPersona?.query);
 
-  const skills =
-    Array.isArray(userPersona?.skills)
-      ? userPersona.skills
-      : Array.isArray(userPersona?.validated_skills)
-        ? userPersona.validated_skills
-        : Array.isArray(userPersona?.validatedSkills)
-          ? userPersona.validatedSkills
-          : Array.isArray(userPersona?.user_skills)
-            ? userPersona.user_skills.map((s) =>
+  const skills = Array.isArray(userPersona?.skills)
+    ? userPersona.skills
+    : Array.isArray(userPersona?.validated_skills)
+      ? userPersona.validated_skills
+      : Array.isArray(userPersona?.validatedSkills)
+        ? userPersona.validatedSkills
+        : Array.isArray(userPersona?.user_skills)
+          ? userPersona.user_skills.map((s) =>
+              s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
+            )
+          : Array.isArray(userPersona?.userSkills)
+            ? userPersona.userSkills.map((s) =>
                 s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
               )
-            : Array.isArray(userPersona?.userSkills)
-              ? userPersona.userSkills.map((s) =>
-                  s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
-                )
-              : [];
+            : [];
 
   const skillsList = _asStringArray(skills).slice(0, 30);
   const skillsInline = skillsList.length > 0 ? skillsList.join(', ') : 'N/A';
@@ -223,7 +550,8 @@ function _buildStrictJsonPrompt(userPersona) {
       : 'N/A';
 
   const personaIndustry =
-    _normStr(personaObj?.industry || personaObj?.profile?.industry || userPersona?.industry || '') || 'N/A';
+    _normStr(personaObj?.industry || personaObj?.profile?.industry || userPersona?.industry || '') ||
+    'N/A';
 
   return [
     'You are a Global Recruitment Expert with deep knowledge of current market roles, skills, and compensation.',
@@ -244,6 +572,7 @@ function _buildStrictJsonPrompt(userPersona) {
     '',
     'OUTPUT FORMAT:',
     'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
+    'Do NOT wrap the array in an object (no {"roles": ...}).',
     'Each element MUST be an object with EXACTLY these keys:',
     '- "title": string',
     '- "industry": string',
@@ -304,47 +633,102 @@ function _fallbackBedrockJsonRoles() {
     {
       title: 'Full-Stack Software Engineer',
       industry: 'Technology',
-      description: 'Builds customer-facing web products across frontend and backend systems. Owns features end-to-end with an emphasis on reliability and iteration speed.',
-      key_responsibilities: ['Deliver full-stack features from design to production', 'Design and integrate APIs and data models', 'Improve performance, testing, and developer tooling'],
+      description:
+        'Builds customer-facing web products across frontend and backend systems. Owns features end-to-end with an emphasis on reliability and iteration speed.',
+      key_responsibilities: [
+        'Deliver full-stack features from design to production',
+        'Design and integrate APIs and data models',
+        'Improve performance, testing, and developer tooling'
+      ],
       experience_range: '3-5 years',
-      salary_range: '$120k-$170k',
+      salary_range: '₹99.6–₹141.1 LPA',
       required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git', 'Communication']
     },
     {
       title: 'Backend Engineer (Node.js)',
       industry: 'Technology',
-      description: 'Designs and operates scalable backend services and APIs used by multiple product surfaces. Focuses on performance, reliability, and observability in production.',
-      key_responsibilities: ['Build and maintain high-throughput APIs', 'Optimize database queries and service performance', 'Implement monitoring, logging, and on-call readiness'],
+      description:
+        'Designs and operates scalable backend services and APIs used by multiple product surfaces. Focuses on performance, reliability, and observability in production.',
+      key_responsibilities: [
+        'Build and maintain high-throughput APIs',
+        'Optimize database queries and service performance',
+        'Implement monitoring, logging, and on-call readiness'
+      ],
       experience_range: '3-6 years',
-      salary_range: '$130k-$185k',
-      required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability', 'Collaboration']
+      salary_range: '₹107.9–₹153.6 LPA',
+      required_skills: [
+        'Node.js',
+        'Express',
+        'SQL',
+        'API Design',
+        'Performance Tuning',
+        'Observability',
+        'Collaboration'
+      ]
     },
     {
       title: 'Data Analyst',
       industry: 'Technology',
-      description: 'Turns raw business data into actionable insights for product and operations teams. Partners with stakeholders to define metrics, dashboards, and decision frameworks.',
-      key_responsibilities: ['Define metrics and build dashboards for stakeholders', 'Analyze trends and root causes using SQL', 'Communicate insights and recommendations clearly'],
+      description:
+        'Turns raw business data into actionable insights for product and operations teams. Partners with stakeholders to define metrics, dashboards, and decision frameworks.',
+      key_responsibilities: [
+        'Define metrics and build dashboards for stakeholders',
+        'Analyze trends and root causes using SQL',
+        'Communicate insights and recommendations clearly'
+      ],
       experience_range: '2-4 years',
-      salary_range: '$80k-$120k',
-      required_skills: ['SQL', 'Excel', 'Data Visualization', 'Statistics', 'Dashboards', 'Stakeholder Management']
+      salary_range: '₹66.4–₹99.6 LPA',
+      required_skills: [
+        'SQL',
+        'Excel',
+        'Data Visualization',
+        'Statistics',
+        'Dashboards',
+        'Stakeholder Management'
+      ]
     },
     {
       title: 'Product Manager (Technical)',
       industry: 'Technology',
-      description: 'Leads product strategy and execution for technical initiatives that require close engineering partnership. Translates customer needs into prioritized roadmaps and measurable outcomes.',
-      key_responsibilities: ['Own roadmap and prioritize tradeoffs', 'Write clear requirements and align stakeholders', 'Measure impact via experimentation and analytics'],
+      description:
+        'Leads product strategy and execution for technical initiatives that require close engineering partnership. Translates customer needs into prioritized roadmaps and measurable outcomes.',
+      key_responsibilities: [
+        'Own roadmap and prioritize tradeoffs',
+        'Write clear requirements and align stakeholders',
+        'Measure impact via experimentation and analytics'
+      ],
       experience_range: '4-7 years',
-      salary_range: '$130k-$210k',
-      required_skills: ['Roadmapping', 'Prioritization', 'User Research', 'Analytics', 'Communication', 'Stakeholder Management']
+      salary_range: '₹107.9–₹174.3 LPA',
+      required_skills: [
+        'Roadmapping',
+        'Prioritization',
+        'User Research',
+        'Analytics',
+        'Communication',
+        'Stakeholder Management'
+      ]
     },
     {
       title: 'DevOps Engineer',
       industry: 'Technology',
-      description: 'Builds and maintains the infrastructure and deployment pipelines that keep services running reliably. Improves security posture, release velocity, and incident response tooling.',
-      key_responsibilities: ['Build CI/CD pipelines and deployment automation', 'Manage cloud infrastructure and incident response', 'Implement monitoring, security, and reliability best practices'],
+      description:
+        'Builds and maintains the infrastructure and deployment pipelines that keep services running reliably. Improves security posture, release velocity, and incident response tooling.',
+      key_responsibilities: [
+        'Build CI/CD pipelines and deployment automation',
+        'Manage cloud infrastructure and incident response',
+        'Implement monitoring, security, and reliability best practices'
+      ],
       experience_range: '3-6 years',
-      salary_range: '$130k-$205k',
-      required_skills: ['AWS', 'Docker', 'Kubernetes', 'CI/CD', 'Monitoring', 'Infrastructure as Code', 'Incident Management']
+      salary_range: '₹107.9–₹170.2 LPA',
+      required_skills: [
+        'AWS',
+        'Docker',
+        'Kubernetes',
+        'CI/CD',
+        'Monitoring',
+        'Infrastructure as Code',
+        'Incident Management'
+      ]
     }
   ];
 }
@@ -360,7 +744,10 @@ function _fallbackBedrockJsonRoles() {
  * @returns {Promise<{ roles: Array, rawText: string, prompt: string, modelId: string }>}
  */
 async function generateTargetedRoles(userPersona, options = {}) {
-  const modelId = options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID;
+  const modelId = _resolveModelId({
+    override: options.modelId,
+    envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+  });
 
   const prompt = _buildStrictJsonPrompt(userPersona);
 
@@ -400,26 +787,28 @@ async function generateTargetedRoles(userPersona, options = {}) {
   }
 
   const rawText = _extractClaudeText(bedrockJson);
-  const extracted = _extractFirstJsonArray(rawText);
+  const extracted = _extractJsonArrayFromText(rawText);
 
-  if (!extracted) {
+  if (!extracted.array) {
     const err = new Error('Could not extract a JSON array from Bedrock model output.');
     err.code = 'bedrock_no_json_array';
-    err.details = { rawText: rawText.slice(0, 5000) };
+    err.details = {
+      rawText: rawText.slice(0, 5000),
+      extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
+    };
     throw err;
   }
 
-  let parsed;
-  try {
-    parsed = JSON.parse(extracted);
-  } catch (e) {
-    const err = new Error(`Extracted content was not valid JSON: ${e?.message || String(e)}`);
+  if (extracted.parseError) {
+    const err = new Error(
+      `Extracted content was not valid JSON: ${extracted.parseError?.message || String(extracted.parseError)}`
+    );
     err.code = 'bedrock_invalid_extracted_json';
-    err.details = { extracted: extracted.slice(0, 5000) };
+    err.details = { extracted: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null };
     throw err;
   }
 
-  const roles = _validateAndNormalizeGeneratedRoles(parsed);
+  const roles = _validateAndNormalizeGeneratedRoles(extracted.array);
 
   // We asked for exactly 5; if the model returned fewer valid entries, surface a clear error.
   if (roles.length < 5) {
@@ -428,7 +817,7 @@ async function generateTargetedRoles(userPersona, options = {}) {
     err.details = {
       validCount: roles.length,
       rawText: rawText.slice(0, 5000),
-      parsedPreview: Array.isArray(parsed) ? parsed.slice(0, 5) : parsed
+      extractedArrayPreview: Array.isArray(extracted.array) ? extracted.array.slice(0, 5) : null
     };
     throw err;
   }
@@ -485,13 +874,18 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
     const fallbackBedrockJsonRoles = _fallbackBedrockJsonRoles();
     const normalized = _validateAndNormalizeGeneratedRoles(fallbackBedrockJsonRoles);
 
+    const errorCode = err?.code || err?.name || 'BEDROCK_FAILED';
+
     return {
       roles: normalized.slice(0, 5),
       bedrockJsonRoles: fallbackBedrockJsonRoles,
       usedFallback: true,
-      modelId: options.modelId || process.env.BEDROCK_ROLE_MODEL_ID || DEFAULT_MODEL_ID,
+      modelId: _resolveModelId({
+        override: options.modelId,
+        envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+      }),
       prompt: _buildStrictJsonPrompt(userPersona),
-      error: { code: err?.code || 'BEDROCK_FAILED', message: err?.message || String(err) }
+      error: { code: errorCode, message: err?.message || String(err) }
     };
   }
 }
@@ -536,49 +930,131 @@ function _normalizeToIndiaLpaRange(salaryRange) {
   return `₹${min}–₹${max} LPA`;
 }
 
-function _validateAndNormalizeInitialRecommendations(parsed) {
+function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } = {}) {
   if (!Array.isArray(parsed)) {
     const err = new Error('Bedrock initial recommendations did not return a JSON array.');
     err.code = 'bedrock_invalid_json_shape';
     throw err;
   }
 
+  /**
+   * IMPORTANT:
+   * The initial recommendations pipeline historically had two possible upstream shapes:
+   * 1) "Bedrock prompt schema" (preferred):
+   *    { title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }
+   * 2) "API role card schema" (observed in the attached authoritative failing response):
+   *    { role_id, role_title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }
+   *
+   * This validator must accept BOTH. Otherwise Bedrock may succeed but we incorrectly drop
+   * everything to 0 valid roles and trigger `bedrock_insufficient_roles`.
+   */
+
   const out = [];
   const seen = new Set();
 
+  // Optional validation stats for debugging why items are being rejected.
+  const stats = {
+    inputCount: Array.isArray(parsed) ? parsed.length : 0,
+    acceptedCount: 0,
+    duplicateTitleCount: 0,
+    rejectedCount: 0,
+    // reason -> count
+    rejectedReasons: {},
+    // include first few rejects to make debugging fast (env-gated)
+    rejectedSamples: []
+  };
+
+  const reject = (reason, sample) => {
+    stats.rejectedCount += 1;
+    stats.rejectedReasons[reason] = (stats.rejectedReasons[reason] || 0) + 1;
+    if (debug && stats.rejectedSamples.length < 5 && sample) {
+      stats.rejectedSamples.push({ reason, sample });
+    }
+  };
+
   for (const r of parsed) {
-    if (!r || typeof r !== 'object') continue;
+    if (!r || typeof r !== 'object') {
+      reject('not_object', r);
+      continue;
+    }
 
-    const title = _normStr(r.title);
+    const title = _normStr(r.title || r.role_title || r.roleTitle || r.role_title || r.name);
     const industry = _normStr(r.industry);
-    const salaryLpa = _normStr(r.salary_lpa_range || r.salary_range);
-    const experienceRange = _normStr(r.experience_range);
-    const description = _normStr(r.description);
-    const keyResponsibilities = _asStringArray(r.key_responsibilities);
-    const requiredSkills = _asStringArray(r.required_skills);
 
-    if (!title || !industry) continue;
+    // Salary can arrive as salary_lpa_range (prompt schema / user_input_ref) OR salary_range (common model variant).
+    const salaryRaw = _normStr(
+      r.salary_lpa_range ||
+        r.salary_range ||
+        r.salaryRange ||
+        r.salaryLpaRange ||
+        r.salaryLpa ||
+        r.salary
+    );
+
+    const experienceRange = _normStr(r.experience_range || r.experienceRange);
+    const description = _normStr(r.description);
+
+    const keyResponsibilities = _asStringArray(r.key_responsibilities || r.keyResponsibilities);
+
+    // Skills can arrive as required_skills or skills_required (sometimes as objects, handled by _asStringArray).
+    const requiredSkills = _asStringArray(
+      r.required_skills || r.skills_required || r.skillsRequired || r.requiredSkills
+    );
+
+    if (!title) {
+      reject('missing_title', {
+        role_id: r.role_id,
+        role_title: r.role_title,
+        title: r.title
+      });
+      continue;
+    }
+    if (!industry) {
+      reject('missing_industry', { title, industry: r.industry });
+      continue;
+    }
+    if (!salaryRaw) {
+      reject('missing_salary', { title, salary_lpa_range: r.salary_lpa_range, salary_range: r.salary_range });
+      continue;
+    }
+
+    /**
+     * Skills rule:
+     * - Prompt asks for 5–8, but real outputs can be 5–10.
+     * - Do not reject >8; truncate to keep API stable.
+     * - Still reject <5 (not enough signal for scoring/UI).
+     */
+    if (requiredSkills.length < 5) {
+      reject('insufficient_required_skills', { title, requiredSkillsCount: requiredSkills.length });
+      continue;
+    }
+    const skills = requiredSkills.slice(0, 8);
 
     // Enforce the "exactly 3 responsibilities" rule (truncate if longer).
     const responsibilities =
       keyResponsibilities.length >= 3 ? keyResponsibilities.slice(0, 3) : keyResponsibilities;
 
-    // Enforce 5–8 skills (truncate if longer; skip if too short)
-    if (requiredSkills.length < 5) continue;
-    const skills = requiredSkills.slice(0, 8);
-
     const key = title.toLowerCase();
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      stats.duplicateTitleCount += 1;
+      reject('duplicate_title', { title });
+      continue;
+    }
     seen.add(key);
 
-    out.push({
-      role_id: `bedrock-rec-${title
+    const roleIdProvided = _normStr(r.role_id || r.roleId);
+    const roleId =
+      roleIdProvided ||
+      `bedrock-rec-${title
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
-        .replace(/(^-|-$)/g, '')}`,
+        .replace(/(^-|-$)/g, '')}`;
+
+    out.push({
+      role_id: roleId,
       role_title: title,
       industry,
-      salary_lpa_range: _normalizeToIndiaLpaRange(salaryLpa),
+      salary_lpa_range: _normalizeToIndiaLpaRange(salaryRaw),
       experience_range: experienceRange,
       description,
       key_responsibilities: responsibilities,
@@ -587,7 +1063,8 @@ function _validateAndNormalizeInitialRecommendations(parsed) {
     });
   }
 
-  return out;
+  stats.acceptedCount = out.length;
+  return { roles: out, stats };
 }
 
 function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
@@ -608,7 +1085,8 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
       : 'N/A';
 
   // Important: validated skills are often string[], but could also be objects.
-  const validatedSkillsRaw = personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || [];
+  const validatedSkillsRaw =
+    personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || [];
   const validatedSkills = _asStringArray(
     Array.isArray(validatedSkillsRaw)
       ? validatedSkillsRaw.map((s) => (typeof s === 'string' ? s : s?.name || s?.skill || s?.skill_name || s?.label))
@@ -618,7 +1096,8 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
   const validatedInline = validatedSkills.length ? validatedSkills.join(', ') : 'N/A';
 
   const personaIndustry =
-    _normStr(personaObj?.industry || personaObj?.profile?.industry || personaObj?.domain || '') || 'N/A';
+    _normStr(personaObj?.industry || personaObj?.profile?.industry || personaObj?.domain || '') ||
+    'N/A';
   const personaHeadline =
     _normStr(
       personaObj?.profile?.headline ||
@@ -654,7 +1133,9 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
               : 'N/A'
           }`,
           `- groundingSkills: [${
-            Array.isArray(onetGrounding.groundingSkills) ? onetGrounding.groundingSkills.slice(0, 30).join(', ') : 'N/A'
+            Array.isArray(onetGrounding.groundingSkills)
+              ? onetGrounding.groundingSkills.slice(0, 30).join(', ')
+              : 'N/A'
           }]`,
           `- occupationTasksSample: ${
             Array.isArray(onetGrounding.occupations)
@@ -675,6 +1156,14 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
   return [
     'You are a Market Intelligence Expert for the Indian job market.',
     'You deeply understand in-demand roles in India, realistic compensation bands in ₹ LPA, and technical responsibilities.',
+    '',
+    'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT)',
+    '1) Output MUST be valid JSON (RFC 8259).',
+    '2) Output MUST be a single JSON array (not an object).',
+    '3) Output MUST contain NO preamble, NO explanation, NO commentary.',
+    '4) Output MUST contain NO markdown and NO code fences (no ```).',
+    '5) Output MUST NOT include XML/HTML-like tags such as <thinking>...</thinking>.',
+    '6) Do not wrap the JSON in quotes. Do not prefix with "Here is the JSON". Do not suffix with anything.',
     '',
     'CONTEXT (FinalizedPersona):',
     `- Current role/headline: ${personaHeadline}`,
@@ -721,11 +1210,10 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
  */
 async function getInitialRecommendations(finalPersona, options = {}) {
   // Allow a dedicated model override for initial recommendations (often configured as an inference profile ARN/ID).
-  const modelId =
-    options.modelId ||
-    process.env.BEDROCK_RECOMMENDATIONS_MODEL_ID ||
-    process.env.BEDROCK_ROLE_MODEL_ID ||
-    DEFAULT_MODEL_ID;
+  const modelId = _resolveModelId({
+    override: options.modelId,
+    envKeys: ['BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+  });
 
   const prompt = _buildInitialRecommendationsPrompt(finalPersona, { context: options?.context || null });
 
@@ -741,6 +1229,20 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     ]
   };
 
+  // When false, we throw instead of returning deterministic fallback roles.
+  const allowFallback = options?.allowFallback !== false;
+
+  // Enforce strict mode: if allowFallback is false, disable recovery and strictly surface errors.
+  // (No code changes here: the fallback logic is below; we will eliminate fallback there.)
+
+  // ENV-gated diagnostics (do NOT enable by default in production).
+  const debugRaw = String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true';
+
+  // These will be populated only when available, and only attached to thrown errors when debugRaw=true.
+  let debugRawText = null;
+  let debugExtractedText = null;
+  let debugExtractedArrayPreview = null;
+
   try {
     const client = _getBedrockClient();
     const cmd = new InvokeModelCommand({
@@ -755,107 +1257,95 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const bedrockJson = JSON.parse(jsonStr);
 
     const rawText = _extractClaudeText(bedrockJson);
-    const extracted = _extractFirstJsonArray(rawText);
-    if (!extracted) {
+
+    // IMPORTANT:
+    // Initial recommendations must select the TOP-LEVEL array of role objects.
+    // A generic "first array" extractor can accidentally select nested arrays like key_responsibilities (string[]).
+    const extracted = _extractRolesJsonArrayFromText(rawText);
+
+    if (debugRaw) {
+      debugRawText = typeof rawText === 'string' ? rawText.slice(0, 5000) : null;
+      debugExtractedText = extracted?.extractedText ? extracted.extractedText.slice(0, 5000) : null;
+      debugExtractedArrayPreview = Array.isArray(extracted?.array) ? extracted.array.slice(0, 5) : null;
+    }
+
+    if (!extracted.array) {
       const err = new Error('Could not extract a JSON array from Bedrock output (initial recommendations).');
       err.code = 'bedrock_no_json_array';
-      err.details = { rawText: rawText.slice(0, 5000) };
+      err.details = {
+        rawText: rawText.slice(0, 5000),
+        extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
+      };
+
+      if (debugRaw) {
+        // eslint-disable-next-line no-console
+        console.warn('[bedrock][initialRecommendations] JSON array extraction failed', {
+          modelId,
+          bedrockJsonKeys:
+            bedrockJson && typeof bedrockJson === 'object' ? Object.keys(bedrockJson).slice(0, 50) : null,
+          rawTextLength: typeof rawText === 'string' ? rawText.length : null,
+          rawTextPreview: typeof rawText === 'string' ? rawText.slice(0, 2000) : null
+        });
+      }
+
       throw err;
     }
 
-    const parsed = JSON.parse(extracted);
-    const roles = _validateAndNormalizeInitialRecommendations(parsed);
+    if (extracted.parseError) {
+      const err = new Error(
+        `Extracted content was not valid JSON: ${extracted.parseError?.message || String(extracted.parseError)}`
+      );
+      err.code = 'bedrock_invalid_extracted_json';
+      err.details = { extracted: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null };
+      throw err;
+    }
+
+    const validated = _validateAndNormalizeInitialRecommendations(extracted.array, { debug: debugRaw });
+    const roles = Array.isArray(validated?.roles) ? validated.roles : [];
+    const validationStats = validated?.stats && typeof validated.stats === 'object' ? validated.stats : null;
 
     if (roles.length < 5) {
       const err = new Error(`Bedrock returned ${roles.length} valid initial recommendations; expected 5.`);
       err.code = 'bedrock_insufficient_roles';
+      if (debugRaw) {
+        err.details = {
+          ...(err.details && typeof err.details === 'object' ? err.details : {}),
+          modelId,
+          rawText: debugRawText,
+          extractedText: debugExtractedText,
+          extractedArrayPreview: debugExtractedArrayPreview,
+          /**
+           * Primary actionable payload:
+           * shows exactly why items were rejected (missing_salary, insufficient_required_skills, etc)
+           */
+          validationStats,
+          validatedCount: roles.length,
+          extractedCount: Array.isArray(extracted.array) ? extracted.array.length : null
+        };
+      }
       throw err;
     }
 
     return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
   } catch (err) {
-    /**
-     * Bedrock call failed OR output was invalid. We still return 5 roles for UI stability,
-     * but we must clearly mark this as a BedrockService fallback (NOT an endpoint hardcoded fallback),
-     * so route/service layers can decide whether the endpoint itself "usedFallback".
-     */
-    const safe = await generateTargetedRolesSafe({ persona: finalPersona, skills: [], user_skills: [] }, { modelId });
-
-    const roles = (Array.isArray(safe?.roles) ? safe.roles : []).slice(0, 5).map((r) => ({
-      role_id: r.role_id,
-      role_title: r.role_title,
-      industry: r.industry,
-      salary_lpa_range: _normalizeToIndiaLpaRange(r.salary_range),
-      experience_range: r.experience_range || '',
-      description: r.description || '',
-      key_responsibilities: Array.isArray(r.key_responsibilities) ? r.key_responsibilities.slice(0, 3) : [],
-      required_skills: Array.isArray(r.required_skills)
-        ? r.required_skills.slice(0, 8)
-        : Array.isArray(r.skills_required)
-          ? r.skills_required.slice(0, 8)
-          : [],
-      match_metadata: {
-        source: 'bedrock_initial_recommendations',
-        bedrockUsedFallback: true
-      }
-    }));
-
-    // Ensure exactly 5 (pad deterministically).
-    const padded = [...roles];
-    while (padded.length < 5) {
-      padded.push({
-        role_id: `bedrock-initial-fallback-${padded.length + 1}`,
-        role_title: 'Software Engineer',
-        industry: 'Technology',
-        salary_lpa_range: '₹12–₹22 LPA',
-        experience_range: '2–4 years',
-        description:
-          'Builds and maintains product features across backend services and APIs. Works closely with product and QA to ship reliable releases.',
-        key_responsibilities: [
-          'Build and maintain APIs and backend services',
-          'Write tests and improve reliability in production',
-          'Collaborate with cross-functional teams to deliver features'
-        ],
-        required_skills: ['JavaScript', 'Node.js', 'REST APIs', 'SQL', 'Git'],
-        match_metadata: {
-          source: 'bedrock_initial_recommendations',
-          bedrockUsedFallback: true,
-          padded: true
-        }
-      });
+    // Attach env-gated diagnostics for upstream meta/error surfacing.
+    if (debugRaw && err && typeof err === 'object') {
+      err.details = {
+        ...(err.details && typeof err.details === 'object' ? err.details : {}),
+        modelId,
+        rawText: debugRawText,
+        extractedText: debugExtractedText,
+        extractedArrayPreview: debugExtractedArrayPreview
+      };
     }
 
-    return {
-      roles: padded.slice(0, 5),
-      usedFallback: true,
-      modelId,
-      prompt,
-      error: {
-        code: err?.code || 'BEDROCK_FAILED',
-        message: err?.message || String(err),
+    // Strict mode: DO NOT fallback; surface the real failure.
+    if (!allowFallback) {
+      throw err;
+    }
 
-        /**
-         * Best-effort diagnostics to help identify common runtime/config failures:
-         * - missing region
-         * - invalid model id / inference profile
-         * - access denied
-         * - throttling / throughput exceeded
-         *
-         * We intentionally avoid including credentials or full request bodies.
-         */
-        name: err?.name || null,
-        httpStatusCode: err?.$metadata?.httpStatusCode ?? null,
-        requestId: err?.$metadata?.requestId ?? null,
-        extendedRequestId: err?.$metadata?.extendedRequestId ?? null,
-        cfId: err?.$metadata?.cfId ?? null,
-        attempts: err?.$metadata?.attempts ?? null,
-        totalRetryDelay: err?.$metadata?.totalRetryDelay ?? null,
+    // Legacy fallback code path intentionally removed for strict mode: errors now propagated, never masked.
 
-        // Sometimes AWS errors include machine-readable hints:
-        fault: err?.$fault ?? null,
-        service: err?.$service ?? null
-      }
-    };
   }
 }
 

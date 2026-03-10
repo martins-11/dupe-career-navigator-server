@@ -81,6 +81,26 @@ function _statusForError(err) {
     return 422;
   }
 
+  /**
+   * Bedrock / upstream dependency error mapping.
+   *
+   * Why:
+   * - /api/recommendations/initial runs in strict mode (no fallback) by design.
+   * - Many Bedrock failures are *not* programmer bugs and should not look like opaque 500s.
+   * - We still return a 5xx, but with a consistent ErrorResponse JSON and a more accurate status:
+   *   - 503 for missing configuration needed to reach Bedrock
+   *   - 502 for Bedrock output/availability problems
+   */
+  if (code === 'missing_aws_region') return 503;
+
+  // Common “bedrock_*” codes thrown by bedrockService parsing/validation.
+  if (typeof code === 'string' && (code.startsWith('bedrock_') || code.startsWith('BEDROCK_'))) {
+    return 502;
+  }
+
+  // Route/service-level contract violation but still an upstream/generation failure.
+  if (code === 'initial_recommendations_invalid_count') return 502;
+
   // Allow route/service to specify httpStatus directly (kept narrow + controlled)
   if (err && Number.isInteger(err.httpStatus) && [400, 404, 422, 500].includes(err.httpStatus)) {
     return err.httpStatus;
@@ -127,6 +147,27 @@ function sendError(res, err, opts = {}) {
   if (status === 400) {
     const payload = _toErrorResponse(err, 'validation_error', 'Bad request.');
     return res.status(400).json(payload);
+  }
+
+  /**
+   * Upstream dependency failures (Bedrock, etc).
+   * These should not be reported as generic 500s because:
+   * - they are often configuration/runtime issues (region/model access/throttle)
+   * - callers need actionable details (requestId, validation stats) to debug
+   */
+  if (status === 502) {
+    const payload = _toErrorResponse(err, 'bad_gateway', 'Upstream dependency returned an invalid response.');
+    return res.status(502).json(payload);
+  }
+
+  if (status === 503) {
+    const payload = _toErrorResponse(err, 'service_unavailable', 'Upstream dependency is unavailable.');
+    return res.status(503).json(payload);
+  }
+
+  if (status === 504) {
+    const payload = _toErrorResponse(err, 'gateway_timeout', 'Upstream dependency timed out.');
+    return res.status(504).json(payload);
   }
 
   // 500
