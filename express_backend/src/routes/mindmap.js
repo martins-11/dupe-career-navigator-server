@@ -210,7 +210,12 @@ function _buildDetailsForNode(node, { centerNode }) {
  */
 const GraphQuerySchema = z
   .object({
+    /**
+     * Accept both query param spellings for forward/backward compatibility.
+     * Frontend standardizes on snake_case `user_id`, but some older clients send `userId`.
+     */
     user_id: z.string().min(1).optional(),
+    userId: z.string().min(1).optional(),
     currentRoleTitle: z.string().min(1).optional(),
     // Optional filters
     minSalaryLpa: z.coerce.number().optional(),
@@ -253,13 +258,15 @@ router.get('/graph', async (req, res) => {
     const q = parsed.data;
     const limit = Number.isFinite(q.limit) ? q.limit : 18;
 
-    // Center node: user's current role (prefer persisted extraction when user_id is provided).
+    // Center node: user's current role (prefer persisted extraction when a user id is provided).
     let currentRoleTitle = _normalizeLabel(q.currentRoleTitle || 'Current Role');
 
-    if (q.user_id) {
+    const effectiveUserId = q.user_id || q.userId;
+
+    if (effectiveUserId) {
       try {
         const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
-        const current = await userTargetsRepo.getLatestUserCurrentRole({ userId: String(q.user_id) });
+        const current = await userTargetsRepo.getLatestUserCurrentRole({ userId: String(effectiveUserId) });
         if (current?.currentRoleTitle) currentRoleTitle = _normalizeLabel(current.currentRoleTitle);
       } catch (_) {
         // ignore; fallback to query param label
