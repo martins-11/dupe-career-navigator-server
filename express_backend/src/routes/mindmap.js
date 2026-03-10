@@ -247,6 +247,14 @@ const GraphQuerySchema = z
  */
 router.get('/graph', async (req, res) => {
   try {
+    // This endpoint returns dynamic data based on user context + filters.
+    // Explicitly disable caching so clients/proxies do not reply with 304 Not Modified
+    // (304 responses have no body, which breaks graph rendering expectations).
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+
     const parsed = GraphQuerySchema.safeParse(req.query || {});
     if (!parsed.success) {
       const err = new Error('Invalid query parameters.');
