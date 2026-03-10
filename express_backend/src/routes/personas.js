@@ -207,28 +207,42 @@ router.get('/target-role', async (req, res) => {
     });
   }
 
-  // Basic UUID shape check to fail fast (keeps consistent API errors).
-  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  if (!uuidRe.test(userId)) {
-    return res.status(400).json({
-      error: 'validation_error',
-      message: 'user_id must be a valid uuid.'
-    });
-  }
-
   try {
     const latest = await userTargetsRepo.getLatestUserTargetRole({ userId });
 
-    // If DB isn't configured, adapter returns null; treat as 503 because this is a persistence-backed read.
+    /**
+     * Graceful behavior when DB is unavailable/unconfigured:
+     * - The frontend uses personaId (or "anonymous") as a best-effort user key today.
+     * - DB-backed persistence may not be configured in early scaffolding.
+     *
+     * So for GET we treat "no DB/no record" as a non-fatal condition and return:
+     *   200 { status:"ok", target:null, persistence:{...} }
+     *
+     * This allows the UI to fall back to localStorage without surfacing backend errors.
+     */
     if (!latest) {
-      return res.status(503).json({
-        error: 'db_unavailable',
-        message: 'Database not configured for persistence.'
+      return res.json({
+        status: 'ok',
+        target: null,
+        persistence: { available: false }
       });
     }
 
-    return res.json({ status: 'ok', target: latest });
+    return res.json({
+      status: 'ok',
+      target: latest,
+      persistence: { available: true }
+    });
   } catch (err) {
+    // If this looks like a DB connectivity/config issue, degrade gracefully (same as no record).
+    const msg = String(err && err.message ? err.message : err);
+    if (/db_unavailable/i.test(msg) || /database/i.test(msg) || /mysql/i.test(msg) || /connection/i.test(msg)) {
+      return res.json({
+        status: 'ok',
+        target: null,
+        persistence: { available: false }
+      });
+    }
     return handleRepoError(res, err);
   }
 });
