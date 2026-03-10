@@ -7,8 +7,53 @@ const { normalizeText } = require('./normalizationService');
 const buildsService = require('./buildsService');
 const workflowService = require('./workflowService');
 const aiRunsRepo = require('../repositories/aiRunsRepoAdapter');
+const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
 const { uuidV4 } = require('../utils/uuid');
 const personaService = require('./personaService');
+
+/**
+ * Best-effort display normalization for persona "header" fields.
+ * We treat `full_name` as the person's name, and role/title fields separately.
+ */
+function _cleanStr(s) {
+  return String(s ?? '').trim();
+}
+
+function _looksLikePersonName(s) {
+  const v = _cleanStr(s);
+  if (!v) return false;
+  if (v.length > 60) return false;
+  if (/[0-9]/.test(v)) return false;
+  if (/[@]/.test(v)) return false;
+
+  // "First Last" or "First Middle Last" style (2-4 tokens)
+  const parts = v.split(/\s+/).filter(Boolean);
+  if (parts.length < 2 || parts.length > 4) return false;
+
+  return parts.every((p) => /^[A-Za-z][A-Za-z.'-]*$/.test(p));
+}
+
+function _looksLikeRoleOrHeadline(s) {
+  const v = _cleanStr(s).toLowerCase();
+  if (!v) return false;
+
+  // If it contains typical role keywords, treat as role-ish.
+  if (
+    /\b(engineer|developer|manager|lead|architect|consultant|analyst|designer|director|specialist|officer|product|research|scientist|intern)\b/.test(
+      v
+    )
+  ) {
+    return true;
+  }
+
+  // "X — Y" headline patterns are not names.
+  if (/[—-]\s+/.test(v) && v.split(/\s+/).length >= 3) return true;
+
+  // Long sentence-like strings are not names.
+  if (v.length > 80) return true;
+
+  return false;
+}
 
 /**
  * Orchestration service (in-memory).
@@ -674,30 +719,44 @@ async function generatePersonaDraftForBuild(buildId, input) {
       }
     }
 
-    const resolvedRole = extractedRole || roleFromUserTargets || '';
-    const resolvedName = extractedName || '';
+    // Final candidate values (may still be empty).
+    const resolvedRole = _cleanStr(extractedRole || roleFromUserTargets || '');
+    const resolvedName = _cleanStr(extractedName || '');
 
-    // Inject role/name into draft in a schema-tolerant way (do not delete/override non-empty fields).
+    // If base draft already has fields, keep them. Only fill missing values.
+    const baseFullName = basePersonaDraft?.full_name;
+    const baseTitle = basePersonaDraft?.title;
+    const baseHeadline = basePersonaDraft?.profile?.headline;
+    const baseCurrentRole = basePersonaDraft?.current_role;
+    const baseProfessionalTitle = basePersonaDraft?.professional_title;
+
+    // Do NOT allow title/headline-like strings to populate full_name.
+    // If extraction didn't yield a plausible person name, leave full_name empty (UI should fall back).
+    const safeNameCandidate = _looksLikePersonName(resolvedName) ? resolvedName : '';
+
     const personaDraft =
       basePersonaDraft && typeof basePersonaDraft === 'object'
         ? {
             ...basePersonaDraft,
-            full_name: (basePersonaDraft.full_name || '').trim() ? basePersonaDraft.full_name : resolvedName,
-            current_role:
-              (basePersonaDraft.current_role || '').trim() ? basePersonaDraft.current_role : resolvedRole,
-            professional_title:
-              (basePersonaDraft.professional_title || '').trim()
-                ? basePersonaDraft.professional_title
-                : resolvedRole,
-            // If a title exists but is empty-ish, provide a stable display title.
+
+            // Person name: only set when we have a plausible name.
+            full_name: _cleanStr(baseFullName) ? baseFullName : safeNameCandidate,
+
+            // Role / designation: prefer explicit existing values, else fill from resolvedRole.
+            current_role: _cleanStr(baseCurrentRole) ? baseCurrentRole : resolvedRole,
+            professional_title: _cleanStr(baseProfessionalTitle) ? baseProfessionalTitle : resolvedRole,
+
+            // Display title: OK to be a composed string, but must never be used as "name".
             title:
-              typeof basePersonaDraft.title === 'string' && basePersonaDraft.title.trim()
-                ? basePersonaDraft.title
-                : resolvedName && resolvedRole
-                  ? `${resolvedName} — ${resolvedRole}`
+              typeof baseTitle === 'string' && baseTitle.trim()
+                ? baseTitle
+                : safeNameCandidate && resolvedRole
+                  ? `${safeNameCandidate} — ${resolvedRole}`
                   : resolvedRole
                     ? `${resolvedRole} Persona (Draft)`
-                    : basePersonaDraft.title
+                    : typeof baseHeadline === 'string' && baseHeadline.trim()
+                      ? baseHeadline
+                      : baseTitle
           }
         : basePersonaDraft;
 
