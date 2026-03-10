@@ -536,7 +536,8 @@ function handleMultiUpload({ routeName, sourceDefault }) {
       let fileSummaries;
 
       try {
-        const userId = req.body?.userId || null;
+        // Accept both camelCase and snake_case for compatibility with frontend/API callers.
+        const userId = req.body?.userId || req.body?.user_id || null;
         const source = req.body?.source || sourceDefault || null;
 
         // eslint-disable-next-line no-console

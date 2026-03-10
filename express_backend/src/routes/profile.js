@@ -65,7 +65,15 @@ router.get('/roles', async (req, res) => {
       persistence: { available: true },
     });
   } catch (e) {
-    // Degrade gracefully: do not break UI boot flows.
+    // Degrade gracefully: do not break UI boot flows, but DO log so failures aren't silent.
+    // eslint-disable-next-line no-console
+    console.error('[profile:/roles] Failed to load role context', {
+      userId,
+      message: e?.message,
+      code: e?.code,
+      stack: e?.stack,
+    });
+
     return res.json({
       status: 'ok',
       userId,
