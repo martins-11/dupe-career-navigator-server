@@ -390,13 +390,18 @@ function _extractRolesJsonArrayFromText(text) {
   const roleKeyHints = new Set([
     'title',
     'role_title',
+    'roleTitle',
     'industry',
     'salary_lpa_range',
     'salary_range',
+    'salaryRange',
     'experience_range',
+    'experienceRange',
     'required_skills',
     'skills_required',
+    'skillsRequired',
     'key_responsibilities',
+    'keyResponsibilities',
     'description'
   ]);
 
@@ -427,24 +432,43 @@ function _extractRolesJsonArrayFromText(text) {
     /**
      * Prefer the top-level array-of-role-objects.
      *
-     * Key failure mode (authoritative bug report):
-     * - Model output JSON is truncated/invalid, so JSON.parse(full) fails
+     * Authoritative failure mode:
      * - Substring scanning finds *balanced* nested arrays like key_responsibilities (string[])
      * - If scoring isn't decisive enough, we can still pick the nested array
      *
-     * We therefore:
-     * - Heavily reward role-like object arrays.
-     * - Heavily penalize string arrays.
-     * - Add more weight to larger arrays (top-level role list is usually length 5).
+     * Hardening:
+     * - If the sample is mostly strings and contains no objects, treat as a nested list and
+     *   massively penalize it.
+     * - Strongly reward arrays where most elements look like role objects.
      */
+    const sampleSize = sample.length || 1;
+    const objectRatio = objectCount / sampleSize;
+    const roleLikeRatio = roleLikeObjectCount / sampleSize;
+    const stringRatio = stringCount / sampleSize;
+
+    // If it's clearly a string[] (nested responsibilities/skills), avoid selecting it.
+    if (objectCount === 0 && stringCount > 0) return -100000;
+
     let score = 0;
 
-    score += roleLikeObjectCount * 140;
-    score += objectCount * 10;
-    score -= stringCount * 110;
+    // Reward role-like objects heavily.
+    score += roleLikeObjectCount * 220;
+
+    // Reward objects mildly.
+    score += objectCount * 20;
+
+    // Penalize strings heavily (nested arrays often all strings).
+    score -= stringCount * 180;
+
+    // Prefer candidates where most elements are objects/role-like.
+    score += objectRatio * 120;
+    score += roleLikeRatio * 220;
 
     // Larger arrays are more likely to be the outer role list (commonly 5).
-    score += Math.min(arr.length, 50) * 0.7;
+    score += Math.min(arr.length, 50) * 1.2;
+
+    // If the array is mostly strings, penalize further.
+    score -= stringRatio * 250;
 
     return score;
   };
@@ -1077,6 +1101,7 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
       r.salary_lpa_range ||
         r.salary_range ||
         r.salaryRange ||
+        r.salary_lpa ||
         r.salaryLpaRange ||
         r.salaryLpa ||
         r.salary

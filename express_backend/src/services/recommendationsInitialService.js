@@ -260,7 +260,8 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
         usedPersonaProficiencies: hasPersonaProficiencies
       },
       grounding: { source: 'none' },
-      bedrockUsedFallback: false,
+      // Endpoint-level fallback (deterministic catalog) is the only fallback we currently use here.
+      bedrockUsedFallback: endpointFallbackUsed,
       bedrockModelId: bedrockResult?.modelId || null,
       ...(bedrockError ? { bedrockError } : {})
     }
@@ -273,7 +274,7 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       hasPersonaProficiencies,
       onetGrounded: false,
       onetError: null,
-      bedrockUsedFallback: false,
+      bedrockUsedFallback: endpointFallbackUsed,
       endpointFallbackUsed,
       bedrockError
     }
