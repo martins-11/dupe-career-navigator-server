@@ -433,20 +433,19 @@ const ViewStateLoadQuerySchema = z
  */
 router.post('/view-state', async (req, res) => {
   try {
-    // Provide clearer validation errors than the generic ZodError for common client mistakes.
-    // This endpoint is called frequently (autosave), so we want stable error messages.
+    // This endpoint is called frequently (autosave). It must be resilient:
+    // - Client bugs or race conditions should not create noisy 400s.
+    // - We treat empty payloads as a no-op (200) and let callers continue using localStorage.
     const body = req.body || {};
     const hasUserId = body && typeof body.userId === 'string' && body.userId.trim().length > 0;
     const hasState = body && typeof body.state === 'object' && body.state != null;
 
     if (!hasUserId || !hasState) {
-      return res.status(400).json({
-        error: 'validation_error',
-        message: 'Missing required fields for view-state save.',
-        details: {
-          userId: hasUserId ? 'ok' : 'required',
-          state: hasState ? 'ok' : 'required'
-        }
+      return res.status(200).json({
+        status: 'ok',
+        ignored: true,
+        reason: 'Missing required fields for view-state save (userId/state).',
+        viewState: null
       });
     }
 
