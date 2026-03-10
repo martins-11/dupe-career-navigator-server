@@ -138,12 +138,19 @@ async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null
     fallbackUserSkills: []
   });
 
-  const bedrock = await bedrockService.generateTargetedRolesSafe({
-    query: searchQuery,
-    finalPersonaObj: finalPersonaObj || {},
-    scoringUserSkills,
-    validated_skills: validatedSkillNames
-  });
+  const bedrock = await bedrockService.generateTargetedRolesSafe(
+    {
+      query: searchQuery,
+      finalPersonaObj: finalPersonaObj || {},
+      scoringUserSkills,
+      validated_skills: validatedSkillNames
+    },
+    {
+      // CRITICAL: Explore autocomplete/search must not show deterministic static fallback titles.
+      // If Bedrock fails, we should return [] so the UI can show "no suggestions" gracefully.
+      allowFallback: false
+    }
+  );
 
   const roles = Array.isArray(bedrock?.roles) ? bedrock.roles : [];
   const scored = _decorateAndScoreRoles({ roles, scoringUserSkills });

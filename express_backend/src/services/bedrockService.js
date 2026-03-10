@@ -975,8 +975,29 @@ async function generateTargetedRoles(userPersona, options = {}) {
  * @returns {Promise<{roles:Array, bedrockJsonRoles:Array, usedFallback:boolean, modelId:string, prompt:string, error?:object}>}
  */
 async function generateTargetedRolesSafe(userPersona, options = {}) {
+  /**
+   * IMPORTANT:
+   * Some callers (notably autocomplete) must be "Bedrock-only" and should NOT return deterministic
+   * fallback titles because that creates misleading, static UX.
+   *
+   * Default remains allowFallback=true to preserve existing behavior in places that prefer
+   * "always return 5 roles" (e.g. demos / non-critical flows).
+   */
+  const allowFallback = options?.allowFallback !== false;
+
   try {
     const result = await generateTargetedRoles(userPersona, options);
+
+    // If caller disallows fallback, do not pad with deterministic roles.
+    if (!allowFallback) {
+      return {
+        roles: Array.isArray(result.roles) ? result.roles : [],
+        bedrockJsonRoles: null,
+        usedFallback: false,
+        modelId: result.modelId,
+        prompt: result.prompt
+      };
+    }
 
     // Extra hardening: even if Bedrock succeeded, ensure we always return 5 roles.
     // If not, degrade gracefully to the logic-based fallback instead of letting callers 500.
@@ -1005,6 +1026,21 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
       prompt: result.prompt
     };
   } catch (err) {
+    // Strict mode: do not fallback; surface empty result to caller so route can return [].
+    if (!allowFallback) {
+      return {
+        roles: [],
+        bedrockJsonRoles: null,
+        usedFallback: false,
+        modelId: _resolveModelId({
+          override: options.modelId,
+          envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+        }),
+        prompt: _buildStrictJsonPrompt(userPersona),
+        error: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) }
+      };
+    }
+
     const fallbackBedrockJsonRoles = _fallbackBedrockJsonRoles();
     const normalized = _validateAndNormalizeGeneratedRoles(fallbackBedrockJsonRoles);
 
