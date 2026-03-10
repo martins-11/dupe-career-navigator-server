@@ -243,7 +243,8 @@ router.get('/autocomplete', async (req, res) => {
       const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
       const roles = await exploreSearchRolesPersonaDriven({
         q: query,
-        limit: Math.max(limit, 5),
+        // Honor caller limit for autocomplete; do not force 5 here.
+        limit,
         personaId: personaId ? String(personaId).trim() : null,
       });
 

@@ -116,10 +116,23 @@ function _decorateAndScoreRoles({ roles, scoringUserSkills }) {
   return out;
 }
 
-// PUBLIC_INTERFACE
+/**
+ * PUBLIC_INTERFACE
+ * Persona-driven Bedrock role exploration/search.
+ *
+ * IMPORTANT:
+ * - This function must honor the caller's `limit` (autocomplete uses small limits).
+ * - This function must NOT introduce any deterministic fallback/padding behavior. If Bedrock fails,
+ *   Bedrock wrapper is invoked with allowFallback=false and callers should receive [].
+ */
 async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null } = {}) {
   const searchQuery = _normStr(q);
-  
+
+  // Honor caller limit, but keep it within a safe bound.
+  const limitNum = Number(limit);
+  const effectiveLimit =
+    Number.isFinite(limitNum) && limitNum > 0 ? Math.max(1, Math.min(limitNum, 50)) : 30;
+
   let finalEnvelope = null;
   let finalPersonaObj = null;
 
@@ -128,7 +141,7 @@ async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null
       finalEnvelope = await _loadFinalPersonaEnvelope(personaId);
       finalPersonaObj = extractFinalPersonaObject(finalEnvelope);
     } catch (err) {
-      console.error("[ExploreService] DB Load Error:", err.message);
+      console.error('[ExploreService] DB Load Error:', err.message);
     }
   }
 
@@ -147,7 +160,7 @@ async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null
     },
     {
       // CRITICAL: Explore autocomplete/search must not show deterministic static fallback titles.
-      // If Bedrock fails, we should return [] so the UI can show "no suggestions" gracefully.
+      // If Bedrock fails, return [] so the UI can show "no suggestions" gracefully.
       allowFallback: false
     }
   );
@@ -155,7 +168,8 @@ async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null
   const roles = Array.isArray(bedrock?.roles) ? bedrock.roles : [];
   const scored = _decorateAndScoreRoles({ roles, scoringUserSkills });
 
-  return _safeSlice(scored, 5);
+  // Return up to the requested limit (no forced 5).
+  return _safeSlice(scored, effectiveLimit);
 }
 
 module.exports = { exploreSearchRolesPersonaDriven };
