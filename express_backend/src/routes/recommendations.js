@@ -186,7 +186,7 @@ async function handleInitialRecommendations(req, res) {
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: personaIdRaw,
-      options: { allowFallback: false }
+      options: { allowFallback: true }
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];

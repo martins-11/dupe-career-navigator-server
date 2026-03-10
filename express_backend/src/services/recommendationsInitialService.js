@@ -122,11 +122,19 @@ function _scoreRoles(finalPersona, roles) {
  * Any Bedrock or persona validation error will be surfaced directly; deterministic fallback roles no longer exist.
  */
 async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPersona, personaId, options = {} } = {}) {
-  // Harden: force fallback to be disallowed at all times, regardless of input.
+  /**
+   * IMPORTANT:
+   * This endpoint must be resilient even when Bedrock is unavailable/misconfigured in a given
+   * environment (common in preview/CI). Previously we forced strict no-fallback behavior, which
+   * makes /api/recommendations/initial permanently return 502 in those environments.
+   *
+   * We keep Bedrock as the preferred generator, but when it fails we return a deterministic
+   * 5-role set that is still persona-driven via the scoring engine.
+   */
   const strictOptions = { ...options, allowFallback: false };
 
   if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
-    const err = new Error('finalPersona is required for recommendations; fallback is disallowed.');
+    const err = new Error('finalPersona is required for recommendations.');
     err.code = 'missing_final_persona';
     err.httpStatus = 400;
     throw err;
@@ -135,36 +143,113 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   const profs = _extractPersonaSkillsWithProficiency(finalPersona);
   const hasPersonaProficiencies = Array.isArray(profs) && profs.length > 0;
 
-  // Strict: call Bedrock, which will throw on invalid output, never returning fallback.
-  const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
-    context: null,
-    allowFallback: false // override any caller option
-  });
+  // Deterministic fallback catalog (kept small and stable; always exactly 5).
+  const fallbackRoles = [
+    {
+      role_id: 'fallback-full-stack-engineer',
+      role_title: 'Full-Stack Software Engineer',
+      industry: 'Technology',
+      salary_lpa_range: '₹18–₹30 LPA',
+      experience_range: '3–5 years',
+      description:
+        'Builds customer-facing web products across frontend and backend systems. Owns features end-to-end with an emphasis on reliability and iteration speed.',
+      key_responsibilities: [
+        'Deliver full-stack features from design to production',
+        'Design and integrate APIs and data models',
+        'Improve performance, testing, and developer tooling'
+      ],
+      required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git', 'Communication'],
+      match_metadata: { source: 'deterministic_fallback' }
+    },
+    {
+      role_id: 'fallback-backend-engineer',
+      role_title: 'Backend Engineer (Node.js)',
+      industry: 'Technology',
+      salary_lpa_range: '₹20–₹34 LPA',
+      experience_range: '3–6 years',
+      description:
+        'Designs and operates scalable backend services and APIs used by multiple product surfaces. Focuses on performance, reliability, and observability in production.',
+      key_responsibilities: [
+        'Build and maintain high-throughput APIs',
+        'Optimize database queries and service performance',
+        'Implement monitoring, logging, and on-call readiness'
+      ],
+      required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability'],
+      match_metadata: { source: 'deterministic_fallback' }
+    },
+    {
+      role_id: 'fallback-data-analyst',
+      role_title: 'Data Analyst',
+      industry: 'Technology',
+      salary_lpa_range: '₹10–₹18 LPA',
+      experience_range: '2–4 years',
+      description:
+        'Turns raw business data into actionable insights for product and operations teams. Partners with stakeholders to define metrics, dashboards, and decision frameworks.',
+      key_responsibilities: [
+        'Define metrics and build dashboards for stakeholders',
+        'Analyze trends and root causes using SQL',
+        'Communicate insights and recommendations clearly'
+      ],
+      required_skills: ['SQL', 'Excel', 'Data Visualization', 'Statistics', 'Dashboards', 'Stakeholder Management'],
+      match_metadata: { source: 'deterministic_fallback' }
+    },
+    {
+      role_id: 'fallback-product-manager',
+      role_title: 'Product Manager (Technical)',
+      industry: 'Technology',
+      salary_lpa_range: '₹22–₹40 LPA',
+      experience_range: '4–7 years',
+      description:
+        'Leads product strategy and execution for technical initiatives that require close engineering partnership. Translates customer needs into prioritized roadmaps and measurable outcomes.',
+      key_responsibilities: [
+        'Own roadmap and prioritize tradeoffs',
+        'Write clear requirements and align stakeholders',
+        'Measure impact via experimentation and analytics'
+      ],
+      required_skills: ['Roadmapping', 'Prioritization', 'User Research', 'Analytics', 'Communication', 'Stakeholder Management'],
+      match_metadata: { source: 'deterministic_fallback' }
+    },
+    {
+      role_id: 'fallback-devops-engineer',
+      role_title: 'DevOps Engineer',
+      industry: 'Technology',
+      salary_lpa_range: '₹20–₹36 LPA',
+      experience_range: '3–6 years',
+      description:
+        'Builds and maintains the infrastructure and deployment pipelines that keep services running reliably. Improves security posture, release velocity, and incident response tooling.',
+      key_responsibilities: [
+        'Build CI/CD pipelines and deployment automation',
+        'Manage cloud infrastructure and incident response',
+        'Implement monitoring, security, and reliability best practices'
+      ],
+      required_skills: ['AWS', 'Docker', 'Kubernetes', 'CI/CD', 'Monitoring', 'Infrastructure as Code'],
+      match_metadata: { source: 'deterministic_fallback' }
+    }
+  ];
 
-  // If Bedrock throws, will never reach here; scoring will match only genuine results.
-  const roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
+  let bedrockResult = null;
+  let roles = null;
+  let endpointFallbackUsed = false;
+  let bedrockError = null;
 
-  // For strict mode, no fallback, surface errors only if real Bedrock errors.
-  const bedrockError =
-    bedrockResult?.usedFallback && bedrockResult?.error && typeof bedrockResult.error === 'object'
-      ? {
-          code: bedrockResult.error.code || 'BEDROCK_FAILED',
-          message: bedrockResult.error.message || null,
-          name: bedrockResult.error.name || null,
-          httpStatusCode: bedrockResult.error.httpStatusCode ?? null,
-          requestId: bedrockResult.error.requestId ?? null,
-          extendedRequestId: bedrockResult.error.extendedRequestId ?? null,
-          cfId: bedrockResult.error.cfId ?? null,
-          attempts: bedrockResult.error.attempts ?? null,
-          totalRetryDelay: bedrockResult.error.totalRetryDelay ?? null,
-          fault: bedrockResult.error.fault ?? null,
-          service: bedrockResult.error.service ?? null,
-          details:
-            bedrockResult.error.details && typeof bedrockResult.error.details === 'object'
-              ? bedrockResult.error.details
-              : null
-        }
-      : null;
+  try {
+    bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
+      context: null,
+      allowFallback: false // never use bedrockService's internal fallback; we control fallback here
+    });
+
+    roles = _ensureExactlyFiveRoles(bedrockResult?.roles);
+  } catch (err) {
+    // Bedrock unavailable/invalid output: use deterministic roles instead of failing the endpoint.
+    endpointFallbackUsed = true;
+    roles = fallbackRoles;
+
+    bedrockError = {
+      code: err?.code || err?.name || 'BEDROCK_FAILED',
+      message: err?.message || String(err),
+      details: err?.details && typeof err.details === 'object' ? err.details : null
+    };
+  }
 
   const scored = _scoreRoles(finalPersona, roles).map((r) => ({
     ...r,
@@ -174,10 +259,8 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
         personaId: personaId || null,
         usedPersonaProficiencies: hasPersonaProficiencies
       },
-      grounding: {
-        source: 'none'
-      },
-      bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
+      grounding: { source: 'none' },
+      bedrockUsedFallback: false,
       bedrockModelId: bedrockResult?.modelId || null,
       ...(bedrockError ? { bedrockError } : {})
     }
@@ -190,8 +273,8 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       hasPersonaProficiencies,
       onetGrounded: false,
       onetError: null,
-      bedrockUsedFallback: Boolean(bedrockResult?.usedFallback),
-      endpointFallbackUsed: false,
+      bedrockUsedFallback: false,
+      endpointFallbackUsed,
       bedrockError
     }
   };
