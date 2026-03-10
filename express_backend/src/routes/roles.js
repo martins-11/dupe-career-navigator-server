@@ -260,42 +260,32 @@ router.get('/autocomplete', async (req, res) => {
  * Response: Array<{ role_id, role_title, industry, skills_required, salary_range, match_metadata, is_targetable, threeTwoReport? }>
  */
 router.get('/search', async (req, res) => {
-  /**
-   * PUBLIC_INTERFACE
-   * GET /api/roles/search
-   *
-   * Persona-driven Explore search:
-   * - Uses Bedrock (Claude) to propose roles
-   * - Grounds generation on O*NET occupation results
-   * - Scores roles against the FINAL persona (when personaId is provided) and returns sorted results
-   *
-   * Query params:
-   * - q: string (optional) keyword query
-   * - limit: number (optional; default 30; max 50)  (currently returns up to 5)
-   * - personaId: string (optional) persona id to load FINAL persona and compute persona-based scoring
-   *
-   * Response: Array<{
-   *   role_id, role_title, industry, salary_range,
-   *   description, key_responsibilities, experience_range,
-   *   required_skills, skills_required,
-   *   threeTwoReport, compatibilityScore, match_metadata
-   * }>
-   */
   try {
+    // 1. ADD THIS LOG: See if the request even reaches the backend
+    console.log(">>> Explore Search Request Received:", req.query);
+
     const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
 
-    const q = String(req.query?.q || '').replace(/\s+/g, ' ').trim();
-    const limitRaw = req.query?.limit != null ? Number(req.query.limit) : 30;
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.round(limitRaw))) : 30;
+    const q = String(req.query?.q || '').trim();
+    // 2. Ensure we capture the ID correctly (check both camelCase and snake_case)
+    const personaId = req.query?.personaId || req.query?.persona_id;
 
-    const personaId = req.query?.personaId ? String(req.query.personaId).trim() : null;
+    if (!personaId) {
+      console.warn("!!! No PersonaId provided. Results will be generic.");
+    }
 
-    const rows = await exploreSearchRolesPersonaDriven({ q, limit, personaId });
-    return res.json(Array.isArray(rows) ? rows : []);
-  } catch (_) {
-    // Always return JSON array (never HTML) to keep frontend resilient.
-    return res.json([]);
+    const rows = await exploreSearchRolesPersonaDriven({ 
+      q, 
+      limit: 30, 
+      personaId: personaId ? String(personaId).trim() : null 
+    });
+
+    console.log(`>>> Success: Found ${rows?.length} roles.`);
+    return res.json(rows);
+  } catch (err) {
+    // 3. LOG THE ACTUAL ERROR: This will tell us why the network response is empty
+    console.error("xxx SEARCH ROUTE FAILED:", err);
+    return res.status(500).json({ error: err.message, bedrockUsedFallback: true });
   }
 });
-
 module.exports = router;
