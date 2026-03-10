@@ -375,23 +375,60 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
      * - AWS_REGION/AWS credentials as per bedrockService docs.
      */
     if (userId && normalizedText.trim() && (category === 'resume' || category === 'performance_review')) {
+      /**
+       * Current role extraction/persistence (best-effort, non-blocking):
+       * - Primary: Bedrock JSON extraction (when configured/available)
+       * - Fallback: local heuristic extractor (nameRoleExtraction) so we still persist something usable
+       *
+       * Why:
+       * - The UI expects "current role/designation" to exist for draft/final persona display.
+       * - Bedrock can be unconfigured, throttled, or return null; we should not end up with an empty role in those cases.
+       */
       try {
-        const extracted = await bedrockService.extractCurrentRoleFromText({
-          text: normalizedText,
-          hints: { name: extractedEmployeeName || null },
-          options: { modelId: process.env.BEDROCK_ROLE_MODEL_ID || process.env.BEDROCK_MODEL_ID || null }
-        });
+        let saved = false;
 
-        if (extracted?.currentRoleTitle) {
-          await userTargetsRepo.upsertUserCurrentRole({
-            userId: String(userId),
-            currentRoleTitle: extracted.currentRoleTitle,
-            source: 'bedrock'
+        // 1) Try Bedrock extraction first.
+        try {
+          const extracted = await bedrockService.extractCurrentRoleFromText({
+            text: normalizedText,
+            hints: { name: extractedEmployeeName || null },
+            options: { modelId: process.env.BEDROCK_ROLE_MODEL_ID || process.env.BEDROCK_MODEL_ID || null }
           });
+
+          if (extracted?.currentRoleTitle) {
+            await userTargetsRepo.upsertUserCurrentRole({
+              userId: String(userId),
+              currentRoleTitle: extracted.currentRoleTitle,
+              source: 'bedrock'
+            });
+            saved = true;
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn('[uploads] Bedrock current role extraction failed (will fallback)', {
+            userId,
+            category,
+            message: e?.message,
+            code: e?.code
+          });
+        }
+
+        // 2) Fallback to heuristic extraction if Bedrock didn't produce a title.
+        if (!saved) {
+          const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+          const heuristic = extractNameAndCurrentRole(normalizedText);
+
+          if (heuristic?.role && String(heuristic.role).trim()) {
+            await userTargetsRepo.upsertUserCurrentRole({
+              userId: String(userId),
+              currentRoleTitle: String(heuristic.role).trim(),
+              source: 'heuristic'
+            });
+          }
         }
       } catch (e) {
         // eslint-disable-next-line no-console
-        console.warn('[uploads] current role extraction skipped/failed (best-effort)', {
+        console.warn('[uploads] current role persistence failed (best-effort)', {
           userId,
           category,
           message: e?.message,
