@@ -228,6 +228,131 @@ const GraphQuerySchema = z
   .strict();
 
 /**
+ * Body schema for POST /api/mindmap/graph (frontend contract).
+ * Frontend sends: { userId, currentRoleTitle?, filters: { salaryMin, salaryMax, skillSimilarityMin, timeHorizon } }
+ */
+const GraphPostBodySchema = z
+  .object({
+    userId: z.string().min(1),
+    currentRoleTitle: z.string().min(1).optional(),
+    filters: z
+      .object({
+        salaryMin: z.number().optional(),
+        salaryMax: z.number().optional(),
+        skillSimilarityMin: z.number().min(0).max(100).optional(),
+        // Frontend uses "Any" when no filter is applied.
+        timeHorizon: z.string().optional()
+      })
+      .optional()
+  })
+  .passthrough();
+
+/**
+ * INTERNAL
+ * Shared implementation for building the mindmap graph.
+ *
+ * Accepts a normalized query-like object and returns:
+ * { meta, nodes, edges, detailsByNodeId, centerNodeId }
+ */
+async function _buildMindmapGraph(q) {
+  const limit = Number.isFinite(q.limit) ? q.limit : 18;
+
+  // Center node: user's current role (prefer persisted extraction when a user id is provided).
+  let currentRoleTitle = _normalizeLabel(q.currentRoleTitle || 'Current Role');
+
+  const effectiveUserId = q.user_id || q.userId;
+
+  if (effectiveUserId) {
+    try {
+      const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
+      const current = await userTargetsRepo.getLatestUserCurrentRole({
+        userId: String(effectiveUserId)
+      });
+      if (current?.currentRoleTitle) currentRoleTitle = _normalizeLabel(current.currentRoleTitle);
+    } catch (_) {
+      // ignore; fallback to query param label
+    }
+  }
+
+  const centerRole = {
+    roleId: 'current',
+    roleTitle: currentRoleTitle,
+    industry: null,
+    coreSkills: [] // can be populated later from persona finalized skills.
+  };
+  const centerNode = _roleToNode(centerRole, { isCenter: true, level: 0 });
+
+  // Load future roles from catalog.
+  const catalog = await _loadCatalogRoles();
+  const candidates = _safeArray(catalog)
+    .map((r) => {
+      // Create node with a pseudo similarity score (when catalog lacks scoring):
+      // Use number of skills as a weak proxy and clamp 30-90 for UI variability.
+      const requiredSkills = _safeArray(r?.coreSkills || r?.skills_required || r?.required_skills).filter(Boolean);
+      const sim = Math.max(30, Math.min(90, 35 + requiredSkills.length * 5));
+      // Level heuristic based on "seniority" fields if present.
+      const level = r?.seniorityLevel || r?.seniority_level ? 2 : 1;
+      return _roleToNode(r, { isCenter: false, level, score: sim });
+    })
+    .filter((n) => n?.id && n?.label);
+
+  // Apply node filters
+  let filtered = _applyFiltersToNodes([centerNode, ...candidates], {
+    minSalaryLpa: q.minSalaryLpa,
+    maxSalaryLpa: q.maxSalaryLpa,
+    minSkillSimilarity: q.minSkillSimilarity
+  });
+
+  // Cap to limit but keep center node.
+  const center = filtered.find((n) => n.type === 'current_role') || centerNode;
+  const rest = filtered.filter((n) => n.type !== 'current_role').slice(0, Math.max(0, limit - 1));
+  filtered = [center, ...rest];
+
+  // Build simple branching edges radiating from center.
+  // Time horizon heuristic based on node.level.
+  const edges = [];
+  for (const node of rest) {
+    const timeHorizon = node.level <= 1 ? 'Near' : node.level === 2 ? 'Mid' : 'Far';
+    if (q.timeHorizon && q.timeHorizon !== timeHorizon) continue;
+    edges.push(
+      _buildEdge({
+        from: center.id,
+        to: node.id,
+        label: timeHorizon,
+        timeHorizon
+      })
+    );
+  }
+
+  // If time horizon filter removed edges, also remove orphan nodes (except center).
+  const connectedTargets = new Set(edges.map((e) => e.target));
+  const nodes = [center, ...rest.filter((n) => connectedTargets.has(n.id))];
+
+  // Build per-node detail payloads.
+  const detailsByNodeId = {};
+  for (const node of nodes) {
+    detailsByNodeId[node.id] = _buildDetailsForNode(node, { centerNode: center });
+  }
+
+  return {
+    meta: {
+      center: { id: center.id, label: center.label },
+      filtersApplied: {
+        minSalaryLpa: q.minSalaryLpa ?? null,
+        maxSalaryLpa: q.maxSalaryLpa ?? null,
+        minSkillSimilarity: q.minSkillSimilarity ?? null,
+        timeHorizon: q.timeHorizon ?? null,
+        limit
+      }
+    },
+    nodes,
+    edges,
+    detailsByNodeId,
+    centerNodeId: center.id
+  };
+}
+
+/**
  * PUBLIC_INTERFACE
  * GET /api/mindmap/graph
  *
@@ -238,12 +363,6 @@ const GraphQuerySchema = z
  *   edges: Array<{ id, source, target, type, label?, data:{ timeHorizon? } }>,
  *   detailsByNodeId: Record<string, { requiredSkills, averageSalary, transitionTimeline, skillGap } >
  * }
- *
- * Notes:
- * - The server includes per-node details payload so the UI can render the drill-down panel without
- *   additional round-trips.
- * - "Current role" is derived from query.currentRoleTitle (fallbacks to "Current Role" if absent).
- * - Future role branches are generated from the catalog and heuristics (until a dedicated paths model exists).
  */
 router.get('/graph', async (req, res) => {
   try {
@@ -263,98 +382,89 @@ router.get('/graph', async (req, res) => {
       throw err;
     }
 
-    const q = parsed.data;
-    const limit = Number.isFinite(q.limit) ? q.limit : 18;
-
-    // Center node: user's current role (prefer persisted extraction when a user id is provided).
-    let currentRoleTitle = _normalizeLabel(q.currentRoleTitle || 'Current Role');
-
-    const effectiveUserId = q.user_id || q.userId;
-
-    if (effectiveUserId) {
-      try {
-        const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
-        const current = await userTargetsRepo.getLatestUserCurrentRole({ userId: String(effectiveUserId) });
-        if (current?.currentRoleTitle) currentRoleTitle = _normalizeLabel(current.currentRoleTitle);
-      } catch (_) {
-        // ignore; fallback to query param label
-      }
-    }
-
-    const centerRole = {
-      roleId: 'current',
-      roleTitle: currentRoleTitle,
-      industry: null,
-      coreSkills: [] // can be populated later from persona finalized skills.
-    };
-    const centerNode = _roleToNode(centerRole, { isCenter: true, level: 0 });
-
-    // Load future roles from catalog.
-    const catalog = await _loadCatalogRoles();
-    const candidates = _safeArray(catalog)
-      .map((r) => {
-        // Create node with a pseudo similarity score (when catalog lacks scoring):
-        // Use number of skills as a weak proxy and clamp 30-90 for UI variability.
-        const requiredSkills = _safeArray(r?.coreSkills || r?.skills_required || r?.required_skills).filter(Boolean);
-        const sim = Math.max(30, Math.min(90, 35 + requiredSkills.length * 5));
-        // Level heuristic based on "seniority" fields if present.
-        const level = r?.seniorityLevel || r?.seniority_level ? 2 : 1;
-        return _roleToNode(r, { isCenter: false, level, score: sim });
-      })
-      .filter((n) => n?.id && n?.label);
-
-    // Apply node filters
-    let filtered = _applyFiltersToNodes([centerNode, ...candidates], {
-      minSalaryLpa: q.minSalaryLpa,
-      maxSalaryLpa: q.maxSalaryLpa,
-      minSkillSimilarity: q.minSkillSimilarity
+    const graph = await _buildMindmapGraph(parsed.data);
+    return res.json({
+      meta: graph.meta,
+      nodes: graph.nodes,
+      edges: graph.edges,
+      detailsByNodeId: graph.detailsByNodeId
     });
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
 
-    // Cap to limit but keep center node.
-    const center = filtered.find((n) => n.type === 'current_role') || centerNode;
-    const rest = filtered.filter((n) => n.type !== 'current_role').slice(0, Math.max(0, limit - 1));
-    filtered = [center, ...rest];
+/**
+ * PUBLIC_INTERFACE
+ * POST /api/mindmap/graph
+ *
+ * Frontend contract: returns a simplified shape:
+ * { nodes, edges, centerNodeId, meta? }
+ *
+ * Notes:
+ * - We still include the richer fields (`detailsByNodeId`, etc.) as additive properties so
+ *   future UIs can reuse them, but the current MindmapCanvas only requires nodes/edges/centerNodeId.
+ */
+router.post('/graph', async (req, res) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
 
-    // Build simple branching edges radiating from center.
-    // Time horizon heuristic based on node.level.
-    const edges = [];
-    for (const node of rest) {
-      const timeHorizon = node.level <= 1 ? 'Near' : node.level === 2 ? 'Mid' : 'Far';
-      if (q.timeHorizon && q.timeHorizon !== timeHorizon) continue;
-      edges.push(
-        _buildEdge({
-          from: center.id,
-          to: node.id,
-          label: timeHorizon,
-          timeHorizon
-        })
-      );
+    const parsed = GraphPostBodySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      const err = new Error('Invalid request body.');
+      err.name = 'ZodError';
+      err.issues = parsed.error.issues;
+      err.httpStatus = 400;
+      throw err;
     }
 
-    // If time horizon filter removed edges, also remove orphan nodes (except center).
-    const connectedTargets = new Set(edges.map((e) => e.target));
-    const nodes = [center, ...rest.filter((n) => connectedTargets.has(n.id))];
+    const { userId, currentRoleTitle, filters } = parsed.data;
 
-    // Build per-node detail payloads.
-    const detailsByNodeId = {};
-    for (const node of nodes) {
-      detailsByNodeId[node.id] = _buildDetailsForNode(node, { centerNode: center });
-    }
+    // Normalize frontend filters -> internal query model
+    const timeHorizon =
+      filters?.timeHorizon && ['Near', 'Mid', 'Far'].includes(String(filters.timeHorizon))
+        ? String(filters.timeHorizon)
+        : undefined;
+
+    const q = {
+      userId: String(userId),
+      currentRoleTitle: currentRoleTitle ? String(currentRoleTitle) : undefined,
+      minSalaryLpa: Number.isFinite(filters?.salaryMin) ? filters.salaryMin : undefined,
+      maxSalaryLpa: Number.isFinite(filters?.salaryMax) ? filters.salaryMax : undefined,
+      minSkillSimilarity: Number.isFinite(filters?.skillSimilarityMin)
+        ? filters.skillSimilarityMin
+        : undefined,
+      timeHorizon
+    };
+
+    const graph = await _buildMindmapGraph(q);
+
+    // Frontend expects MindmapGraphNode: { id, title, ... }.
+    // Provide title and keep additive original fields for compatibility/debugging.
+    const nodes = graph.nodes.map((n) => ({
+      id: String(n.id),
+      title: String(n?.data?.title || n?.label || n.id),
+      ...n
+    }));
+
+    // Frontend expects edge shape at least: { source, target, label? }.
+    const edges = graph.edges.map((e) => ({
+      source: String(e.source),
+      target: String(e.target),
+      label: e.label ?? null,
+      ...e
+    }));
 
     return res.json({
-      meta: {
-        center: { id: center.id, label: center.label },
-        filtersApplied: {
-          minSalaryLpa: q.minSalaryLpa ?? null,
-          maxSalaryLpa: q.maxSalaryLpa ?? null,
-          minSkillSimilarity: q.minSkillSimilarity ?? null,
-          timeHorizon: q.timeHorizon ?? null,
-          limit
-        }
-      },
       nodes,
       edges,
-      detailsByNodeId
+      centerNodeId: graph.centerNodeId,
+      meta: graph.meta,
+      // Additive rich payloads (safe for current UI; ignored by parser)
+      detailsByNodeId: graph.detailsByNodeId
     });
   } catch (err) {
     return sendError(res, err);
@@ -382,7 +492,10 @@ router.get('/nodes/:id', async (req, res) => {
     const catalog = await _loadCatalogRoles();
     const found =
       nodeId === 'current'
-        ? _roleToNode({ roleId: 'current', roleTitle: 'Current Role', coreSkills: [] }, { isCenter: true, level: 0 })
+        ? _roleToNode(
+            { roleId: 'current', roleTitle: 'Current Role', coreSkills: [] },
+            { isCenter: true, level: 0 }
+          )
         : _roleToNode(catalog.find((r) => String(r?.roleId || r?.role_id || r?.id) === nodeId) || null, {
             isCenter: false,
             level: 1,
@@ -395,10 +508,89 @@ router.get('/nodes/:id', async (req, res) => {
       throw err;
     }
 
-    const centerNode = _roleToNode({ roleId: 'current', roleTitle: 'Current Role', coreSkills: [] }, { isCenter: true, level: 0 });
+    const centerNode = _roleToNode(
+      { roleId: 'current', roleTitle: 'Current Role', coreSkills: [] },
+      { isCenter: true, level: 0 }
+    );
     const details = _buildDetailsForNode(found, { centerNode });
 
     return res.json(details);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * Body schema for POST /api/mindmap/node-details (frontend contract).
+ */
+const NodeDetailsPostBodySchema = z
+  .object({
+    nodeId: z.string().min(1),
+    centerRoleId: z.string().min(1).optional()
+  })
+  .passthrough();
+
+/**
+ * PUBLIC_INTERFACE
+ * POST /api/mindmap/node-details
+ *
+ * Frontend expects at minimum: { nodeId, title?, ... } but remains permissive.
+ * We return a richer details payload compatible with the existing MindMapNodeDetails shape.
+ */
+router.post('/node-details', async (req, res) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+
+    const parsed = NodeDetailsPostBodySchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      const err = new Error('Invalid request body.');
+      err.name = 'ZodError';
+      err.issues = parsed.error.issues;
+      err.httpStatus = 400;
+      throw err;
+    }
+
+    const nodeId = String(parsed.data.nodeId).trim();
+    const centerRoleId = parsed.data.centerRoleId ? String(parsed.data.centerRoleId).trim() : 'current';
+
+    // Load requested node
+    const catalog = await _loadCatalogRoles();
+    const node =
+      nodeId === 'current'
+        ? _roleToNode({ roleId: 'current', roleTitle: 'Current Role', coreSkills: [] }, { isCenter: true, level: 0 })
+        : _roleToNode(catalog.find((r) => String(r?.roleId || r?.role_id || r?.id) === nodeId) || null, {
+            isCenter: false,
+            level: 1,
+            score: null
+          });
+
+    if (!node || !node.id || !node.label) {
+      const err = new Error('Node not found.');
+      err.code = 'NOT_FOUND';
+      err.httpStatus = 404;
+      throw err;
+    }
+
+    // Load center node (best-effort)
+    const centerNode =
+      centerRoleId === 'current'
+        ? _roleToNode({ roleId: 'current', roleTitle: 'Current Role', coreSkills: [] }, { isCenter: true, level: 0 })
+        : _roleToNode(catalog.find((r) => String(r?.roleId || r?.role_id || r?.id) === centerRoleId) || null, {
+            isCenter: true,
+            level: 0,
+            score: null
+          });
+
+    const details = _buildDetailsForNode(node, { centerNode: centerNode?.id ? centerNode : node });
+
+    // Provide the frontend-required nodeId field (additive)
+    return res.json({
+      nodeId,
+      ...details
+    });
   } catch (err) {
     return sendError(res, err);
   }
