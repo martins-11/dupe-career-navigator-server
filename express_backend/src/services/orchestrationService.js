@@ -439,11 +439,17 @@ function _makePlaceholderPersona({ sourceText, context }) {
   const industry = context?.industry || null;
   const seniority = context?.seniority || null;
 
-  // IMPORTANT:
-  // - Resume name must win when present in multi-doc uploads.
-  // - Otherwise, for single-doc PR/JD uploads, extract the person's name from that single doc text.
-  // We only have a single combined text blob here, but orchestration concatenation includes
-  // category headers. extractNameAndCurrentRole has PR label parsing + conservative fallbacks.
+  /**
+   * Prefer authoritative extraction captured during uploads:
+   * - uploads persists extracted_text.metadataJson.extractedPersonFullName / extractedCurrentRoleTitle
+   * - This lets persona drafts reflect the correct name/role even if heuristic extraction differs.
+   *
+   * Because _makePlaceholderPersona only receives a combined text blob, we cannot directly access
+   * per-document metadata here, so we fall back to the heuristic extractor.
+   *
+   * Note: The Bedrock-backed personaService.generatePersonaDraft() path is used for real drafts;
+   * this placeholder is kept for non-LLM mode.
+   */
   const extracted = extractBestNameAndRoleFromDocuments([{ category: null, textContent: text }]);
 
   const roleForDisplay = extracted.role || targetRole || 'Professional';
@@ -705,8 +711,21 @@ async function generatePersonaDraftForBuild(buildId, input) {
 
     const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
     const extracted = extractNameAndCurrentRole(sourceText);
-    const extractedName = extracted?.name || '';
-    const extractedRole = extracted?.role || '';
+
+    // Prefer authoritative per-document extraction persisted during uploads (extracted_text.metadataJson).
+    // This is the key propagation path that makes the frontend reflect Bedrock-extracted values.
+    const extractedRows = Object.values(orch.extractedTextByDocumentId || {}).filter(Boolean);
+    const authoritativeName =
+      extractedRows
+        .map((r) => r?.metadataJson?.extractedPersonFullName)
+        .find((v) => typeof v === 'string' && v.trim()) || '';
+    const authoritativeRole =
+      extractedRows
+        .map((r) => r?.metadataJson?.extractedCurrentRoleTitle)
+        .find((v) => typeof v === 'string' && v.trim()) || '';
+
+    const extractedName = authoritativeName || extracted?.name || '';
+    const extractedRole = authoritativeRole || extracted?.role || '';
 
     // If heuristic extraction didn't yield a role, fall back to persisted user current role (if available).
     let roleFromUserTargets = '';
