@@ -366,46 +366,42 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
     });
 
     /**
-     * Current role extraction/persistence (best-effort, non-blocking):
-     * - Only attempt when we have a userId and meaningful text.
-     * - Prefer resume/performance_review categories (most likely to include a current title).
-     * - Persist into user_targets as a "current role" record so Mindmap/Personas can show it.
+     * Authoritative name + current role extraction/persistence (best-effort, non-blocking):
      *
-     * ENV REQUIRED for real Bedrock:
-     * - AWS_REGION/AWS credentials as per bedrockService docs.
+     * Requirements:
+     * - On resume/performance_review uploads, Bedrock is authoritative for BOTH name and current role.
+     * - Always overwrite stored values from Bedrock (do not keep previous heuristic values).
+     * - Ensure persona draft/final generation can use these fields so frontend headers show them.
+     *
+     * Implementation notes:
+     * - We persist role to user_targets (existing storage for "current role").
+     * - We persist BOTH name+role into extracted_text.metadataJson so orchestration can read them even
+     *   when userId is absent (anonymous flows) or when persona generation runs later.
      */
-    if (userId && normalizedText.trim() && (category === 'resume' || category === 'performance_review')) {
-      /**
-       * Current role extraction/persistence (best-effort, non-blocking):
-       * - Primary: Bedrock JSON extraction (when configured/available)
-       * - Fallback: local heuristic extractor (nameRoleExtraction) so we still persist something usable
-       *
-       * Why:
-       * - The UI expects "current role/designation" to exist for draft/final persona display.
-       * - Bedrock can be unconfigured, throttled, or return null; we should not end up with an empty role in those cases.
-       */
+    if (normalizedText.trim() && (category === 'resume' || category === 'performance_review')) {
       try {
-        let saved = false;
+        // 1) Bedrock authoritative extraction.
+        let bedrockFullName = null;
+        let bedrockRole = null;
+        let bedrockMeta = null;
 
-        // 1) Try Bedrock extraction first.
         try {
-          const extracted = await bedrockService.extractCurrentRoleFromText({
+          const extracted = await bedrockService.extractNameAndCurrentRoleFromText({
             text: normalizedText,
             hints: { name: extractedEmployeeName || null },
             options: { modelId: process.env.BEDROCK_ROLE_MODEL_ID || process.env.BEDROCK_MODEL_ID || null }
           });
 
-          if (extracted?.currentRoleTitle) {
-            await userTargetsRepo.upsertUserCurrentRole({
-              userId: String(userId),
-              currentRoleTitle: extracted.currentRoleTitle,
-              source: 'bedrock'
-            });
-            saved = true;
-          }
+          bedrockFullName = extracted?.fullName ?? null;
+          bedrockRole = extracted?.currentRoleTitle ?? null;
+          bedrockMeta = {
+            confidence: extracted?.confidence ?? null,
+            evidence: extracted?.evidence ?? null,
+            modelId: extracted?.modelId ?? null
+          };
         } catch (e) {
           // eslint-disable-next-line no-console
-          console.warn('[uploads] Bedrock current role extraction failed (will fallback)', {
+          console.warn('[uploads] Bedrock name+role extraction failed (will fallback)', {
             userId,
             category,
             message: e?.message,
@@ -413,22 +409,66 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
           });
         }
 
-        // 2) Fallback to heuristic extraction if Bedrock didn't produce a title.
-        if (!saved) {
-          const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
-          const heuristic = extractNameAndCurrentRole(normalizedText);
+        // 2) Fallback (ONLY if Bedrock did not return values).
+        const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
+        const heuristic = extractNameAndCurrentRole(normalizedText);
 
-          if (heuristic?.role && String(heuristic.role).trim()) {
-            await userTargetsRepo.upsertUserCurrentRole({
-              userId: String(userId),
-              currentRoleTitle: String(heuristic.role).trim(),
-              source: 'heuristic'
-            });
-          }
+        const resolvedName =
+          (typeof bedrockFullName === 'string' && bedrockFullName.trim()
+            ? bedrockFullName.trim()
+            : heuristic?.name
+              ? String(heuristic.name).trim()
+              : '') || '';
+
+        const resolvedRole =
+          (typeof bedrockRole === 'string' && bedrockRole.trim()
+            ? bedrockRole.trim()
+            : heuristic?.role
+              ? String(heuristic.role).trim()
+              : '') || '';
+
+        // 3) Always overwrite stored *role* when we have a userId AND Bedrock produced a role.
+        // (If Bedrock had no role, we fall back to heuristic and store that instead.)
+        if (userId && resolvedRole) {
+          await userTargetsRepo.upsertUserCurrentRole({
+            userId: String(userId),
+            currentRoleTitle: resolvedRole,
+            source: typeof bedrockRole === 'string' && bedrockRole.trim() ? 'bedrock' : 'heuristic'
+          });
         }
+
+        // 4) Patch extracted_text metadata with authoritative fields.
+        // We update via an additional extracted_text row so we don't need DB schema changes.
+        // This keeps "one extracted_text row per upload" but allows us to add richer metadata.
+        await documentsRepo.upsertExtractedText(doc.id, {
+          extractor: extraction.extractor,
+          extractorVersion: extraction.extractorVersion,
+          language: extraction.language ?? null,
+          textContent: normalizedText,
+          metadataJson: {
+            ...extraction.metadata,
+            warnings: Array.isArray(extraction.warnings) ? extraction.warnings : [],
+            normalization: normalizeText(extraction.text || '', {
+              removeExtraWhitespace: true,
+              normalizeLineBreaks: true
+            }).stats,
+            extractedTextEmpty: false,
+            extractedEmployeeName: extractedEmployeeName || null,
+            extractedPersonFullName: resolvedName || null,
+            extractedCurrentRoleTitle: resolvedRole || null,
+            extractedNameRole: {
+              source: typeof bedrockFullName === 'string' || typeof bedrockRole === 'string' ? 'bedrock' : 'heuristic',
+              bedrock: bedrockMeta
+            },
+            localFile: {
+              storageProvider: 'local',
+              storagePath: absPath
+            }
+          }
+        });
       } catch (e) {
         // eslint-disable-next-line no-console
-        console.warn('[uploads] current role persistence failed (best-effort)', {
+        console.warn('[uploads] name/role persistence failed (best-effort)', {
           userId,
           category,
           message: e?.message,
