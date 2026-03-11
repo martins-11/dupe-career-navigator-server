@@ -284,71 +284,188 @@ async function _buildMindmapGraph(q) {
 
   // Load future roles from catalog.
   const catalog = await _loadCatalogRoles();
-  const candidates = _safeArray(catalog)
+
+  // Build a richer "multi-branch" graph:
+  // - Level 1: several "Near" roles connected from center
+  // - Level 2: for some of those, add "Mid" roles
+  // - Level 3: for some of those, add "Far" roles
+  //
+  // This ensures the UI shows multiple branches (acceptance criteria) and avoids the
+  // observed behavior where only a couple nodes appear.
+  const allCandidateNodes = _safeArray(catalog)
     .map((r) => {
-      // Create node with a pseudo similarity score (when catalog lacks scoring):
-      // Use number of skills as a weak proxy and clamp 30-90 for UI variability.
+      // Pseudo similarity (0-100) when catalog lacks scoring.
       const requiredSkills = _safeArray(r?.coreSkills || r?.skills_required || r?.required_skills).filter(Boolean);
-      const sim = Math.max(30, Math.min(90, 35 + requiredSkills.length * 5));
-      // Level heuristic based on "seniority" fields if present.
+      const sim = Math.max(25, Math.min(95, 30 + requiredSkills.length * 6));
+
+      // If we have hints, treat as more distant.
       const level = r?.seniorityLevel || r?.seniority_level ? 2 : 1;
+
       return _roleToNode(r, { isCenter: false, level, score: sim });
     })
     .filter((n) => n?.id && n?.label);
 
-  // Apply node filters
-  let filtered = _applyFiltersToNodes([centerNode, ...candidates], {
+  // Apply node-level filters (salary/similarity) early.
+  const filteredCandidates = _applyFiltersToNodes([centerNode, ...allCandidateNodes], {
     minSalaryLpa: q.minSalaryLpa,
     maxSalaryLpa: q.maxSalaryLpa,
     minSkillSimilarity: q.minSkillSimilarity
+  }).filter((n) => n.type !== 'current_role');
+
+  // Deterministic-ish ordering so results are stable between calls.
+  filteredCandidates.sort((a, b) => {
+    const sa = Number.isFinite(a?.data?.skillSimilarity) ? a.data.skillSimilarity : 0;
+    const sb = Number.isFinite(b?.data?.skillSimilarity) ? b.data.skillSimilarity : 0;
+    if (sb !== sa) return sb - sa;
+    return _normalizeLabel(a?.label).localeCompare(_normalizeLabel(b?.label));
   });
 
-  // Cap to limit but keep center node.
-  const center = filtered.find((n) => n.type === 'current_role') || centerNode;
-  const rest = filtered.filter((n) => n.type !== 'current_role').slice(0, Math.max(0, limit - 1));
-  filtered = [center, ...rest];
+  // Decide branch sizes.
+  const maxNodes = Math.max(3, limit); // ensure we don't end up with only center+1 in degenerate cases
+  const level1Count = Math.min(10, Math.max(4, Math.floor((maxNodes - 1) * 0.55)));
+  const level2Count = Math.min(6, Math.max(2, Math.floor((maxNodes - 1) * 0.3)));
+  const level3Count = Math.min(4, Math.max(1, Math.floor((maxNodes - 1) * 0.15)));
 
-  // Build simple branching edges radiating from center.
-  // Time horizon heuristic based on node.level.
-  const edges = [];
-  for (const node of rest) {
-    const timeHorizon = node.level <= 1 ? 'Near' : node.level === 2 ? 'Mid' : 'Far';
-    if (q.timeHorizon && q.timeHorizon !== timeHorizon) continue;
-    edges.push(
-      _buildEdge({
-        from: center.id,
-        to: node.id,
-        label: timeHorizon,
-        timeHorizon
-      })
-    );
+  // Take a pool; if we have few candidates, reuse what we have.
+  const pool = filteredCandidates.slice(0, Math.max(level1Count + level2Count + level3Count, maxNodes - 1));
+
+  // Partition candidates into levels (heuristic):
+  // - Prefer existing node.level hints, otherwise distribute.
+  const lvl1 = [];
+  const lvl2 = [];
+  const lvl3 = [];
+
+  for (const n of pool) {
+    if ((n.level ?? 1) >= 3) lvl3.push({ ...n, level: 3 });
+    else if ((n.level ?? 1) === 2) lvl2.push({ ...n, level: 2 });
+    else lvl1.push({ ...n, level: 1 });
   }
 
-  // If time horizon filter removed edges, also remove orphan nodes (except center).
+  // Ensure we have enough at each level by promoting/demoting.
+  function take(arr, k) {
+    return arr.slice(0, Math.max(0, k));
+  }
+  let L1 = take(lvl1, level1Count);
+  let remaining = pool.filter((n) => !L1.some((x) => x.id === n.id));
+
+  let L2 = take(lvl2, level2Count);
+  remaining = remaining.filter((n) => !L2.some((x) => x.id === n.id));
+  if (L2.length < level2Count) {
+    const fill = take(
+      remaining.map((n) => ({ ...n, level: 2 })),
+      level2Count - L2.length
+    );
+    L2 = [...L2, ...fill];
+    remaining = remaining.filter((n) => !fill.some((x) => x.id === n.id));
+  }
+
+  let L3 = take(lvl3, level3Count);
+  remaining = remaining.filter((n) => !L3.some((x) => x.id === n.id));
+  if (L3.length < level3Count) {
+    const fill = take(
+      remaining.map((n) => ({ ...n, level: 3 })),
+      level3Count - L3.length
+    );
+    L3 = [...L3, ...fill];
+    remaining = remaining.filter((n) => !fill.some((x) => x.id === n.id));
+  }
+
+  // Cap overall nodes to limit-1 (excluding center).
+  const selected = [...L1, ...L2, ...L3].slice(0, Math.max(0, maxNodes - 1));
+
+  // Build branching edges:
+  // - center -> each L1 (Near)
+  // - each L2 attaches to a parent in L1 (Mid)
+  // - each L3 attaches to a parent in L2 (Far) when possible, else to L1
+  const edges = [];
+
+  function horizonForLevel(level) {
+    if (level <= 1) return 'Near';
+    if (level === 2) return 'Mid';
+    return 'Far';
+  }
+
+  // Honor time horizon filter by skipping edges (and later pruning orphans).
+  function shouldIncludeHorizon(h) {
+    return !q.timeHorizon || q.timeHorizon === h;
+  }
+
+  for (const n of selected.filter((x) => x.level === 1)) {
+    const h = horizonForLevel(1);
+    if (!shouldIncludeHorizon(h)) continue;
+    edges.push(_buildEdge({ from: centerNode.id, to: n.id, label: h, timeHorizon: h }));
+  }
+
+  const L1Ids = selected.filter((x) => x.level === 1).map((x) => x.id);
+  const L2Ids = selected.filter((x) => x.level === 2).map((x) => x.id);
+
+  // Attach level-2 roles to level-1 parents in a round-robin way.
+  let p1 = 0;
+  for (const n of selected.filter((x) => x.level === 2)) {
+    const parent = L1Ids.length ? L1Ids[p1 % L1Ids.length] : centerNode.id;
+    p1 += 1;
+    const h = horizonForLevel(2);
+    if (!shouldIncludeHorizon(h)) continue;
+    edges.push(_buildEdge({ from: parent, to: n.id, label: h, timeHorizon: h }));
+  }
+
+  // Attach level-3 roles to level-2 parents if possible, else to level-1, else center.
+  let p2 = 0;
+  for (const n of selected.filter((x) => x.level === 3)) {
+    const parent = L2Ids.length
+      ? L2Ids[p2 % L2Ids.length]
+      : L1Ids.length
+        ? L1Ids[p2 % L1Ids.length]
+        : centerNode.id;
+    p2 += 1;
+    const h = horizonForLevel(3);
+    if (!shouldIncludeHorizon(h)) continue;
+    edges.push(_buildEdge({ from: parent, to: n.id, label: h, timeHorizon: h }));
+  }
+
+  // Now compute final node set:
+  // - Always include center
+  // - Include only nodes that are connected by at least one edge when timeHorizon filter is active.
   const connectedTargets = new Set(edges.map((e) => e.target));
-  const nodes = [center, ...rest.filter((n) => connectedTargets.has(n.id))];
+  const connectedSources = new Set(edges.map((e) => e.source));
+  const connectedAll = new Set([centerNode.id, ...Array.from(connectedTargets), ...Array.from(connectedSources)]);
+
+  const nodes = [
+    centerNode,
+    ...selected.filter((n) => (q.timeHorizon ? connectedAll.has(n.id) : true))
+  ];
 
   // Build per-node detail payloads.
   const detailsByNodeId = {};
   for (const node of nodes) {
-    detailsByNodeId[node.id] = _buildDetailsForNode(node, { centerNode: center });
+    detailsByNodeId[node.id] = _buildDetailsForNode(node, { centerNode });
   }
 
   return {
     meta: {
-      center: { id: center.id, label: center.label },
+      center: { id: centerNode.id, label: centerNode.label },
       filtersApplied: {
         minSalaryLpa: q.minSalaryLpa ?? null,
         maxSalaryLpa: q.maxSalaryLpa ?? null,
         minSkillSimilarity: q.minSkillSimilarity ?? null,
         timeHorizon: q.timeHorizon ?? null,
         limit
+      },
+      generation: {
+        model: 'multi_branch_v1',
+        counts: {
+          candidates: allCandidateNodes.length,
+          afterFilters: filteredCandidates.length,
+          level1: selected.filter((n) => n.level === 1).length,
+          level2: selected.filter((n) => n.level === 2).length,
+          level3: selected.filter((n) => n.level === 3).length
+        }
       }
     },
     nodes,
     edges,
     detailsByNodeId,
-    centerNodeId: center.id
+    centerNodeId: centerNode.id
   };
 }
 
