@@ -106,6 +106,10 @@ app.use('/api/mindmap', mindmapRouter);
 /**
  * Ensure the API surface never returns HTML 404 pages.
  * This prevents frontend JSON parsing crashes when a route is missing/mis-mounted.
+ *
+ * IMPORTANT:
+ * Keep this AFTER all intended /api/* route mounts (including /api/mindmap),
+ * otherwise valid routes can incorrectly fall through to this handler.
  */
 app.use('/api', (req, res) => {
   return res.status(404).json({
