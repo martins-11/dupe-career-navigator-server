@@ -38,9 +38,21 @@ const pathsRouter = require('./routes/paths');
 const planRouter = require('./routes/plan');
 const profileRouter = require('./routes/profile');
 const rolesRouter = require('./routes/roles');
-const mindmapRouter = require('./routes/mindmap');
 
 const app = express();
+
+// Mindmap router is optional-but-required for the Career Navigator UI.
+// If it fails to import (e.g., require-time error), Express would otherwise silently skip mounting,
+// causing requests like POST /api/mindmap/graph to fall through to the JSON /api 404 handler.
+// We mount it defensively and emit a clear startup-time log when it cannot be mounted.
+let mindmapRouter = null;
+try {
+  mindmapRouter = require('./routes/mindmap');
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.error('[routes] Failed to load mindmap router; /api/mindmap/* will 404:', err);
+  mindmapRouter = null;
+}
 
 // Best-effort runtime-safe schema fixups for known drift issues.
 // This must NOT prevent server startup (DB is optional in this project).
@@ -101,11 +113,68 @@ app.use('/api/paths', pathsRouter);
 app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
 app.use('/api/roles', rolesRouter);
-app.use('/api/mindmap', mindmapRouter);
+
+if (mindmapRouter) {
+  app.use('/api/mindmap', mindmapRouter);
+} else {
+  // eslint-disable-next-line no-console
+  console.warn('[routes] mindmap router not mounted; endpoints like POST /api/mindmap/graph will 404');
+}
+
+// Debug helper: list registered routes at runtime to verify mounting.
+// This is safe to leave in place; it contains no secrets and helps diagnose mis-mounted routers.
+app.get('/api/_debug/routes', (req, res) => {
+  const routes = [];
+
+  function collectFromStack(prefix, stack) {
+    for (const layer of stack || []) {
+      if (!layer) continue;
+
+      // Direct route on app/router
+      if (layer.route && layer.route.path) {
+        const methods = Object.keys(layer.route.methods || {}).filter((m) => layer.route.methods[m]);
+        routes.push({
+          path: `${prefix}${layer.route.path}`,
+          methods: methods.map((m) => m.toUpperCase())
+        });
+        continue;
+      }
+
+      // Nested router
+      if (layer.name === 'router' && layer.handle && Array.isArray(layer.handle.stack)) {
+        // Best-effort extraction of mount path from regexp (Express internals).
+        // If we can't parse it, we still traverse with the same prefix.
+        let mount = '';
+        const re = layer.regexp;
+        if (re && typeof re.source === 'string') {
+          // Handles common forms like ^\\/api\\/mindmap\\/?(?=\\/|$)
+          const m = re.source.match(/\\^\\\\\\\/(.*?)\\\\\\\/\\?\\(\\?=\\\\\\\/\\|\\$\\)/);
+          if (m && m[1]) mount = `/${m[1].replace(/\\\\\\\//g, '/')}`;
+          else {
+            const m2 = re.source.match(/\\^\\\\\\\/(.*?)\\(\\?:\\\\\\\/\\|\\$\\)/);
+            if (m2 && m2[1]) mount = `/${m2[1].replace(/\\\\\\\//g, '/')}`;
+          }
+        }
+        collectFromStack(`${prefix}${mount}`, layer.handle.stack);
+      }
+    }
+  }
+
+  collectFromStack('', app._router?.stack);
+
+  // Sort for readability
+  routes.sort((a, b) => a.path.localeCompare(b.path) || a.methods.join(',').localeCompare(b.methods.join(',')));
+
+  res.json({ count: routes.length, routes });
+});
 
 /**
  * Ensure the API surface never returns HTML 404 pages.
  * This prevents frontend JSON parsing crashes when a route is missing/mis-mounted.
+ *
+ * IMPORTANT:
+ * Keep this AFTER all intended /api/* route mounts (including /api/mindmap),
+ * otherwise valid routes can incorrectly fall through to this handler.
  */
 app.use('/api', (req, res) => {
   return res.status(404).json({
