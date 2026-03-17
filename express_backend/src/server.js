@@ -97,6 +97,12 @@ app.use('/ai', aiRouter);
 app.use('/orchestration', orchestrationRouter);
 
 app.use('/documents', documentsRouter);
+
+// Compatibility mount:
+// Frontend calls /api/documents (same-origin) while the canonical backend routes live at /documents/*.
+// Mount both to avoid 404: "No route for GET /api/documents?limit=50&offset=0".
+app.use('/api/documents', documentsRouter);
+
 app.use('/personas', personasRouter);
 
 // Compatibility mount:
