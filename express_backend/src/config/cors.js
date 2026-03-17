@@ -4,19 +4,50 @@
  * Build CORS options from environment variables already present in the container .env.
  */
 
-// PUBLIC_INTERFACE
+/**
+ * PUBLIC_INTERFACE
+ * buildCorsOptions
+ *
+ * Builds the CORS options used by the Express app.
+ *
+ * Design goals:
+ * - Be strict when an allowlist is explicitly provided.
+ * - Be robust in Kavia preview environments where the vscode-internal hostname changes.
+ * - Always allow localhost:3000 for local dev.
+ * - Always allow the configured FRONTEND_URL origin when present.
+ */
 function buildCorsOptions() {
   /** Build CORS options used by the Express app. */
-  const originsRaw = process.env.ALLOWED_ORIGINS || '';
+
+  // If ALLOWED_ORIGINS is set, we enforce it (plus additive safe origins below).
+  // If it is NOT set, we default to permissive behavior for dev/preview friendliness.
+  const originsRaw = (process.env.ALLOWED_ORIGINS || '').trim();
+  const allowlistEnabled = originsRaw.length > 0;
+
   const allowedOrigins = originsRaw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+    ? originsRaw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
 
   // Always allow local frontend dev origin (explicit requirement).
-  // This is additive; if ALLOWED_ORIGINS is set, localhost:3000 will still be allowed.
   if (!allowedOrigins.includes('http://localhost:3000')) {
     allowedOrigins.push('http://localhost:3000');
+  }
+
+  // Also allow the active frontend origin derived from FRONTEND_URL.
+  // This prevents stale ALLOWED_ORIGINS values from breaking the preview.
+  try {
+    const frontendUrl = (process.env.FRONTEND_URL || '').trim();
+    if (frontendUrl) {
+      const frontendOrigin = new URL(frontendUrl).origin;
+      if (!allowedOrigins.includes(frontendOrigin)) {
+        allowedOrigins.push(frontendOrigin);
+      }
+    }
+  } catch {
+    // Ignore invalid FRONTEND_URL
   }
 
   const allowedHeaders = (process.env.ALLOWED_HEADERS || 'Content-Type,Authorization')
@@ -35,21 +66,18 @@ function buildCorsOptions() {
   // Observed examples:
   //   https://vscode-internal-17827.cloud.kavia.ai:3000
   //   https://vscode-internal-17827-beta.beta01.cloud.kavia.ai:3000
-  //
-  // We accept both host shapes.
   const kaviaPreviewFrontendOriginRe =
-    /^https:\/\/vscode-internal-[a-z0-9-]+(?:\.beta\.beta01)?\.cloud\.kavia\.ai:3000$/i;
+    /^https:\/\/vscode-internal-[a-z0-9-]+(?:-beta\.beta01)?\.cloud\.kavia\.ai:3000$/i;
 
   return {
     origin: (origin, cb) => {
-      // Allow non-browser clients or same-origin
+      // Allow non-browser clients (curl/postman/server-to-server) or same-origin
       if (!origin) return cb(null, true);
 
-      // If ALLOWED_ORIGINS isn't set, default to permissive behavior
-      // (useful for internal tooling / non-browser clients).
-      if (allowedOrigins.length === 0) return cb(null, true);
+      // If no explicit allowlist is configured, be permissive.
+      if (!allowlistEnabled) return cb(null, true);
 
-      // Explicit allowlist (env + localhost)
+      // Explicit allowlist (env + localhost + FRONTEND_URL-derived)
       if (allowedOrigins.includes(origin)) return cb(null, true);
 
       // Dynamic preview allowlist
@@ -60,7 +88,7 @@ function buildCorsOptions() {
     methods: allowedMethods,
     allowedHeaders,
     maxAge,
-    credentials: true
+    credentials: true,
   };
 }
 
