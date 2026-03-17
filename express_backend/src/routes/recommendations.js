@@ -212,9 +212,9 @@ async function handleInitialRecommendations(req, res) {
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
-    if (roles.length < 1 || roles.length > 5) {
+    if (roles.length < 5 || roles.length > 5) {
       const err = new Error(
-        `Initial recommendations generator returned ${roles.length} roles; expected 1–5 Bedrock-generated roles.`
+        `Initial recommendations generator returned ${roles.length} roles; expected exactly 5 roles (padded to minimum when Bedrock returns fewer).`
       );
       err.code = 'initial_recommendations_invalid_count';
       err.httpStatus = 502;

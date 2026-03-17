@@ -45,6 +45,11 @@ function _threeTwoValidationScore(threeTwoReport) {
 function _rerankByThreeTwoAndCompatibility(scoredRoles) {
   const arr = Array.isArray(scoredRoles) ? [...scoredRoles] : [];
   arr.sort((a, b) => {
+    // Prefer real Bedrock roles over padded fallback roles.
+    const aFallback = Boolean(a?.match_metadata?.isFallbackFilled);
+    const bFallback = Boolean(b?.match_metadata?.isFallbackFilled);
+    if (aFallback !== bFallback) return aFallback ? 1 : -1;
+
     const aThreeTwo = _threeTwoValidationScore(a?.threeTwoReport);
     const bThreeTwo = _threeTwoValidationScore(b?.threeTwoReport);
 
@@ -201,6 +206,116 @@ function _markNonFallback(role) {
     }
   };
 }
+
+/**
+ * Rich deterministic fallback catalog for initial recommendations padding.
+ *
+ * NOTE:
+ * We keep this local (instead of importing from bedrockService) so this module
+ * can always guarantee "at least 5 roles" even when Bedrock returns fewer valid
+ * roles due to output validation/deduping.
+ */
+const INITIAL_RECOMMENDATIONS_FALLBACK_CATALOG = [
+  {
+    role_title: 'Full-Stack Software Engineer',
+    industry: 'Technology',
+    salary_lpa_range: '₹18–₹30 LPA',
+    experience_range: '3–5 years',
+    description:
+      'Builds end-to-end web products across frontend and backend systems. Owns features from design to production with a focus on reliability and iteration speed.',
+    key_responsibilities: [
+      'Deliver full-stack features from design to production',
+      'Design and integrate APIs and data models',
+      'Improve performance, testing, and developer tooling'
+    ],
+    required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git', 'Communication']
+  },
+  {
+    role_title: 'Backend Engineer (Node.js)',
+    industry: 'Technology',
+    salary_lpa_range: '₹20–₹35 LPA',
+    experience_range: '3–6 years',
+    description:
+      'Designs and operates scalable backend services and APIs used by multiple product surfaces. Focuses on performance, reliability, and observability in production.',
+    key_responsibilities: [
+      'Build and maintain high-throughput APIs',
+      'Optimize database queries and service performance',
+      'Implement monitoring, logging, and on-call readiness'
+    ],
+    required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability', 'Collaboration']
+  },
+  {
+    role_title: 'Data Analyst',
+    industry: 'Technology',
+    salary_lpa_range: '₹10–₹18 LPA',
+    experience_range: '2–4 years',
+    description:
+      'Turns raw business data into actionable insights for product and operations teams. Partners with stakeholders to define metrics, dashboards, and decision frameworks.',
+    key_responsibilities: [
+      'Define metrics and build dashboards for stakeholders',
+      'Analyze trends and root causes using SQL',
+      'Communicate insights and recommendations clearly'
+    ],
+    required_skills: ['SQL', 'Excel', 'Data Visualization', 'Statistics', 'Dashboards', 'Stakeholder Management']
+  },
+  {
+    role_title: 'Technical Product Manager',
+    industry: 'Technology',
+    salary_lpa_range: '₹22–₹40 LPA',
+    experience_range: '4–7 years',
+    description:
+      'Leads product strategy and execution for technical initiatives requiring deep engineering partnership. Translates customer needs into roadmaps and measurable outcomes.',
+    key_responsibilities: [
+      'Own roadmap and prioritize tradeoffs',
+      'Write clear requirements and align stakeholders',
+      'Measure impact via experimentation and analytics'
+    ],
+    required_skills: ['Roadmapping', 'Prioritization', 'User Research', 'Analytics', 'Communication', 'Stakeholder Management']
+  },
+  {
+    role_title: 'DevOps Engineer',
+    industry: 'Technology',
+    salary_lpa_range: '₹18–₹32 LPA',
+    experience_range: '3–6 years',
+    description:
+      'Builds and maintains the infrastructure and deployment pipelines that keep services reliable. Improves security posture, release velocity, and incident response tooling.',
+    key_responsibilities: [
+      'Build CI/CD pipelines and deployment automation',
+      'Manage cloud infrastructure and incident response',
+      'Implement monitoring, security, and reliability best practices'
+    ],
+    required_skills: ['AWS', 'Docker', 'Kubernetes', 'CI/CD', 'Monitoring', 'Infrastructure as Code', 'Incident Management']
+  },
+  // Extra items to increase padding diversity / dedupe safety:
+  {
+    role_title: 'Business Analyst',
+    industry: 'Technology',
+    salary_lpa_range: '₹12–₹22 LPA',
+    experience_range: '3–6 years',
+    description:
+      'Bridges business needs and engineering execution by defining requirements and success metrics. Produces clear specs and collaborates across stakeholders to deliver outcomes.',
+    key_responsibilities: [
+      'Gather requirements and map business processes',
+      'Write functional specifications and acceptance criteria',
+      'Track outcomes through KPIs and stakeholder reviews'
+    ],
+    required_skills: ['Requirements Gathering', 'Process Mapping', 'Documentation', 'SQL', 'Analytics', 'Communication']
+  },
+  {
+    role_title: 'QA Automation Engineer',
+    industry: 'Technology',
+    salary_lpa_range: '₹10–₹20 LPA',
+    experience_range: '2–5 years',
+    description:
+      'Builds automated testing suites to ensure product quality across releases. Works closely with engineers to prevent regressions and improve test reliability.',
+    key_responsibilities: [
+      'Design and maintain automated test suites',
+      'Integrate tests into CI pipelines and improve coverage',
+      'Investigate failures and partner on bug prevention'
+    ],
+    required_skills: ['Test Automation', 'JavaScript', 'Playwright', 'CI/CD', 'Debugging', 'Test Strategy']
+  }
+];
 
 function _padToExactlyFiveRoles({ bedrockRoles, fallbackCatalog }) {
   /**
@@ -441,7 +556,17 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
 
   const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 5);
 
-  const scored = _scoreRoles(finalPersona, uniqueBedrock).map((r) => ({
+  // Enforce minimum display count for Explore: pad Bedrock output to exactly 5.
+  const padded = _padToExactlyFiveRoles({
+    bedrockRoles: uniqueBedrock,
+    fallbackCatalog: INITIAL_RECOMMENDATIONS_FALLBACK_CATALOG
+  });
+
+  const paddedRoles = Array.isArray(padded?.roles) ? padded.roles : [];
+  const paddedCount = Number.isFinite(padded?.paddedCount) ? padded.paddedCount : 0;
+  const endpointPaddingUsed = paddedCount > 0;
+
+  const scored = _scoreRoles(finalPersona, paddedRoles).map((r) => ({
     ...r,
     match_metadata: {
       ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
@@ -455,7 +580,7 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
     },
   }));
 
-  const reranked = _rerankByThreeTwoAndCompatibility(scored);
+  const reranked = _rerankByThreeTwoAndCompatibility(scored).slice(0, 5);
 
   return {
     roles: reranked,
@@ -467,10 +592,10 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       onetError: null,
       bedrockUsedFallback: false,
       endpointFallbackUsed: false,
-      endpointPaddingUsed: false,
-      paddedCount: 0,
+      endpointPaddingUsed,
+      paddedCount: endpointPaddingUsed ? paddedCount : 0,
       bedrockError: null,
-      rerankedBy: 'threeTwoValidation_then_compatibility',
+      rerankedBy: 'bedrock_first_then_threeTwoValidation_then_compatibility',
     },
   };
 }
