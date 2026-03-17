@@ -557,26 +557,51 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   const hasPersonaProficiencies = Array.isArray(profs) && profs.length > 0;
 
   const maxAttemptsRaw = Number(opt.maxAttempts);
-  const maxAttempts = Number.isFinite(maxAttemptsRaw) ? Math.max(1, Math.min(3, Math.floor(maxAttemptsRaw))) : 2;
+  const maxAttemptsDefault = Number.isFinite(maxAttemptsRaw)
+    ? Math.max(1, Math.min(3, Math.floor(maxAttemptsRaw)))
+    : 2;
 
   const initialRequestedCountRaw = Number(opt.requestedCount);
   const initialRequestedCount = Number.isFinite(initialRequestedCountRaw)
     ? Math.max(minCount, Math.min(10, Math.floor(initialRequestedCountRaw)))
     : Math.min(10, Math.max(minCount, 7));
 
+  // Enforce a single global time budget across all Bedrock attempts.
+  const startMs = Date.now();
+  const totalBudgetRaw = Number(opt.timeBudgetMs);
+  const totalBudgetMs = Number.isFinite(totalBudgetRaw) && totalBudgetRaw > 0 ? totalBudgetRaw : null;
+  const deadlineMs = totalBudgetMs != null ? startMs + totalBudgetMs : null;
+
+  const remainingMs = () => (deadlineMs == null ? null : Math.max(0, deadlineMs - Date.now()));
+
   let lastBedrockResult = null;
   let finalBedrockUnique = [];
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttemptsDefault; attempt += 1) {
+    const rem = remainingMs();
+
+    // If we are close to the request timeout, stop trying and let padding/error handling decide.
+    if (rem != null && rem < 1200) break;
+
     const requestedCount = Math.min(10, initialRequestedCount + (attempt - 1) * 2);
 
-    // Always strict Bedrock invocation here; fallback padding (if any) is applied at THIS layer only.
-    // We also pass through route-provided timeBudgetMs to avoid request timeout.
+    // Allocate the *remaining* time to this attempt (minus a small buffer for parsing/scoring).
+    const attemptBudgetMs = rem != null ? Math.max(1, rem - 250) : undefined;
+
+    /**
+     * IMPORTANT:
+     * - Disable nested retries inside bedrockService.getInitialRecommendations, because this
+     *   service already performs multiple attempts.
+     * - This prevents worst-case latency from stacking (retries * attempts).
+     */
     const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
       context: null,
       allowFallback: false,
       count: requestedCount,
-      ...(opt && typeof opt === 'object' ? opt : {})
+      retries: 0,
+      retryDelayMs: 0,
+      ...(opt && typeof opt === 'object' ? opt : {}),
+      ...(attemptBudgetMs != null ? { timeBudgetMs: attemptBudgetMs } : {}),
     });
 
     lastBedrockResult = bedrockResult;
@@ -610,14 +635,14 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
         minCount,
         hadPersonaProficiencies: hasPersonaProficiencies,
         bedrockModelId: lastBedrockResult?.modelId || null,
-        returnedCount: rolesForScoring.length
+        returnedCount: rolesForScoring.length,
       };
       throw err;
     }
 
     const padded = _padToExactlyFiveRoles({
       bedrockRoles: rolesForScoring,
-      fallbackCatalog: INITIAL_RECOMMENDATIONS_FALLBACK_CATALOG
+      fallbackCatalog: INITIAL_RECOMMENDATIONS_FALLBACK_CATALOG,
     });
 
     rolesForScoring = Array.isArray(padded?.roles) ? padded.roles.slice(0, minCount) : rolesForScoring;

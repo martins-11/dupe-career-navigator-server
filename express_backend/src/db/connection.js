@@ -99,8 +99,26 @@ function _mysqlConfigFromEnv() {
   return { host, port, user, password, database };
 }
 
+function _parseTimeoutMs(envKey, fallbackMs) {
+  const raw = Number(process.env[envKey]);
+  if (!Number.isFinite(raw) || raw <= 0) return fallbackMs;
+  // Keep a reasonable upper bound to avoid accidentally setting extremely high timeouts.
+  return Math.max(250, Math.min(60000, Math.floor(raw)));
+}
+
 function _ensureMysqlPool() {
   if (_mysqlPool) return _mysqlPool;
+
+  /**
+   * CRITICAL HARDENING (timeout):
+   * In preview environments, DB env vars may be present but the DB may be unreachable
+   * (network policy / security group / DNS issues). mysql2's default connect behavior
+   * can take a long time, which blocks request handlers and surfaces as 504s.
+   *
+   * Make connection establishment fail fast by default; allow overrides via env.
+   */
+  const connectTimeout = _parseTimeoutMs('MYSQL_CONNECT_TIMEOUT_MS', 4000);
+  const acquireTimeout = _parseTimeoutMs('MYSQL_ACQUIRE_TIMEOUT_MS', 4000);
 
   const connectionString = process.env.MYSQL_CONNECTION_STRING;
   if (connectionString && connectionString.trim()) {
@@ -108,6 +126,8 @@ function _ensureMysqlPool() {
       uri: connectionString,
       waitForConnections: true,
       connectionLimit: 10,
+      connectTimeout,
+      acquireTimeout,
       ssl: _mysqlSslOptions()
     });
     return _mysqlPool;
@@ -123,6 +143,8 @@ function _ensureMysqlPool() {
     database: cfg.database,
     waitForConnections: true,
     connectionLimit: 10,
+    connectTimeout,
+    acquireTimeout,
     ssl: _mysqlSslOptions()
   });
 
@@ -149,15 +171,19 @@ function _ensurePgPool() {
   const connectionString = process.env.PG_CONNECTION_STRING;
   const ssl = _pgSslOptions();
 
+  // Similar hardening to MySQL: keep connection attempts bounded.
+  const connectionTimeoutMillis = _parseTimeoutMs('PG_CONNECT_TIMEOUT_MS', 4000);
+
   const poolConfig = connectionString
-    ? { connectionString, ssl }
+    ? { connectionString, ssl, connectionTimeoutMillis }
     : {
         host: process.env.PGHOST,
         port: process.env.PGPORT ? Number(process.env.PGPORT) : undefined,
         user: process.env.PGUSER,
         password: process.env.PGPASSWORD,
         database: process.env.PGDATABASE,
-        ssl
+        ssl,
+        connectionTimeoutMillis
       };
 
   _pgPool = new PgPool(poolConfig);

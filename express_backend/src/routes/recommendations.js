@@ -80,51 +80,6 @@ async function handleInitialRecommendations(req, res) {
       throw err;
     }
 
-    /**
-     * IMPORTANT HARDENING:
-     * The frontend may call this endpoint before the finalized persona has been persisted/retrievable
-     * (race conditions, eventual consistency, DB not configured, etc).
-     *
-     * If the client can provide the finalized persona JSON directly, we should still return a
-     * Bedrock-generated (or Bedrock-fallback) recommendation set rather than forcing the UI into a
-     * placeholder/example mode.
-     *
-     * Supported additive inputs (optional):
-     * - query.finalPersonaJson: JSON-stringified final persona
-     * - body.finalPersona: final persona object (if client uses POST in some environments)
-     */
-    let finalPersonaFromRequest = null;
-    const finalPersonaJsonRaw = req.query?.finalPersonaJson
-      ? String(req.query.finalPersonaJson).trim()
-      : '';
-    if (finalPersonaJsonRaw) {
-      try {
-        finalPersonaFromRequest = JSON.parse(finalPersonaJsonRaw);
-      } catch (_) {
-        // ignore; we'll fall back to DB lookup
-      }
-    } else if (req.body?.finalPersona && typeof req.body.finalPersona === 'object') {
-      finalPersonaFromRequest = req.body.finalPersona;
-    }
-
-    // 1) Load finalized persona (strictly personaId-driven)
-    // IMPORTANT:
-    // - /api/recommendations/initial must use the FINAL persona, not personaDraft, so scoring produces
-    //   validated mastery/growth areas.
-    // - Therefore, we prefer personasRepo.getFinal(personaId) first.
-    // - As a compatibility fallback (older data), we can still use latest persona version.
-    const [personaRow, finalWrap, latestVersion, draftWrap] = await Promise.allSettled([
-      personasRepo.getPersonaById(personaIdRaw),
-      personasRepo.getFinal(personaIdRaw),
-      personasRepo.getLatestPersonaVersion(personaIdRaw),
-      personasRepo.getDraft(personaIdRaw)
-    ]);
-
-    const personaRowValue = personaRow.status === 'fulfilled' ? personaRow.value : null;
-    const finalWrapValue = finalWrap.status === 'fulfilled' ? finalWrap.value : null;
-    const latestVersionValue = latestVersion.status === 'fulfilled' ? latestVersion.value : null;
-    const draftWrapValue = draftWrap.status === 'fulfilled' ? draftWrap.value : null;
-
     const coercePersonaJson = (value) => {
       if (!value) return null;
       let next = value;
@@ -150,18 +105,72 @@ async function handleInitialRecommendations(req, res) {
       );
     };
 
-    // Prefer explicit finalized persona blob, then fallback to versioned personaJson,
-    // then fallback to latest draft (if final is missing), then fallback to request-provided JSON.
-    let finalPersona =
-      coercePersonaJson(finalWrapValue?.finalJson || finalWrapValue) ||
-      coercePersonaJson(latestVersionValue?.personaJson || latestVersionValue) ||
-      coercePersonaJson(draftWrapValue?.draftJson || draftWrapValue) ||
-      coercePersonaJson(finalPersonaFromRequest) ||
-      null;
+    /**
+     * Additive input (optional): allow callers to pass final persona JSON directly to avoid
+     * DB timing/race issues.
+     */
+    let finalPersonaFromRequest = null;
+    const finalPersonaJsonRaw = req.query?.finalPersonaJson ? String(req.query.finalPersonaJson).trim() : '';
+    if (finalPersonaJsonRaw) {
+      try {
+        finalPersonaFromRequest = JSON.parse(finalPersonaJsonRaw);
+      } catch (_) {
+        // ignore
+      }
+    } else if (req.body?.finalPersona && typeof req.body.finalPersona === 'object') {
+      finalPersonaFromRequest = req.body.finalPersona;
+    }
 
-    // In strict mode, we do NOT proceed without a real persona.
-    // Otherwise Bedrock will be invoked with a placeholder and the user will see deterministic fallback roles,
-    // which is exactly the failure mode reported.
+    const now0 = Date.now();
+    const deadline0 =
+      Number(req.requestDeadlineMs) || (now0 + Number(process.env.REQUEST_TIMEOUT_MS || 30000));
+    const remaining0 = Math.max(0, deadline0 - now0);
+
+    /**
+     * CRITICAL HARDENING (avoid 504 due to DB hangs):
+     * If DB env vars are set but the DB is unreachable/slow, repo methods can take a long time.
+     * Do NOT wait for multiple DB lookups in parallel; instead try sources in priority order with
+     * short per-attempt timeouts, and keep Bedrock time budget intact.
+     */
+    const withTimeout = async (promise, ms, label) => {
+      const timeoutMs = Number.isFinite(ms) ? Math.max(50, ms) : 0;
+      if (!timeoutMs) return await promise;
+
+      return await Promise.race([
+        promise,
+        new Promise((resolve) => {
+          setTimeout(() => resolve(null), timeoutMs);
+        }),
+      ]).catch(() => null);
+    };
+
+    // Prefer request-provided persona (fastest) if present.
+    let finalPersona = coercePersonaJson(finalPersonaFromRequest);
+
+    // If not provided, attempt repo reads in priority order with a bounded time budget.
+    if (!finalPersona) {
+      // Keep persona lookup short; leave most time for Bedrock.
+      const personaLookupBudgetMs = Math.min(6000, Math.max(1500, Math.floor(remaining0 * 0.25)));
+      const perAttemptMs = Math.max(600, Math.floor(personaLookupBudgetMs / 3));
+
+      const finalWrapValue = await withTimeout(personasRepo.getFinal(personaIdRaw), perAttemptMs, 'getFinal');
+      finalPersona = coercePersonaJson(finalWrapValue?.finalJson || finalWrapValue);
+
+      if (!finalPersona) {
+        const latestVersionValue = await withTimeout(
+          personasRepo.getLatestPersonaVersion(personaIdRaw),
+          perAttemptMs,
+          'getLatestPersonaVersion'
+        );
+        finalPersona = coercePersonaJson(latestVersionValue?.personaJson || latestVersionValue);
+      }
+
+      if (!finalPersona) {
+        const draftWrapValue = await withTimeout(personasRepo.getDraft(personaIdRaw), perAttemptMs, 'getDraft');
+        finalPersona = coercePersonaJson(draftWrapValue?.draftJson || draftWrapValue);
+      }
+    }
+
     if (!finalPersona) {
       const err = new Error(
         'Final persona is missing or not retrievable for this personaId. Cannot generate persona-based recommendations.'
@@ -171,31 +180,23 @@ async function handleInitialRecommendations(req, res) {
       err.details = {
         personaId: personaIdRaw,
         resolutionTried: [
+          'query.finalPersonaJson / body.finalPersona',
           'personasRepo.getFinal(personaId)',
           'personasRepo.getLatestPersonaVersion(personaId)',
           'personasRepo.getDraft(personaId)',
-          'query.finalPersonaJson / body.finalPersona'
         ],
-        dbConfigured: typeof personasRepo.isDbConfigured === 'function' ? personasRepo.isDbConfigured() : null
+        dbConfigured: typeof personasRepo.isDbConfigured === 'function' ? personasRepo.isDbConfigured() : null,
       };
       throw err;
     }
 
-    // 2) Bedrock-only roles (exactly 5), with scored results.
-    // IMPORTANT: strict mode (no deterministic fallback). If Bedrock fails/invalid output, we want an error response.
-    /**
-     * Enforce a time budget so this endpoint returns within the requestTimeout window.
-     * - Default Express timeout middleware is 30s.
-     * - We reserve a small buffer for JSON serialization + persistence best-effort.
-     * - We cap Bedrock latency via bedrockService AbortController timeout (BEDROCK_TIMEOUT_CAP_MS default 12s).
-     */
+    // Enforce a time budget so this endpoint returns within the requestTimeout window.
     const now = Date.now();
     const deadline = Number(req.requestDeadlineMs) || (now + Number(process.env.REQUEST_TIMEOUT_MS || 30000));
     const remainingMs = Math.max(0, deadline - now);
     const bufferMs = 750; // leave time to respond even under load
     const timeBudgetMs = Math.max(0, remainingMs - bufferMs);
 
-    // If we are too close to timing out, fail fast.
     if (timeBudgetMs < 500) {
       const err = new Error('Request time budget exhausted before Bedrock invocation.');
       err.code = 'bedrock_timeout';
@@ -210,16 +211,13 @@ async function handleInitialRecommendations(req, res) {
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: personaIdRaw,
-      // Policy:
-      // - Default: Bedrock-only with retries; no deterministic padding.
-      // - Explicitly allow padding ONLY when allowPadding=true (query or env).
-      options: { timeBudgetMs, allowPadding }
+      options: { timeBudgetMs, allowPadding },
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
-    if (roles.length < 5 || roles.length > 5) {
+    if (roles.length !== 5) {
       const err = new Error(
-        `Initial recommendations generator returned ${roles.length} roles; expected exactly 5 roles (padded to minimum when Bedrock returns fewer).`
+        `Initial recommendations generator returned ${roles.length} roles; expected exactly 5 roles.`
       );
       err.code = 'initial_recommendations_invalid_count';
       err.httpStatus = 502;
@@ -233,7 +231,7 @@ async function handleInitialRecommendations(req, res) {
         personaId: personaIdRaw,
         buildId: null,
         inferredTags: [],
-        roles
+        roles,
       });
     } catch (_) {
       // ignore persistence failures
@@ -243,16 +241,12 @@ async function handleInitialRecommendations(req, res) {
       ...(result?.meta || {}),
       count: roles.length,
       personaFallbackReason: null,
-      // Initial recommendations must be Bedrock-only; keep this explicitly false for this route.
-      bedrockUsedFallback: false
+      bedrockUsedFallback: false,
     };
 
-    // If the request already timed out (or response was already sent), do not attempt a second response.
     if (req.timedOut || res.headersSent) return;
-
     return res.json({ roles, meta });
   } catch (err) {
-    // If timeout middleware already responded, avoid double-send.
     if (req.timedOut || res.headersSent) return;
     return sendError(res, err);
   }
