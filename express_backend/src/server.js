@@ -86,6 +86,11 @@ app.use('/health', healthRouter);
  * - /orchestration  (e.g., POST /orchestration/start)
  */
 app.use('/uploads', uploadsRouter);
+
+// Compatibility mount:
+// Frontend uses /api/uploads/* (same-origin) while the canonical backend routes live at /uploads/*.
+// Mount both to avoid 404: "No route for POST /api/uploads/documents".
+app.use('/api/uploads', uploadsRouter);
 app.use('/extraction', extractionRouter);
 app.use('/builds', buildsRouter);
 app.use('/ai', aiRouter);
