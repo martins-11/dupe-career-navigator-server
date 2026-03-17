@@ -32,10 +32,13 @@ function buildCorsOptions() {
   const maxAge = Number(process.env.CORS_MAX_AGE || 3600);
 
   // Allow dynamic Kavia preview origins for the frontend (port 3000).
-  // Example:
+  // Observed examples:
+  //   https://vscode-internal-17827.cloud.kavia.ai:3000
   //   https://vscode-internal-17827-beta.beta01.cloud.kavia.ai:3000
+  //
+  // We accept both host shapes.
   const kaviaPreviewFrontendOriginRe =
-    /^https:\/\/vscode-internal-[a-z0-9-]+\.cloud\.kavia\.ai:3000$/i;
+    /^https:\/\/vscode-internal-[a-z0-9-]+(?:\.beta\.beta01)?\.cloud\.kavia\.ai:3000$/i;
 
   return {
     origin: (origin, cb) => {
