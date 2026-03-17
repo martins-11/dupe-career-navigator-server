@@ -76,6 +76,10 @@ app.get('/', (req, res) => {
 
 app.use('/health', healthRouter);
 
+// Compatibility mount:
+// Some clients/tooling call health under /api/* (same-origin convention).
+app.use('/api/health', healthRouter);
+
 /**
  * Route mounts (verification note):
  * The following 5 base routers are required and must remain mounted (non-404 reachability):
@@ -91,10 +95,22 @@ app.use('/uploads', uploadsRouter);
 // Frontend uses /api/uploads/* (same-origin) while the canonical backend routes live at /uploads/*.
 // Mount both to avoid 404: "No route for POST /api/uploads/documents".
 app.use('/api/uploads', uploadsRouter);
+
 app.use('/extraction', extractionRouter);
+// Compatibility mount: /api/extraction/*
+app.use('/api/extraction', extractionRouter);
+
 app.use('/builds', buildsRouter);
+// Compatibility mount: /api/builds/*
+app.use('/api/builds', buildsRouter);
+
 app.use('/ai', aiRouter);
+// Compatibility mount: /api/ai/*
+app.use('/api/ai', aiRouter);
+
 app.use('/orchestration', orchestrationRouter);
+// Compatibility mount: /api/orchestration/* (required for POST /api/orchestration/run-all)
+app.use('/api/orchestration', orchestrationRouter);
 
 app.use('/documents', documentsRouter);
 
