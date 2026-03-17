@@ -1239,6 +1239,8 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
 }
 
 function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
+  const rawCount = Number(options?.count);
+  const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(10, Math.floor(rawCount))) : 5;
   const personaObj =
     finalPersona && typeof finalPersona === 'object'
       ? finalPersona.finalJson && typeof finalPersona.finalJson === 'object'
@@ -1345,7 +1347,7 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
     '',
     onetSnippet,
     'TASK:',
-    'Return EXACTLY 5 realistic India-market job roles that best fit this persona today.',
+    `Return EXACTLY ${count} realistic India-market job roles that best fit this persona today.`,
     '',
     'OUTPUT FORMAT:',
     'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
@@ -1386,11 +1388,20 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     envKeys: ['BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
   });
 
-  const prompt = _buildInitialRecommendationsPrompt(finalPersona, { context: options?.context || null });
+  const rawCount = Number(options?.count);
+  const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(10, Math.floor(rawCount))) : 5;
+
+  const prompt = _buildInitialRecommendationsPrompt(finalPersona, {
+    context: options?.context || null,
+    count
+  });
+
+  // Scale token budget slightly when requesting more roles.
+  const maxTokens = Math.max(600, Math.min(2000, 1100 + Math.max(0, count - 5) * 160));
 
   const body = {
     anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 1100,
+    max_tokens: maxTokens,
     temperature: 0.2,
     messages: [
       {
@@ -1562,8 +1573,8 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       throw err;
     }
 
-    // Return up to 5; do not error if fewer than 5 are valid.
-    return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
+    // Return up to requested count; do not error if fewer than 5 are valid.
+    return { roles: roles.slice(0, count), usedFallback: false, modelId, prompt };
   };
 
   try {
@@ -1605,7 +1616,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const validatedFallback = _validateAndNormalizeInitialRecommendations(fallbackRoles, { debug: false });
 
     return {
-      roles: (validatedFallback?.roles || []).slice(0, 5),
+      roles: (validatedFallback?.roles || []).slice(0, count),
       usedFallback: true,
       modelId,
       prompt,

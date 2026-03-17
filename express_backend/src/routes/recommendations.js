@@ -203,12 +203,17 @@ async function handleInitialRecommendations(req, res) {
       throw err;
     }
 
+    const allowPadding =
+      String(req.query?.allowPadding || '').toLowerCase() === 'true' ||
+      String(process.env.RECOMMENDATIONS_INITIAL_ALLOW_PADDING || '').toLowerCase() === 'true';
+
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: personaIdRaw,
-      // Bedrock-only endpoint: do not allow deterministic fallback from this route.
-      // (If Bedrock fails, surface 5xx with details via sendError.)
-      options: { timeBudgetMs }
+      // Policy:
+      // - Default: Bedrock-only with retries; no deterministic padding.
+      // - Explicitly allow padding ONLY when allowPadding=true (query or env).
+      options: { timeBudgetMs, allowPadding }
     });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];

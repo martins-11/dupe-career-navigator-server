@@ -524,13 +524,18 @@ function _scoreRoles(finalPersona, roles) {
 
 /**
  * PUBLIC_INTERFACE
- * Generate initial recommendations (Bedrock-only; returns 1–5 roles).
+ * Generate initial recommendations (Bedrock-first; returns at least minCount roles).
  *
- * Behavior:
- * - Returns ONLY roles produced by Bedrock (after normalization + dedupe).
- * - Allows returning fewer than 5 roles; NO deterministic padding/fill is applied.
- * - Bedrock internal fallback is disabled; if Bedrock fails entirely, this function throws.
- * - Scoring uses ONLY numeric proficiencies; if none exist, scoring is skipped gracefully.
+ * Policy:
+ * - Prefer returning >= minCount roles sourced from Bedrock output (no mixing).
+ * - If Bedrock returns fewer valid/unique roles after validation/dedupe, we retry once requesting
+ *   more roles (e.g., 7 → 9) to compensate for invalid entries/duplicates.
+ * - Deterministic fallback padding is ONLY used when explicitly enabled (options.allowPadding=true).
+ *
+ * Defaults:
+ * - minCount=5 (Explore grid requirement)
+ * - requestedCount=7 (ask Bedrock for >5 to survive validation + dedupe)
+ * - maxAttempts=2
  */
 async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPersona, personaId, options = {} } = {}) {
   if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
@@ -540,33 +545,86 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
     throw err;
   }
 
+  const opt = options && typeof options === 'object' ? options : {};
+  const minCountRaw = Number(opt.minCount);
+  const minCount = Number.isFinite(minCountRaw) ? Math.max(1, Math.min(5, Math.floor(minCountRaw))) : 5;
+
+  const allowPadding =
+    opt.allowPadding === true ||
+    String(process.env.RECOMMENDATIONS_INITIAL_ALLOW_PADDING || '').toLowerCase() === 'true';
+
   const profs = _extractPersonaSkillsWithProficiency(finalPersona);
   const hasPersonaProficiencies = Array.isArray(profs) && profs.length > 0;
 
-  const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
-    context: null,
-    allowFallback: false,
-    ...(options && typeof options === 'object' ? options : {})
-  });
+  const maxAttemptsRaw = Number(opt.maxAttempts);
+  const maxAttempts = Number.isFinite(maxAttemptsRaw) ? Math.max(1, Math.min(3, Math.floor(maxAttemptsRaw))) : 2;
 
-  // Normalize and mark Bedrock roles as non-fallback, then dedupe and cap to 5.
-  const cleanedBedrock = (Array.isArray(bedrockResult?.roles) ? bedrockResult.roles : [])
-    .map(_markNonFallback)
-    .filter(Boolean);
+  const initialRequestedCountRaw = Number(opt.requestedCount);
+  const initialRequestedCount = Number.isFinite(initialRequestedCountRaw)
+    ? Math.max(minCount, Math.min(10, Math.floor(initialRequestedCountRaw)))
+    : Math.min(10, Math.max(minCount, 7));
 
-  const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 5);
+  let lastBedrockResult = null;
+  let finalBedrockUnique = [];
 
-  // Enforce minimum display count for Explore: pad Bedrock output to exactly 5.
-  const padded = _padToExactlyFiveRoles({
-    bedrockRoles: uniqueBedrock,
-    fallbackCatalog: INITIAL_RECOMMENDATIONS_FALLBACK_CATALOG
-  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const requestedCount = Math.min(10, initialRequestedCount + (attempt - 1) * 2);
 
-  const paddedRoles = Array.isArray(padded?.roles) ? padded.roles : [];
-  const paddedCount = Number.isFinite(padded?.paddedCount) ? padded.paddedCount : 0;
-  const endpointPaddingUsed = paddedCount > 0;
+    // Always strict Bedrock invocation here; fallback padding (if any) is applied at THIS layer only.
+    // We also pass through route-provided timeBudgetMs to avoid request timeout.
+    const bedrockResult = await bedrockService.getInitialRecommendations(finalPersona, {
+      context: null,
+      allowFallback: false,
+      count: requestedCount,
+      ...(opt && typeof opt === 'object' ? opt : {})
+    });
 
-  const scored = _scoreRoles(finalPersona, paddedRoles).map((r) => ({
+    lastBedrockResult = bedrockResult;
+
+    const cleanedBedrock = (Array.isArray(bedrockResult?.roles) ? bedrockResult.roles : [])
+      .map(_markNonFallback)
+      .filter(Boolean);
+
+    const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 10);
+
+    if (uniqueBedrock.length >= minCount) {
+      finalBedrockUnique = uniqueBedrock.slice(0, minCount);
+      break;
+    }
+
+    finalBedrockUnique = uniqueBedrock;
+  }
+
+  let rolesForScoring = finalBedrockUnique.slice(0, minCount);
+  let paddedCount = 0;
+
+  if (rolesForScoring.length < minCount) {
+    if (!allowPadding) {
+      const err = new Error(
+        `Bedrock returned ${rolesForScoring.length} valid/unique roles; expected at least ${minCount}.`
+      );
+      err.code = 'bedrock_insufficient_roles';
+      err.httpStatus = 502;
+      err.details = {
+        personaId: personaId || null,
+        minCount,
+        hadPersonaProficiencies: hasPersonaProficiencies,
+        bedrockModelId: lastBedrockResult?.modelId || null,
+        returnedCount: rolesForScoring.length
+      };
+      throw err;
+    }
+
+    const padded = _padToExactlyFiveRoles({
+      bedrockRoles: rolesForScoring,
+      fallbackCatalog: INITIAL_RECOMMENDATIONS_FALLBACK_CATALOG
+    });
+
+    rolesForScoring = Array.isArray(padded?.roles) ? padded.roles.slice(0, minCount) : rolesForScoring;
+    paddedCount = Number.isFinite(padded?.paddedCount) ? padded.paddedCount : 0;
+  }
+
+  const scored = _scoreRoles(finalPersona, rolesForScoring).map((r) => ({
     ...r,
     match_metadata: {
       ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
@@ -576,11 +634,11 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       },
       grounding: { source: 'none' },
       bedrockUsedFallback: false,
-      bedrockModelId: bedrockResult?.modelId || null,
+      bedrockModelId: lastBedrockResult?.modelId || null,
     },
   }));
 
-  const reranked = _rerankByThreeTwoAndCompatibility(scored).slice(0, 5);
+  const reranked = _rerankByThreeTwoAndCompatibility(scored).slice(0, minCount);
 
   return {
     roles: reranked,
@@ -592,8 +650,8 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       onetError: null,
       bedrockUsedFallback: false,
       endpointFallbackUsed: false,
-      endpointPaddingUsed,
-      paddedCount: endpointPaddingUsed ? paddedCount : 0,
+      endpointPaddingUsed: paddedCount > 0,
+      paddedCount: paddedCount > 0 ? paddedCount : 0,
       bedrockError: null,
       rerankedBy: 'bedrock_first_then_threeTwoValidation_then_compatibility',
     },
