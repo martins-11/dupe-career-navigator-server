@@ -174,14 +174,29 @@ app.get('/api/_debug/routes', (req, res) => {
         // Best-effort extraction of mount path from regexp (Express internals).
         let mount = '';
         const re = layer.regexp;
+
         if (re && typeof re.source === 'string') {
-          const m = re.source.match(/\\^\\\\\\/(.*?)\\\\\\/\\?\\(\\?=\\\\\\/\\|\\$\\)/);
-          if (m && m[1]) mount = `/${m[1].replace(/\\\\\\//g, '/')}`;
+          /**
+           * NOTE (Node 18 ESM parser safety):
+           * Avoid regex literals here because some Express regexp `.source` strings can contain
+           * escape sequences that make a regex literal ambiguous to the JS parser in certain
+           * environments, causing a startup-time SyntaxError.
+           *
+           * Using `new RegExp(string)` keeps the pattern identical while avoiding parser edge cases.
+           */
+          const m = re.source.match(
+            new RegExp('\\\\^\\\\\\\\\\\\/(.*?)\\\\\\\\\\\\/\\\\?\\\\(\\\\?=\\\\\\\\\\\\/\\\\|\\\\$\\\\)')
+          );
+
+          if (m && m[1]) mount = `/${m[1].replace(/\\\\\\\\\\\\//g, '/')}`;
           else {
-            const m2 = re.source.match(/\\^\\\\\\/(.*?)\\(\\?:\\\\\\/\\|\\$\\)/);
-            if (m2 && m2[1]) mount = `/${m2[1].replace(/\\\\\\//g, '/')}`;
+            const m2 = re.source.match(
+              new RegExp('\\\\^\\\\\\\\\\\\/(.*?)\\\\(\\\\?:\\\\\\\\\\\\/\\\\|\\\\$\\\\)')
+            );
+            if (m2 && m2[1]) mount = `/${m2[1].replace(/\\\\\\\\\\\\//g, '/')}`;
           }
         }
+
         collectFromStack(`${prefix}${mount}`, layer.handle.stack);
       }
     }
