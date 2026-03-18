@@ -1,9 +1,10 @@
-'use strict';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 let pdfParse = null;
 try {
   // Optional dependency.
-  // eslint-disable-next-line global-require
   pdfParse = require('pdf-parse');
 } catch (e) {
   pdfParse = null;
@@ -12,7 +13,6 @@ try {
 let mammoth = null;
 try {
   // Optional dependency for DOCX text extraction.
-  // eslint-disable-next-line global-require
   mammoth = require('mammoth');
 } catch (e) {
   mammoth = null;
@@ -40,7 +40,7 @@ function _normalizeNewlines(text) {
 }
 
 // PUBLIC_INTERFACE
-async function extractTextFromUploadedFile({ filename, mimeType, buffer }) {
+export async function extractTextFromUploadedFile({ filename, mimeType, buffer }) {
   /**
    * Extract text from an uploaded file buffer.
    *
@@ -207,5 +207,3 @@ async function extractTextFromUploadedFile({ filename, mimeType, buffer }) {
   // Unknown type: return null (caller can decide what to do).
   return null;
 }
-
-module.exports = { extractTextFromUploadedFile };
