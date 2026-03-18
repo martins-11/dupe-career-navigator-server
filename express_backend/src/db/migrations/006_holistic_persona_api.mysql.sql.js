@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * MySQL migration: persistence tables for the Holistic Persona /api endpoints.
@@ -18,7 +18,7 @@
  */
 
 // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for creating Holistic Persona API persistence tables in MySQL. */
   return `
 -- 006_holistic_persona_api (mysql)
@@ -100,4 +100,4 @@ CREATE TABLE IF NOT EXISTS profile_scoring (
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };

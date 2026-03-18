@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * MySQL migration: user_targets table
@@ -12,7 +12,7 @@
  */
 
 // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for creating the user_targets table in MySQL. */
   return `
 -- 008_user_targets (mysql)
@@ -43,4 +43,4 @@ CREATE TABLE IF NOT EXISTS user_targets (
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };

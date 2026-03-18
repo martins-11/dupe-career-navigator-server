@@ -1,4 +1,4 @@
-'use strict';
+/* eslint-disable no-console */
 
 /**
  * Shared error helpers for consistent API error responses.
@@ -122,7 +122,7 @@ function _statusForError(err) {
  * @param {{ defaultStatus?: 400|404|422|500, defaultErrorCode?: string }} [opts]
  * @returns {import('express').Response}
  */
-function sendError(res, err, opts = {}) {
+export function sendError(res, err, opts = {}) {
   const status = _statusForError(err) || opts.defaultStatus || 500;
 
   // Shape the payload based on error type
@@ -178,4 +178,4 @@ function sendError(res, err, opts = {}) {
   return res.status(500).json(payload);
 }
 
-module.exports = { sendError };
+

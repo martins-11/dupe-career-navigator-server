@@ -1,10 +1,8 @@
-'use strict';
-
-const express = require('express');
-const { getZod } = require('../utils/zod');
-const { uuidV4 } = require('../utils/uuid');
-const { extractTextFromUploadedFile } = require('../services/extractionService');
-const { normalizeText } = require('../services/normalizationService');
+import express from 'express';
+import { getZod } from '../utils/zod.js';
+import { uuidV4 } from '../utils/uuid.js';
+import { extractTextFromUploadedFile } from '../services/extractionService.js';
+import { normalizeText } from '../services/normalizationService.js';
 
 const router = express.Router();
 
@@ -223,4 +221,4 @@ router.post('/normalize', async (req, res) => {
   });
 });
 
-module.exports = router;
+export default router;

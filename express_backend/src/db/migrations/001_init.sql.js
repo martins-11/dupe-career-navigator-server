@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * Placeholder "migration" representing the documented PostgreSQL schema.
@@ -15,7 +15,7 @@
  */
 
 // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for initializing the database schema (placeholder). */
 
   // Note: Keep to conservative Postgres types, UUID primary keys, and timestamps.
@@ -80,4 +80,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_persona_versions_persona_id_version
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };

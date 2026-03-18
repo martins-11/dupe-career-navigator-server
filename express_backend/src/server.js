@@ -134,8 +134,16 @@ app.use('/api/personas', personasRouter);
 
 app.use('/api/recommendations', recommendationsRouter);
 
-// Safety-net mount: ensure GET /api/recommendations/initial is reachable exactly here
-if (typeof recommendationsRouter.getInitialRecommendationsHandler === 'function') {
+/**
+ * Safety-net mount: ensure GET /api/recommendations/initial is reachable exactly here.
+ *
+ * After ESM conversion, the recommendations router is a default export router object and
+ * we attach `getInitialRecommendationsHandler` as a property on it.
+ */
+if (
+  recommendationsRouter &&
+  typeof recommendationsRouter.getInitialRecommendationsHandler === 'function'
+) {
   app.get('/api/recommendations/initial', recommendationsRouter.getInitialRecommendationsHandler());
 }
 

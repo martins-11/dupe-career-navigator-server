@@ -1,15 +1,17 @@
-'use strict';
+import path from 'path';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
 
-const path = require('path');
-const dotenv = require('dotenv');
+import { getDbEngine, isDbConfigured, dbQuery, dbClose } from './connection.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * Ensure environment variables are loaded from express_backend/.env even when
  * the script is executed with a different working directory (common in CI).
  */
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
-
-const { getDbEngine, isDbConfigured, dbQuery, dbClose } = require('./connection');
 
 const REQUIRED_TABLES = [
   'builds',
@@ -47,7 +49,11 @@ async function _getExistingTablesMysql(tableNames) {
   // mysql2 returns uppercase keys by default (e.g. TABLE_NAME), but we alias to tableName.
   const rows = (res && res.rows) || [];
   return rows
-    .map((r) => (r && (r.tableName || r.TABLENAME || r.TABLE_NAME || r.table_name) ? String(r.tableName || r.TABLENAME || r.TABLE_NAME || r.table_name) : null))
+    .map((r) =>
+      r && (r.tableName || r.TABLENAME || r.TABLE_NAME || r.table_name)
+        ? String(r.tableName || r.TABLENAME || r.TABLE_NAME || r.table_name)
+        : null
+    )
     .filter(Boolean);
 }
 
@@ -65,7 +71,7 @@ async function _getExistingTablesPostgres(tableNames) {
 }
 
 // PUBLIC_INTERFACE
-async function verifyRequiredTables() {
+export async function verifyRequiredTables() {
   /**
    * Verify that required tables exist in the configured database.
    *
@@ -76,9 +82,7 @@ async function verifyRequiredTables() {
   const engine = getDbEngine();
 
   // eslint-disable-next-line no-console
-  console.log(
-    `[db:verify] engine=${engine} requiredTables=${REQUIRED_TABLES.join(',')}`
-  );
+  console.log(`[db:verify] engine=${engine} requiredTables=${REQUIRED_TABLES.join(',')}`);
 
   if (!isDbConfigured()) {
     // eslint-disable-next-line no-console
@@ -125,6 +129,6 @@ async function verifyRequiredTables() {
   }
 }
 
-verifyRequiredTables();
+void verifyRequiredTables();
 
-module.exports = { verifyRequiredTables };
+export default { verifyRequiredTables };

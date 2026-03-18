@@ -1,8 +1,6 @@
-'use strict';
-
-const express = require('express');
-const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
-const { isDbConfigured } = require('../db/connection');
+import express from 'express';
+import userTargetsRepo from '../repositories/userTargetsRepoAdapter.js';
+import { isDbConfigured } from '../db/connection.js';
 
 const router = express.Router();
 
@@ -90,4 +88,4 @@ router.get('/roles', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;

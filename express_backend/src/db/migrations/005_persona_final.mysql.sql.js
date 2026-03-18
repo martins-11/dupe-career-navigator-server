@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * MySQL migration: persona_final table
@@ -13,7 +13,7 @@
  */
 
 // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for creating persona_final table in MySQL (plus idempotent alterations). */
   return `
 -- 005_persona_final (mysql)
@@ -61,5 +61,5 @@ DEALLOCATE PREPARE stmt_ix_pf;
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };
 

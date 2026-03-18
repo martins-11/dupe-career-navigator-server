@@ -1,24 +1,22 @@
-'use strict';
+import express from 'express';
+import { sendError } from '../utils/errors.js';
+import holisticPersonaRepo from '../repositories/holisticPersonaRepoAdapter.js';
 
-const express = require('express');
-const { sendError } = require('../utils/errors');
-const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
+import recommendationsService from '../services/recommendationsService.js';
+import personasRepo from '../repositories/personasRepoAdapter.js';
 
-const recommendationsService = require('../services/recommendationsService');
-const personasRepo = require('../repositories/personasRepoAdapter');
-
-const {
+import {
   parseWithZod,
   enforceResponse,
   RecommendationsRolesResponseSchema,
   RoleCompareRequestSchema,
   RoleCompareResponseSchema
-} = require('../schemas/holisticPersonaSchemas');
+} from '../schemas/holisticPersonaSchemas.js';
 
-const {
+import {
   generateInitialRecommendationsPersonaDrivenBedrockOnly,
   generateInitialRecommendationsFallbackOnly,
-} = require('../services/recommendationsInitialService');
+} from '../services/recommendationsInitialService.js';
 
 const router = express.Router();
 
@@ -609,5 +607,10 @@ router.post('/compare', async (req, res) => {
   }
 });
 
-module.exports = router;
-module.exports.getInitialRecommendationsHandler = getInitialRecommendationsHandler;
+/**
+ * Compatibility: server.js expects to be able to access this helper from the imported router.
+ * In ESM, we attach it as a property on the router object.
+ */
+router.getInitialRecommendationsHandler = getInitialRecommendationsHandler;
+
+export default router;

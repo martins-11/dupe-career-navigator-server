@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * MySQL migration: roles catalog table (Phase 1 Career Path & Recommendations).
@@ -16,7 +16,7 @@
  */
 
  // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for creating the roles catalog table in MySQL. */
   return `
 -- 007_roles_catalog (mysql)
@@ -37,4 +37,4 @@ CREATE TABLE IF NOT EXISTS roles (
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };

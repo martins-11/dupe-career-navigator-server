@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * Migration: 009_mindmap_view_state (MySQL)
@@ -6,7 +6,7 @@
  * Creates a table for saving mind map UI view-state (zoom/pan/expanded nodes).
  */
 
-function getMigrationSql() {
+export function getMigrationSql() {
   return `
   CREATE TABLE IF NOT EXISTS mindmap_view_state (
     user_id VARCHAR(64) NOT NULL,
@@ -18,4 +18,4 @@ function getMigrationSql() {
   `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };

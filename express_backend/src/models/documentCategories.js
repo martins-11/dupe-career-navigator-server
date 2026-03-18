@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * Document category semantics used by the MVP upload + orchestration flow.
@@ -17,7 +17,7 @@
  * PUBLIC_INTERFACE
  * Canonical document categories supported by the MVP.
  */
-const DOCUMENT_CATEGORIES = Object.freeze({
+export const DOCUMENT_CATEGORIES = Object.freeze({
   RESUME: 'resume',
   JOB_DESCRIPTION: 'job_description',
   PERFORMANCE_REVIEW: 'performance_review'
@@ -27,7 +27,7 @@ const DOCUMENT_CATEGORIES = Object.freeze({
  * PUBLIC_INTERFACE
  * List of allowed document category strings.
  */
-const DOCUMENT_CATEGORY_VALUES = Object.freeze(Object.values(DOCUMENT_CATEGORIES));
+export const DOCUMENT_CATEGORY_VALUES = Object.freeze(Object.values(DOCUMENT_CATEGORIES));
 
 /**
  * PUBLIC_INTERFACE
@@ -41,7 +41,7 @@ const DOCUMENT_CATEGORY_VALUES = Object.freeze(Object.values(DOCUMENT_CATEGORIES
  * @param {string|null|undefined} categoryRaw
  * @returns {string|null} canonical category or null if not recognized
  */
-function normalizeDocumentCategory(categoryRaw) {
+export function normalizeDocumentCategory(categoryRaw) {
   const raw = categoryRaw == null ? '' : String(categoryRaw).trim();
   if (!raw) return null;
 
@@ -83,14 +83,9 @@ function normalizeDocumentCategory(categoryRaw) {
  * @param {string|null|undefined} category
  * @returns {boolean}
  */
-function isSupportedDocumentCategory(category) {
+export function isSupportedDocumentCategory(category) {
   return DOCUMENT_CATEGORY_VALUES.includes(String(category || ''));
 }
 
-module.exports = {
-  DOCUMENT_CATEGORIES,
-  DOCUMENT_CATEGORY_VALUES,
-  normalizeDocumentCategory,
-  isSupportedDocumentCategory
-};
+
 
