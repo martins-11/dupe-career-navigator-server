@@ -147,6 +147,27 @@ async function handleInitialRecommendations(req, res) {
       ]).catch(() => null);
     };
 
+    const isFallbackOnlyCachedRoles = (roles) => {
+      /**
+       * A cached entry should be considered "fallback-only" (and therefore non-cacheable)
+       * if it was produced by the endpoint-level fallback path (Bedrock failed), or if
+       * every role was fallback-filled.
+       *
+       * Why: we must not allow old fallback-only results to permanently block Bedrock
+       * from being used once it becomes available again.
+       */
+      const arr = Array.isArray(roles) ? roles : [];
+      if (arr.length !== 5) return false;
+
+      const anyEndpointFallback = arr.some((r) => r?.match_metadata?.endpointFallbackUsed === true);
+      if (anyEndpointFallback) return true;
+
+      const allFallbackFilled = arr.every((r) => r?.match_metadata?.isFallbackFilled === true);
+      if (allFallbackFilled) return true;
+
+      return false;
+    };
+
     // FAST PATH: if we already have recommendations persisted for this persona, return immediately.
     // Keep this extremely short so it never contributes to preview/proxy timeouts.
     const cached = await withTimeout(
@@ -154,7 +175,10 @@ async function handleInitialRecommendations(req, res) {
       250
     );
     const cachedRoles = Array.isArray(cached?.roles) ? cached.roles : null;
-    if (cachedRoles && cachedRoles.length === 5) {
+
+    // CRITICAL: never serve fallback-only cached results; they are considered stale and should be
+    // regenerated via Bedrock when possible.
+    if (cachedRoles && cachedRoles.length === 5 && !isFallbackOnlyCachedRoles(cachedRoles)) {
       if (req.timedOut || res.headersSent) return;
       return res.json({
         roles: cachedRoles,
@@ -268,18 +292,8 @@ async function handleInitialRecommendations(req, res) {
       const fallbackRoles = Array.isArray(fallback?.roles) ? fallback.roles : [];
       if (req.timedOut || res.headersSent) return;
 
-      // Best-effort persist (non-blocking).
-      try {
-        await holisticPersonaRepo.upsertRecommendationsRoles({
-          userId: null,
-          personaId: personaIdRaw,
-          buildId: null,
-          inferredTags: [],
-          roles: fallbackRoles,
-        });
-      } catch (_) {
-        // ignore persistence failures
-      }
+      // Do NOT persist fallback-only results: they can poison the cache and prevent
+      // Bedrock results from being used once Bedrock becomes available again.
 
       return res.json({
         roles: fallbackRoles,
@@ -294,17 +308,22 @@ async function handleInitialRecommendations(req, res) {
       });
     }
 
+    const hasAnyNonFallbackRole = roles.some((r) => r?.match_metadata?.isFallbackFilled !== true);
+
     // Best-effort persist for refresh/reload (non-blocking).
-    try {
-      await holisticPersonaRepo.upsertRecommendationsRoles({
-        userId: null,
-        personaId: personaIdRaw,
-        buildId: null,
-        inferredTags: [],
-        roles,
-      });
-    } catch (_) {
-      // ignore persistence failures
+    // IMPORTANT: Only persist if we have at least one Bedrock-sourced role; avoid caching fallback-only.
+    if (hasAnyNonFallbackRole) {
+      try {
+        await holisticPersonaRepo.upsertRecommendationsRoles({
+          userId: null,
+          personaId: personaIdRaw,
+          buildId: null,
+          inferredTags: [],
+          roles,
+        });
+      } catch (_) {
+        // ignore persistence failures
+      }
     }
 
     const meta = {
