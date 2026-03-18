@@ -222,7 +222,7 @@ app.use((err, req, res, next) => {
 });
 
 const port = Number(process.env.PORT || 3001);
-const host = process.env.HOST || '0.0.0.0');
+const host = process.env.HOST || '0.0.0.0';
 
 /**
  * PUBLIC_INTERFACE
