@@ -635,10 +635,22 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
     const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 20);
     lastUniqueAcceptedCount = uniqueBedrock.length;
 
-    if (uniqueBedrock.length >= minCount) {
-      // IMPORTANT: keep more than 5 when requested, so Explore search/mindmap can use the full stored pool.
+    // If we have enough to satisfy the desired pool size, stop.
+    if (uniqueBedrock.length >= returnCount) {
       finalBedrockUnique = uniqueBedrock.slice(0, returnCount);
       break;
+    }
+
+    // If we have enough to satisfy the minimum UX contract, keep the result but
+    // continue attempting (if possible) to grow the pool up to returnCount.
+    if (uniqueBedrock.length >= minCount) {
+      finalBedrockUnique = uniqueBedrock;
+
+      // If no more attempts remain, stop here.
+      if (attempt >= maxAttemptsDefault) break;
+
+      // Otherwise, try again with a higher requestedCount (loop continues).
+      continue;
     }
 
     finalBedrockUnique = uniqueBedrock;

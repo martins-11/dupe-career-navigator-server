@@ -14,6 +14,9 @@ describe('GET /api/recommendations/initial uses a sufficient Bedrock time budget
     // Ensure requestTimeout middleware selects the larger timeout for this endpoint.
     process.env.REQUEST_TIMEOUT_INITIAL_RECOMMENDATIONS_MS = '45000';
 
+    // Ensure the endpoint desires >5 roles.
+    process.env.INITIAL_RECOMMENDATIONS_STORE_COUNT = '12';
+
     const makeRole = (i) => ({
       role_id: `bedrock-${i}`,
       role_title: `Bedrock Role ${i}`,
@@ -29,7 +32,7 @@ describe('GET /api/recommendations/initial uses a sufficient Bedrock time budget
       modelId: 'test-model',
       prompt: 'test-prompt',
       usedFallback: false,
-      roles: new Array(options?.count || 7).fill(null).map((_, idx) => makeRole(idx + 1)),
+      roles: new Array(options?.count || 12).fill(null).map((_, idx) => makeRole(idx + 1)),
     }));
 
     // Mock Bedrock service BEFORE importing the server (server import pulls in routes/services).
@@ -45,7 +48,9 @@ describe('GET /api/recommendations/initial uses a sufficient Bedrock time budget
 
     expect([200]).toContain(res.status);
     expect(Array.isArray(res.body?.roles)).toBe(true);
-    expect(res.body.roles).toHaveLength(5);
+
+    // Endpoint should return a stored pool >5 (UI may choose to display 5 initially).
+    expect(res.body.roles.length).toBeGreaterThan(5);
 
     expect(mockGetInitial).toHaveBeenCalled();
 

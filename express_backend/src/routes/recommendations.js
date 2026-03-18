@@ -168,11 +168,19 @@ async function handleInitialRecommendations(req, res) {
       return false;
     };
 
-    // How many roles we WANT to store/serve for Explore (still show 5 by default in UI).
+    // How many roles we WANT to store/serve for Explore (UI may still show 5 initially).
     // If cached has fewer than this, we regenerate so mindmap/filters can use the larger pool.
-    const storeCountRaw = Number(process.env.INITIAL_RECOMMENDATIONS_STORE_COUNT || 12);
+    //
+    // IMPORTANT hardening:
+    // - Use parseInt (not Number/floor) to avoid values like "5.5" accidentally flooring to 5,
+    //   which would make a 5-role cache entry look "sufficient" and cause cacheHit=true with only 5 roles.
+    const storeCountEnvRaw = process.env.INITIAL_RECOMMENDATIONS_STORE_COUNT;
+    const storeCountParsed = Number.parseInt(String(storeCountEnvRaw ?? '').trim(), 10);
+
     const storeCount =
-      Number.isFinite(storeCountRaw) && storeCountRaw > 5 ? Math.min(20, Math.floor(storeCountRaw)) : 12;
+      Number.isFinite(storeCountParsed) && storeCountParsed > 5
+        ? Math.min(20, storeCountParsed)
+        : 12;
 
     // FAST PATH: if we already have recommendations persisted for this persona, return immediately.
     // Keep this extremely short so it never contributes to preview/proxy timeouts.
