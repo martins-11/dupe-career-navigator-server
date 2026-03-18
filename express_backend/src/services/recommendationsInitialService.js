@@ -1,7 +1,5 @@
-'use strict';
-
-const bedrockService = require('./bedrockService');
-const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine');
+import bedrockService from './bedrockService.js';
+import { buildThreeTwoReport, scoreRoleCompatibility } from './scoringEngine.js';
 
 function _clampPercent(n) {
   if (!Number.isFinite(n)) return 0;
@@ -805,8 +803,13 @@ async function generateInitialRecommendationsFallbackOnly({ finalPersona, person
   };
 }
 
-module.exports = {
+export {
   generateInitialRecommendationsPersonaDrivenBedrockOnly,
-  generateInitialRecommendationsFallbackOnly,
+  generateInitialRecommendationsFallbackOnly
+};
+
+export default {
+  generateInitialRecommendationsPersonaDrivenBedrockOnly,
+  generateInitialRecommendationsFallbackOnly
 };
 

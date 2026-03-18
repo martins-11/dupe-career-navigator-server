@@ -1,7 +1,5 @@
-'use strict';
-
-const { query } = require('../db/query');
-const { uuidV4 } = require('../utils/uuid');
+import { query } from '../db/query.js';
+import { uuidV4 } from '../utils/uuid.js';
 
 /**
  * AI Runs repository (PostgreSQL scaffold).
@@ -26,7 +24,7 @@ const { uuidV4 } = require('../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-function isDbConfigured() {
+export function isDbConfigured() {
   /** Returns true if any PostgreSQL connection env var appears to be set. */
   return Boolean(
     (process.env.PG_CONNECTION_STRING && process.env.PG_CONNECTION_STRING.trim()) ||
@@ -47,7 +45,7 @@ function ensureDbConfigured() {
 }
 
 // PUBLIC_INTERFACE
-async function createAiRun(input) {
+export async function createAiRun(input) {
   /** Create an ai_run row in Postgres and return it. */
   ensureDbConfigured();
 
@@ -89,7 +87,7 @@ async function createAiRun(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getAiRunById(aiRunId) {
+export async function getAiRunById(aiRunId) {
   /** Fetch ai_run by id. Returns null if not found. */
   ensureDbConfigured();
 
@@ -117,7 +115,7 @@ async function getAiRunById(aiRunId) {
 }
 
 // PUBLIC_INTERFACE
-async function updateAiRun(aiRunId, patch) {
+export async function updateAiRun(aiRunId, patch) {
   /** Update mutable fields on an ai_run row. */
   ensureDbConfigured();
 
@@ -175,7 +173,7 @@ async function updateAiRun(aiRunId, patch) {
 }
 
 // PUBLIC_INTERFACE
-async function listAiRunsByBuildId(buildId) {
+export async function listAiRunsByBuildId(buildId) {
   /** List ai_runs for a build (ascending by created_at). */
   ensureDbConfigured();
 
@@ -203,10 +201,12 @@ async function listAiRunsByBuildId(buildId) {
   return res.rows;
 }
 
-module.exports = {
+const aiRunsRepo = {
   isDbConfigured,
   createAiRun,
   getAiRunById,
   updateAiRun,
   listAiRunsByBuildId
 };
+
+export default aiRunsRepo;

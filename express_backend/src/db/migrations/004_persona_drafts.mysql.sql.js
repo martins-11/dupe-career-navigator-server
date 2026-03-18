@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * MySQL migration: persona_drafts table
@@ -15,7 +15,7 @@
  */
 
 // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for creating persona_drafts table in MySQL (plus idempotent alterations). */
   return `
 -- 004_persona_drafts (mysql)
@@ -64,5 +64,5 @@ DEALLOCATE PREPARE stmt_ix_pd;
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };
 

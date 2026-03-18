@@ -1,7 +1,5 @@
-'use strict';
-
-const connection = require('../../db/connection');
-const { uuidV4 } = require('../../utils/uuid');
+import * as connection from '../../db/connection.js';
+import { uuidV4 } from '../../utils/uuid.js';
 
 function _jsonParseIfNeeded(v) {
   if (v == null) return v;
@@ -17,7 +15,7 @@ function _jsonParseIfNeeded(v) {
 }
 
 // PUBLIC_INTERFACE
-async function countRoles() {
+export async function countRoles() {
   /** Returns the number of roles in the roles table. */
   const res = await connection.dbQuery(
     `
@@ -29,7 +27,7 @@ async function countRoles() {
 }
 
 // PUBLIC_INTERFACE
-async function listRoles({ limit = 1000 } = {}) {
+export async function listRoles({ limit = 1000 } = {}) {
   /** List roles from the catalog table. */
   const lim = Math.max(1, Math.min(Number(limit) || 1000, 5000));
 
@@ -57,7 +55,7 @@ async function listRoles({ limit = 1000 } = {}) {
 }
 
 // PUBLIC_INTERFACE
-async function bulkInsertRoles(roles) {
+export async function bulkInsertRoles(roles) {
   /**
    * Insert a list of roles.
    * Each entry: { roleTitle, industry, coreSkills, seniorityLevels, estimatedSalaryRange }.
@@ -93,7 +91,9 @@ async function bulkInsertRoles(roles) {
   return { inserted };
 }
 
-async function _roleExists(roleId) {
+// PUBLIC_INTERFACE
+export async function _roleExists(roleId) {
+  /** Return true if a role exists with given id. */
   const res = await connection.dbQuery(
     `
     SELECT role_id
@@ -160,7 +160,7 @@ function _roleSkillsContainAll(roleSkills, requiredSkills) {
 }
 
 // PUBLIC_INTERFACE
-async function searchRoles({ q = '', industry = null, skills = [], minSalary = null, maxSalary = null, limit = 50 } = {}) {
+export async function searchRoles({ q = '', industry = null, skills = [], minSalary = null, maxSalary = null, limit = 50 } = {}) {
   /**
    * Search roles in MySQL with dynamic AND-based multi-filter logic.
    *
@@ -235,9 +235,7 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     // core_skills_json is a MySQL JSON column. Applying LOWER()/LIKE directly to JSON can yield
     // non-matching behavior depending on MySQL version/collation. Cast to CHAR so string
     // operations behave predictably.
-    where.push(
-      '(LOWER(role_title) LIKE LOWER(?) OR LOWER(CAST(core_skills_json AS CHAR(10000))) LIKE LOWER(?))'
-    );
+    where.push('(LOWER(role_title) LIKE LOWER(?) OR LOWER(CAST(core_skills_json AS CHAR(10000))) LIKE LOWER(?))');
     params.push(like, like);
   }
 
@@ -301,8 +299,7 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   // Normalize salary bounds:
   // - treat missing/empty as null
-  // - treat <= 0 as "not provided" (important because some upstream layers default
-  //   missing max_salary to 0, which would otherwise create an impossible predicate)
+  // - treat <= 0 as "not provided"
   const minSRaw = Number.isFinite(Number(minSalary)) ? Number(minSalary) : null;
   const maxSRaw = Number.isFinite(Number(maxSalary)) ? Number(maxSalary) : null;
 
@@ -319,7 +316,6 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
     params.push(maxS);
   }
 
-  // With SQL-side salary filtering, we don't need to massively prefetch anymore.
   const sqlLimit = lim;
 
   const query = `
@@ -337,13 +333,11 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
 
   params.push(sqlLimit);
 
-  // Debugging trace: log SQL + params before execution.
   // eslint-disable-next-line no-console
   console.log('SQL Query:', query, 'Params:', params);
 
   const results = await connection.dbQuery(query, params);
 
-  // Debugging trace: log raw DB results.
   // eslint-disable-next-line no-console
   console.log('Raw DB Results:', results);
 
@@ -404,10 +398,12 @@ async function searchRoles({ q = '', industry = null, skills = [], minSalary = n
   });
 }
 
-module.exports = {
+const rolesRepoMysql = {
   countRoles,
   listRoles,
   bulkInsertRoles,
   searchRoles,
   _roleExists
 };
+
+export default rolesRepoMysql;

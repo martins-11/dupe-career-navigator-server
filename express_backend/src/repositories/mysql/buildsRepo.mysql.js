@@ -1,7 +1,5 @@
-'use strict';
-
-const { dbQuery } = require('../../db/connection');
-const { uuidV4 } = require('../../utils/uuid');
+import { dbQuery } from '../../db/connection.js';
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * MySQL builds repository.
@@ -10,7 +8,7 @@ const { uuidV4 } = require('../../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-async function createBuild(input) {
+export async function createBuild(input) {
   /** Create a build row in MySQL and return it. */
   // IMPORTANT:
   // The workflow layer (workflowService) generates the canonical build/workflow id.
@@ -44,7 +42,7 @@ async function createBuild(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getBuildById(buildId) {
+export async function getBuildById(buildId) {
   /** Fetch build by id. Returns null if not found. */
   const res = await dbQuery(
     `
@@ -69,7 +67,7 @@ async function getBuildById(buildId) {
 }
 
 // PUBLIC_INTERFACE
-async function updateBuild(buildId, patch) {
+export async function updateBuild(buildId, patch) {
   /** Update mutable build fields. */
   const sets = [];
   const params = [];
@@ -114,8 +112,10 @@ async function updateBuild(buildId, patch) {
   return await getBuildById(buildId);
 }
 
-module.exports = {
+const buildsRepoMysql = {
   createBuild,
   getBuildById,
   updateBuild
 };
+
+export default buildsRepoMysql;

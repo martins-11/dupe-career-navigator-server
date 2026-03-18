@@ -1,6 +1,4 @@
-'use strict';
-
-const { dbQuery } = require('../../db/connection');
+import { dbQuery } from '../../db/connection.js';
 
 /**
  * MySQL repository for mindmap_view_state table.
@@ -15,7 +13,7 @@ const { dbQuery } = require('../../db/connection');
  */
 
 // PUBLIC_INTERFACE
-async function saveViewState({ userId, mapKey, state }) {
+export async function saveViewState({ userId, mapKey, state }) {
   /** Upsert a user's mind map view-state row and return a normalized record. */
   const now = new Date();
   const stateJson = JSON.stringify(state != null ? state : {});
@@ -40,7 +38,7 @@ async function saveViewState({ userId, mapKey, state }) {
 }
 
 // PUBLIC_INTERFACE
-async function loadViewState({ userId, mapKey }) {
+export async function loadViewState({ userId, mapKey }) {
   /** Load a user's mind map view-state row. Returns null if not found. */
   const res = await dbQuery(
     `
@@ -74,7 +72,4 @@ async function loadViewState({ userId, mapKey }) {
   };
 }
 
-module.exports = {
-  saveViewState,
-  loadViewState
-};
+export default { saveViewState, loadViewState };

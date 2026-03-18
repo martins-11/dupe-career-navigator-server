@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * Build CORS options from environment variables already present in the container .env.
  */
@@ -16,7 +14,7 @@
  * - Always allow localhost:3000 for local dev.
  * - Always allow the configured FRONTEND_URL origin when present.
  */
-function buildCorsOptions() {
+export function buildCorsOptions() {
   /** Build CORS options used by the Express app. */
 
   // If ALLOWED_ORIGINS is set, we enforce it (plus additive safe origins below).
@@ -63,9 +61,6 @@ function buildCorsOptions() {
   const maxAge = Number(process.env.CORS_MAX_AGE || 3600);
 
   // Allow dynamic Kavia preview origins for the frontend (port 3000).
-  // Observed examples:
-  //   https://vscode-internal-17827.cloud.kavia.ai:3000
-  //   https://vscode-internal-17827-beta.beta01.cloud.kavia.ai:3000
   const kaviaPreviewFrontendOriginRe =
     /^https:\/\/vscode-internal-[a-z0-9-]+(?:-beta\.beta01)?\.cloud\.kavia\.ai:3000$/i;
 
@@ -88,8 +83,6 @@ function buildCorsOptions() {
     methods: allowedMethods,
     allowedHeaders,
     maxAge,
-    credentials: true,
+    credentials: true
   };
 }
-
-module.exports = { buildCorsOptions };

@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * MySQL migration: personas + persona_versions tables
@@ -15,7 +15,7 @@
  */
 
 // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for creating personas + persona_versions tables in MySQL. */
   return `
 -- 003_personas_and_versions (mysql)
@@ -43,5 +43,5 @@ CREATE TABLE IF NOT EXISTS persona_versions (
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };
 

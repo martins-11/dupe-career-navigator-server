@@ -1,6 +1,4 @@
-'use strict';
-
-const { uuidV4 } = require('../utils/uuid');
+import { uuidV4 } from '../utils/uuid.js';
 
 /**
  * Workflow service (in-memory).
@@ -267,7 +265,18 @@ function getWorkflowStatus(id) {
   };
 }
 
-module.exports = {
+export {
+  createWorkflow,
+  transitionWorkflow,
+  startWorkflow,
+  cancelWorkflow,
+  failWorkflow,
+  succeedWorkflow,
+  getWorkflow,
+  getWorkflowStatus
+};
+
+export default {
   createWorkflow,
   transitionWorkflow,
   startWorkflow,

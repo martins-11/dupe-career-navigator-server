@@ -1,7 +1,3 @@
-'use strict';
-
-const { dbQuery } = require('./connection');
-
 /**
  * Small query helper that standardizes errors and keeps callsites concise.
  *
@@ -9,10 +5,15 @@ const { dbQuery } = require('./connection');
  * support MySQL (AWS RDS) as primary while preserving Postgres scaffolding.
  */
 
-// PUBLIC_INTERFACE
-async function query(text, params) {
+import { dbQuery } from './connection.js';
+
+/**
+ * PUBLIC_INTERFACE
+ * @param {string} text
+ * @param {any[]} [params]
+ * @returns {Promise<{rows: any[]}>}
+ */
+export async function query(text, params) {
   /** Execute a SQL query using the configured DB engine. */
   return await dbQuery(text, params || []);
 }
-
-module.exports = { query };

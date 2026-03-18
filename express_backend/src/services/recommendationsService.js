@@ -1,8 +1,6 @@
-'use strict';
-
-const rolesRepo = require('../repositories/rolesRepoAdapter');
-const personasRepo = require('../repositories/personasRepoAdapter');
-const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine');
+import rolesRepo from '../repositories/rolesRepoAdapter.js';
+import personasRepo from '../repositories/personasRepoAdapter.js';
+import { buildThreeTwoReport, scoreRoleCompatibility } from './scoringEngine.js';
 
 /**
  * Shared default roles catalog (in-memory seed).
@@ -13,7 +11,7 @@ const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine
  *
  * Keeping this exported avoids drift and ensures verification scripts see stable results.
  */
-const DEFAULT_ROLES_CATALOG = [
+export const DEFAULT_ROLES_CATALOG = [
   {
     roleTitle: 'Software Engineer',
     industry: 'Technology',
@@ -478,7 +476,9 @@ async function getRoleRecommendationsFromFinalPersona({ personaId = null, userId
   };
 }
 
-module.exports = {
+export { getRoleRecommendationsFromFinalPersona };
+
+export default {
   DEFAULT_ROLES_CATALOG,
   getRoleRecommendationsFromFinalPersona
 };

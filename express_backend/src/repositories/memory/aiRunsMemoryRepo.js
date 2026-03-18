@@ -1,6 +1,4 @@
-'use strict';
-
-const { uuidV4 } = require('../../utils/uuid');
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * In-memory AI runs repository.
@@ -17,7 +15,7 @@ function _nowIso() {
 }
 
 // PUBLIC_INTERFACE
-async function createAiRun(input) {
+export async function createAiRun(input) {
   /** Create an AI run record in memory and return it. */
   const id = uuidV4();
   const now = _nowIso();
@@ -48,13 +46,13 @@ async function createAiRun(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getAiRunById(aiRunId) {
+export async function getAiRunById(aiRunId) {
   /** Fetch AI run by id (memory). Returns null if not found. */
   return _aiRuns.get(aiRunId) || null;
 }
 
 // PUBLIC_INTERFACE
-async function updateAiRun(aiRunId, patch) {
+export async function updateAiRun(aiRunId, patch) {
   /** Update an AI run record (memory). Returns updated run or null if not found. */
   const existing = _aiRuns.get(aiRunId);
   if (!existing) return null;
@@ -72,15 +70,11 @@ async function updateAiRun(aiRunId, patch) {
 }
 
 // PUBLIC_INTERFACE
-async function listAiRunsByBuildId(buildId) {
+export async function listAiRunsByBuildId(buildId) {
   /** List AI runs for a build (ascending by creation). */
   const ids = _runsByBuildId.get(buildId) || [];
   return ids.map((id) => _aiRuns.get(id)).filter(Boolean);
 }
 
-module.exports = {
-  createAiRun,
-  getAiRunById,
-  updateAiRun,
-  listAiRunsByBuildId
-};
+const aiRunsMemoryRepo = { createAiRun, getAiRunById, updateAiRun, listAiRunsByBuildId };
+export default aiRunsMemoryRepo;

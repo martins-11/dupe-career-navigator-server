@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * Helpers for propagating Bedrock errors to API consumers in a safe, consistent way.
@@ -20,7 +20,7 @@
  * @param {object} [extra]
  * @returns {{ code: string, message: string, details?: object, requestId?: string, modelId?: string }}
  */
-function buildBedrockErrorMeta(err, extra = {}) {
+export function buildBedrockErrorMeta(err, extra = {}) {
   const code =
     (err && typeof err === 'object' && typeof err.code === 'string' && err.code) ||
     (err && typeof err === 'object' && typeof err.name === 'string' && err.name) ||
@@ -56,7 +56,7 @@ function buildBedrockErrorMeta(err, extra = {}) {
  * @param {object} safeResult
  * @returns {null | { code: string, message: string, details?: object, modelId?: string }}
  */
-function bedrockErrorMetaFromSafeResult(safeResult) {
+export function bedrockErrorMetaFromSafeResult(safeResult) {
   if (!safeResult || typeof safeResult !== 'object') return null;
 
   // bedrockService.generateTargetedRolesSafe returns `error: { code, message }` in both strict and fallback paths.
@@ -72,7 +72,4 @@ function bedrockErrorMetaFromSafeResult(safeResult) {
   return meta;
 }
 
-module.exports = {
-  buildBedrockErrorMeta,
-  bedrockErrorMetaFromSafeResult,
-};
+

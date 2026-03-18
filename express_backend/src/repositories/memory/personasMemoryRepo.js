@@ -1,6 +1,4 @@
-'use strict';
-
-const { uuidV4 } = require('../../utils/uuid');
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * In-memory personas repository.
@@ -32,7 +30,7 @@ function _nextVersion(personaId) {
 }
 
 // PUBLIC_INTERFACE
-async function createPersona(input) {
+export async function createPersona(input) {
   /** Create a persona. If personaJson is provided, version 1 is created. */
   const id = uuidV4();
   const now = _nowIso();
@@ -56,13 +54,13 @@ async function createPersona(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getPersonaById(personaId) {
+export async function getPersonaById(personaId) {
   /** Fetch a persona row by id. Returns null if not found. */
   return _personas.get(personaId) || null;
 }
 
 // PUBLIC_INTERFACE
-async function updatePersona(personaId, patch) {
+export async function updatePersona(personaId, patch) {
   /** Update persona metadata (title). Returns updated persona or null if not found. */
   const existing = _ensurePersonaExists(personaId);
   if (!existing) return null;
@@ -78,7 +76,7 @@ async function updatePersona(personaId, patch) {
 }
 
 // PUBLIC_INTERFACE
-async function createPersonaVersion(personaId, input) {
+export async function createPersonaVersion(personaId, input) {
   /**
    * Create a persona version row.
    * If input.version omitted, auto-increment.
@@ -108,7 +106,7 @@ async function createPersonaVersion(personaId, input) {
 }
 
 // PUBLIC_INTERFACE
-async function listPersonaVersions(personaId) {
+export async function listPersonaVersions(personaId) {
   /** List persona versions (ascending). Returns [] if persona exists but no versions. */
   const persona = _ensurePersonaExists(personaId);
   if (!persona) return null;
@@ -116,7 +114,7 @@ async function listPersonaVersions(personaId) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestPersonaVersion(personaId) {
+export async function getLatestPersonaVersion(personaId) {
   /** Get the latest persona version (highest version). Returns null if persona not found or no versions. */
   const persona = _ensurePersonaExists(personaId);
   if (!persona) return null;
@@ -132,7 +130,7 @@ async function getLatestPersonaVersion(personaId) {
  */
 
 // PUBLIC_INTERFACE
-async function saveDraft(personaId, draftJson) {
+export async function saveDraft(personaId, draftJson) {
   /** Save a draft persona JSON blob (in-memory). */
   const persona = _ensurePersonaExists(personaId);
   if (!persona) return null;
@@ -147,7 +145,7 @@ async function saveDraft(personaId, draftJson) {
 }
 
 // PUBLIC_INTERFACE
-async function getDraft(personaId) {
+export async function getDraft(personaId) {
   /** Get the latest saved draft for a persona (in-memory). */
   const persona = _ensurePersonaExists(personaId);
   if (!persona) return null;
@@ -156,7 +154,7 @@ async function getDraft(personaId) {
 }
 
 // PUBLIC_INTERFACE
-async function saveFinal(personaId, finalJson) {
+export async function saveFinal(personaId, finalJson) {
   /** Save a final persona JSON blob (in-memory). */
   const persona = _ensurePersonaExists(personaId);
   if (!persona) return null;
@@ -171,7 +169,7 @@ async function saveFinal(personaId, finalJson) {
 }
 
 // PUBLIC_INTERFACE
-async function getFinal(personaId) {
+export async function getFinal(personaId) {
   /** Get the saved final persona JSON blob (in-memory). */
   const persona = _ensurePersonaExists(personaId);
   if (!persona) return null;
@@ -179,7 +177,7 @@ async function getFinal(personaId) {
   return _finalByPersonaId.get(personaId) || null;
 }
 
-module.exports = {
+const personasMemoryRepo = {
   createPersona,
   getPersonaById,
   updatePersona,
@@ -191,3 +189,5 @@ module.exports = {
   saveFinal,
   getFinal
 };
+
+export default personasMemoryRepo;

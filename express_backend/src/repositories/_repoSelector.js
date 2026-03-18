@@ -1,6 +1,4 @@
-'use strict';
-
-const { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } = require('../db/connection');
+import { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } from '../db/connection.js';
 
 /**
  * Shared repository selection helper for adapters.
@@ -25,7 +23,7 @@ const { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } =
  * @param {object} deps.memRepo In-memory repository implementation
  * @returns {object} The chosen repository implementation
  */
-function selectRepo({ pgRepo, mysqlRepo, memRepo }) {
+export function selectRepo({ pgRepo, mysqlRepo, memRepo }) {
   const engine = getDbEngine();
 
   if (engine === 'mysql') {
@@ -36,5 +34,4 @@ function selectRepo({ pgRepo, mysqlRepo, memRepo }) {
   return isDbConfigured() && isPostgresConfigured() ? pgRepo : memRepo;
 }
 
-module.exports = { selectRepo };
-
+export default { selectRepo };

@@ -1,6 +1,4 @@
-'use strict';
-
-const { uuidV4 } = require('../../utils/uuid');
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * In-memory builds repository.
@@ -36,7 +34,7 @@ function _makeBuild(input) {
 }
 
 // PUBLIC_INTERFACE
-async function createBuild(input) {
+export async function createBuild(input) {
   /** Create a build record in memory and return it. */
   const build = _makeBuild(input || {});
   _builds.set(build.id, build);
@@ -44,13 +42,13 @@ async function createBuild(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getBuildById(buildId) {
+export async function getBuildById(buildId) {
   /** Fetch build by id (memory). Returns null if not found. */
   return _builds.get(buildId) || null;
 }
 
 // PUBLIC_INTERFACE
-async function updateBuild(buildId, patch) {
+export async function updateBuild(buildId, patch) {
   /** Update mutable build fields (memory). Returns updated build or null if not found. */
   const existing = _builds.get(buildId);
   if (!existing) return null;
@@ -71,8 +69,5 @@ async function updateBuild(buildId, patch) {
   return updated;
 }
 
-module.exports = {
-  createBuild,
-  getBuildById,
-  updateBuild
-};
+const buildsMemoryRepo = { createBuild, getBuildById, updateBuild };
+export default buildsMemoryRepo;

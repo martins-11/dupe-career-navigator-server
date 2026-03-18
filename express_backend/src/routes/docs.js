@@ -1,8 +1,6 @@
-'use strict';
-
-const express = require('express');
-const swaggerUi = require('swagger-ui-express');
-const { getOpenApiSpec } = require('../openapi/spec');
+import express from 'express';
+import swaggerUi from 'swagger-ui-express';
+import { getOpenApiSpec } from '../openapi/spec.js';
 
 const router = express.Router();
 
@@ -27,4 +25,4 @@ router.use(
   })
 );
 
-module.exports = router;
+export default router;

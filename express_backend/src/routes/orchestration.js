@@ -1,8 +1,6 @@
-'use strict';
-
-const express = require('express');
-const orchestrationService = require('../services/orchestrationService');
-const { sendError } = require('../utils/errors');
+import express from 'express';
+import orchestrationService from '../services/orchestrationService.js';
+import { sendError } from '../utils/errors.js';
 
 const router = express.Router();
 
@@ -137,4 +135,4 @@ router.post('/builds/:id/finalize', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;

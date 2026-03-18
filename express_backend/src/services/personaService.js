@@ -1,7 +1,9 @@
-'use strict';
+import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
+import Ajv from 'ajv';
 
-const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
-const Ajv = require('ajv');
+import { extractNameAndCurrentRole } from '../utils/nameRoleExtraction.js';
+import { uuidV4 } from '../utils/uuid.js';
+import { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } from '../db/connection.js';
 
 /**
  * Persona generation service (AWS Bedrock Claude).
@@ -20,10 +22,6 @@ const Ajv = require('ajv');
 
 /**
  * System prompt used for persona draft generation.
- *
- * Pivot note:
- * - Ignore any prior "3/2 rule" / "alignment scores" requirements.
- * - Output must be JSON only, strictly matching the persona_draft_json schema below.
  *
  * Product decision:
  * - The frontend no longer shows "Key Experiences", so this prompt/schema does NOT include a work_experience field.
@@ -107,9 +105,6 @@ const PERSONA_SYSTEM_PROMPT = [
 /**
  * Strict JSON schema for generated persona drafts.
  * (additionalProperties=false enforces no extra keys)
- *
- * NOTE:
- * - work_experience is intentionally excluded because the UI no longer renders "Key Experiences".
  */
 const personaDraftJsonSchema = {
   type: 'object',
@@ -181,23 +176,9 @@ function _jsonError(code, message, details) {
   return err;
 }
 
-/**
- * Parse a Bedrock Converse response into text content.
- *
- * Typical Converse output shape:
- * {
- *   output: {
- *     message: {
- *       role: "assistant",
- *       content: [{ text: "..." }, ...]
- *     }
- *   }
- * }
- */
 function _extractTextFromBedrockResponseJson(respJson) {
   if (!respJson) return '';
 
-  // Converse API
   const converseContent = respJson?.output?.message?.content;
   if (Array.isArray(converseContent)) {
     const texts = converseContent
@@ -206,7 +187,6 @@ function _extractTextFromBedrockResponseJson(respJson) {
     if (texts.length) return texts.join('\n').trim();
   }
 
-  // Older Claude Messages API format (defensive)
   if (Array.isArray(respJson.content)) {
     const texts = respJson.content
       .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
@@ -214,7 +194,6 @@ function _extractTextFromBedrockResponseJson(respJson) {
     return texts.join('\n').trim();
   }
 
-  // Fallbacks (older patterns)
   if (typeof respJson.output_text === 'string') return respJson.output_text.trim();
   if (typeof respJson.completion === 'string') return respJson.completion.trim();
   if (typeof respJson.result === 'string') return respJson.result.trim();
@@ -223,31 +202,15 @@ function _extractTextFromBedrockResponseJson(respJson) {
 }
 
 function _stripMarkdownCodeFences(text) {
-  /**
-   * Remove markdown code fences commonly returned by LLMs:
-   *  - ```json\n{...}\n```
-   *  - ```\n{...}\n```
-   *
-   * If the content is fenced, we return the inner content; otherwise return the
-   * original text trimmed.
-   */
   const t = String(text || '').trim();
-
-  // Match a full fenced block, optionally with a language tag.
   const fenced = t.match(/^```(?:\s*json)?\s*\n([\s\S]*?)\n```$/i);
   if (fenced && typeof fenced[1] === 'string') {
     return fenced[1].trim();
   }
-
   return t;
 }
 
 function _extractFirstJsonSubstring(text) {
-  /**
-   * Best-effort extraction for cases where the model adds leading/trailing prose.
-   * We keep this conservative: find the first '{' or '[' and parse until the last
-   * '}' or ']'. This is only used as a fallback when direct parsing fails.
-   */
   const t = String(text || '');
   const firstObj = t.indexOf('{');
   const firstArr = t.indexOf('[');
@@ -278,7 +241,6 @@ function _safeJsonParse(jsonText) {
   try {
     return { ok: true, value: JSON.parse(cleaned) };
   } catch (e1) {
-    // Fallback: sometimes models prepend/append commentary even when instructed not to.
     const extracted = _extractFirstJsonSubstring(cleaned);
     if (extracted) {
       try {
@@ -293,14 +255,6 @@ function _safeJsonParse(jsonText) {
 }
 
 function _normalizeCareerHighlights(obj) {
-  /**
-   * Normalize career_highlights into the current schema shape:
-   *   [{ text: string, source: string }, ...]
-   *
-   * Backward compat:
-   * - If the model returns string[], upgrade each item to {text, source:"Unknown"}.
-   * - If it returns objects, ensure required keys exist and are non-empty.
-   */
   if (!obj || typeof obj !== 'object') return obj;
 
   const ch = obj.career_highlights;
@@ -325,7 +279,6 @@ function _normalizeCareerHighlights(obj) {
     })
     .filter(Boolean);
 
-  // Ensure non-empty per schema requirement.
   if (normalized.length === 0) {
     normalized.push({ text: 'Demonstrated impact through documented contributions.', source: 'Unknown' });
   }
@@ -344,20 +297,7 @@ function _assertValidPersonaDraft(obj) {
   });
 }
 
-/**
- * Build a Bedrock "Converse" payload.
- *
- * Admin requirement:
- * - Use the Bedrock Runtime Converse API format (not InvokeModel).
- *
- * Docs reference (conceptual):
- * - input: { modelId, system: [{text}], messages: [{role, content:[{text}]}], inferenceConfig }
- */
 function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
-  // Best-effort labeler:
-  // - Orchestration concatenates documents with "-----"
-  // - Some sources include "JOB DESCRIPTION" headings
-  // We label sections to prevent JD requirements being treated as candidate experience.
   const text = String(extractedText || '').trim();
 
   const parts = text
@@ -389,12 +329,10 @@ function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
     otherTexts.push(p);
   }
 
-  // Fallback: if we couldn't detect sections, treat the whole thing as resume-like source of truth.
   if (!resumeText && !jobDescriptionText && !performanceReviewText) {
     resumeText = text;
   }
 
-  // A per-run variation hint. The model must not include this value in JSON output.
   const generationId = new Date().toISOString();
 
   const userContent = [
@@ -409,16 +347,13 @@ function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
     '',
     'PERFORMANCE_REVIEW_TEXT (evidence of impact/outcomes; may be empty):',
     performanceReviewText || '',
-    ...(otherTexts.length
-      ? ['', 'OTHER_INPUT_TEXT (unclassified; treat cautiously):', otherTexts.join('\n\n-----\n\n')]
-      : []),
+    ...(otherTexts.length ? ['', 'OTHER_INPUT_TEXT (unclassified; treat cautiously):', otherTexts.join('\n\n-----\n\n')] : []),
     '',
     'OPTIONAL CONTEXT (may be empty JSON):',
     JSON.stringify(context || {}, null, 2)
   ].join('\n');
 
   return {
-    // Converse system prompt is an array of content blocks.
     system: [{ text: systemPrompt }],
     messages: [
       {
@@ -427,10 +362,7 @@ function _buildClaudeConverseInput({ systemPrompt, extractedText, context }) {
       }
     ],
     inferenceConfig: {
-      // Allow slightly longer outputs so we can fit strong, evidence-based highlights.
       maxTokens: 1400,
-      // Slightly higher temperature reduces identical outputs between runs.
-      // Schema validation remains the guardrail for correctness.
       temperature: 0.45
     }
   };
@@ -444,28 +376,17 @@ function _getBedrockClient() {
     });
   }
 
-  // Credentials are resolved via the default provider chain:
-  // env vars, shared config, instance profile, etc.
   return new BedrockRuntimeClient({ region });
 }
 
 /**
  * PUBLIC_INTERFACE
  */
-async function generatePersonaDraft(extractedText, options = {}) {
+export async function generatePersonaDraft(extractedText, options = {}) {
   /**
    * Generate a persona draft using AWS Bedrock Claude and validate strict JSON schema.
    *
-   * Hardening requirements:
-   * - Edge-case validation: if input text is under 100 characters, reject with INVALID_INPUT_LENGTH.
-   * - AI failure hardening: if Bedrock call fails OR output is malformed JSON, return structured fallback:
-   *     { error: "AI_GENERATION_FAILED", retryable: true }
-   *
-   * Additional behavior (product requirement):
-   * - Best-effort extract the user's name from the source text and populate it when present.
-   * - Extract role/title ONLY when confidently present; otherwise keep role blank.
-   *
-   * @param {string} extractedText - Combined extracted/normalized text from documents.
+   * @param {string} extractedText
    * @param {{ context?: object, preferMock?: boolean }} [options]
    * @returns {Promise<{persona: object, mode: 'bedrock'|'mock', warnings: string[]} | {error: string, retryable: boolean}>}
    */
@@ -474,7 +395,6 @@ async function generatePersonaDraft(extractedText, options = {}) {
     throw _jsonError('NO_SOURCE_TEXT', 'extractedText is required to generate a persona draft.');
   }
 
-  // Edge-case validation: block obvious nonsense / too-short input.
   if (text.length < 100) {
     throw _jsonError(
       'INVALID_INPUT_LENGTH',
@@ -486,10 +406,6 @@ async function generatePersonaDraft(extractedText, options = {}) {
   const preferMock = Boolean(options.preferMock);
   const modelId = _env('BEDROCK_MODEL_ID');
 
-  const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
-
-  // If explicitly requested OR model isn't configured, fall back to mock.
-  // Note: input-length validation still applies (above) to prevent persisting nonsense even in mock mode.
   if (preferMock || !modelId) {
     const extracted = extractNameAndCurrentRole(text);
 
@@ -508,9 +424,6 @@ async function generatePersonaDraft(extractedText, options = {}) {
       }
     };
 
-    // NOTE: We keep strict schema validation for the Bedrock-backed persona shape,
-    // but we can still attach additional top-level fields for client display.
-    // Role is intentionally left blank when not confidently found.
     const validated = _assertValidPersonaDraft(mock);
     const enriched = {
       ...validated,
@@ -538,11 +451,9 @@ async function generatePersonaDraft(extractedText, options = {}) {
   try {
     respJson = await client.send(cmd);
 
-    // Debug requirement: log raw response to confirm whether Sonnet is wrapping JSON in extra text.
     // eslint-disable-next-line no-console
     console.log('[personaService] Raw Bedrock response:', JSON.stringify(respJson, null, 2));
-  } catch (e) {
-    // Requirement: structured fallback (do not throw), retryable.
+  } catch {
     return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 
@@ -551,9 +462,6 @@ async function generatePersonaDraft(extractedText, options = {}) {
     return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 
-  // Parser fix requirement:
-  // If the model returns prose + JSON, extract the first JSON object block using regex.
-  // (We still attempt strict parsing first; regex is a targeted fallback.)
   let parsed = _safeJsonParse(modelText);
   if (!parsed.ok) {
     const match = String(modelText).match(/\{[\s\S]*\}/);
@@ -572,10 +480,6 @@ async function generatePersonaDraft(extractedText, options = {}) {
 
     const extracted = extractNameAndCurrentRole(text);
 
-    // Attach name/role for UI display and downstream mapping.
-    // IMPORTANT:
-    // - Name should be populated when present in uploads.
-    // - Role MUST be blank when not confidently found (no guessing).
     const enriched = {
       ...persona,
       full_name: extracted.name || '',
@@ -583,8 +487,7 @@ async function generatePersonaDraft(extractedText, options = {}) {
     };
 
     return { persona: enriched, mode: 'bedrock', warnings: [] };
-  } catch (_) {
-    // Schema validation failure counts as malformed output -> fallback.
+  } catch {
     return { error: 'AI_GENERATION_FAILED', retryable: true };
   }
 }
@@ -592,45 +495,25 @@ async function generatePersonaDraft(extractedText, options = {}) {
 /**
  * PUBLIC_INTERFACE
  */
-async function createPersonaDraft({ personaDraftJson, alignmentScore = 0 }) {
+export async function createPersonaDraft({ personaDraftJson, alignmentScore = 0 }) {
   /**
    * Persist a persona draft JSON into the persona_drafts table (best-effort, DB-optional).
-   *
-   * When DB is configured (DB_ENGINE=mysql and MySQL env is present), inserts into:
-   *   persona_drafts(id, persona_draft_json, alignment_score, created_at)
    *
    * @param {{personaDraftJson: object, alignmentScore?: number}} input
    * @returns {Promise<{personaDraftId: string|null, savedPersonaDraftJson: object|null, persisted: boolean}>}
    */
-  const { uuidV4 } = require('../utils/uuid');
-  const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../db/connection');
-
   const engine = getDbEngine();
   if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) {
-    // DB not configured; do not throw (keeps service usable in dev/CI without DB).
     return { personaDraftId: null, savedPersonaDraftJson: null, persisted: false };
   }
 
   const personaDraftId = uuidV4();
 
-  /**
-   * Compatibility note:
-   * - Historically, downstream integration tests expect a "legacy" persona draft JSON shape
-   *   (full_name/professional_title/mastery_skills/etc).
-   * - The newer Bedrock-backed draft schema is validated by _assertValidPersonaDraft().
-   *
-   * For persistence, we accept either:
-   * - v2 schema (validated), OR
-   * - any JSON object (legacy), as long as it's a plain object.
-   *
-   * This keeps DB writes working across evolving contracts while the app migrates.
-   */
   const obj = personaDraftJson && typeof personaDraftJson === 'object' ? personaDraftJson : null;
   if (!obj || Array.isArray(obj)) {
     throw _jsonError('INVALID_PERSONA_DRAFT_JSON', 'personaDraftJson must be a JSON object.');
   }
 
-  // If it looks like v2 schema, validate strictly; otherwise persist as-is.
   let savedPersonaDraftJson = obj;
   if (
     Object.prototype.hasOwnProperty.call(obj, 'professional_summary') ||
@@ -655,24 +538,13 @@ async function createPersonaDraft({ personaDraftJson, alignmentScore = 0 }) {
 /**
  * PUBLIC_INTERFACE
  */
-async function finalizePersona(draftId) {
+export async function finalizePersona(draftId) {
   /**
    * Finalize a previously saved persona draft by copying it from persona_drafts to persona_final.
-   *
-   * Behavior:
-   * - Fetch persona_draft_json from persona_drafts by id
-   * - Insert into persona_final with a new id
-   * - Return { finalPersonaId }
-   *
-   * DB-optional:
-   * - If DB isn't configured, returns a deterministic error.
    *
    * @param {string} draftId - persona_drafts.id
    * @returns {Promise<{finalPersonaId: string}>}
    */
-  const { uuidV4 } = require('../utils/uuid');
-  const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../db/connection');
-
   const engine = getDbEngine();
   if (!(engine === 'mysql' && isDbConfigured() && isMysqlConfigured())) {
     const err = _jsonError('DB_NOT_CONFIGURED', 'Database is not configured for finalizePersona (requires MySQL).');
@@ -702,13 +574,11 @@ async function finalizePersona(draftId) {
     throw err;
   }
 
-  // MySQL JSON can be returned as string or object depending on driver config.
   let personaDraftJson = row.persona_draft_json;
   if (typeof personaDraftJson === 'string') {
     personaDraftJson = JSON.parse(personaDraftJson);
   }
 
-  // Validate schema before persisting final to avoid copying garbage.
   const validated = _assertValidPersonaDraft(personaDraftJson);
 
   const finalPersonaId = uuidV4();
@@ -723,10 +593,12 @@ async function finalizePersona(draftId) {
   return { finalPersonaId };
 }
 
-module.exports = {
+const personaService = {
   PERSONA_SYSTEM_PROMPT,
   personaDraftJsonSchema,
   generatePersonaDraft,
   createPersonaDraft,
   finalizePersona
 };
+
+export default personaService;

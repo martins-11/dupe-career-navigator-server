@@ -1,17 +1,22 @@
-'use strict';
+import express from 'express';
+import multer from 'multer';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-const express = require('express');
-const multer = require('multer');
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const { uuidV4 } = require('../utils/uuid');
-const documentsRepo = require('../repositories/documentsRepoAdapter');
-const { extractTextFromUploadedFile } = require('../services/extractionService');
-const { normalizeText } = require('../services/normalizationService');
-const { DOCUMENT_CATEGORY_VALUES, normalizeDocumentCategory } = require('../models/documentCategories');
-const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
-const bedrockService = require('../services/bedrockService');
+import { uuidV4 } from '../utils/uuid.js';
+import documentsRepo from '../repositories/documentsRepoAdapter.js';
+import { extractTextFromUploadedFile } from '../services/extractionService.js';
+import { normalizeText } from '../services/normalizationService.js';
+import { DOCUMENT_CATEGORY_VALUES, normalizeDocumentCategory } from '../models/documentCategories.js';
+import userTargetsRepo from '../repositories/userTargetsRepoAdapter.js';
+import bedrockService from '../services/bedrockService.js';
+
+import { extractNameAndCurrentRole } from '../utils/nameRoleExtraction.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
@@ -337,7 +342,6 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
     // Best-effort name extraction for performance reviews
     if (category === 'performance_review' && normalizedText.trim()) {
       try {
-        const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
         const extracted = extractNameAndCurrentRole(normalizedText);
         extractedEmployeeName = extracted?.name ? String(extracted.name) : '';
       } catch (_) {
@@ -410,7 +414,6 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
         }
 
         // 2) Fallback (ONLY if Bedrock did not return values).
-        const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
         const heuristic = extractNameAndCurrentRole(normalizedText);
 
         const resolvedName =
@@ -781,4 +784,4 @@ router.post('/documents', handleMultiUpload({ routeName: 'documents', sourceDefa
  */
 router.post('/text', handleMultiUpload({ routeName: 'text', sourceDefault: 'text_upload' }));
 
-module.exports = router;
+export default router;

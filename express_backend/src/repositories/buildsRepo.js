@@ -1,7 +1,5 @@
-'use strict';
-
-const { query } = require('../db/query');
-const { uuidV4 } = require('../utils/uuid');
+import { query } from '../db/query.js';
+import { uuidV4 } from '../utils/uuid.js';
 
 /**
  * Builds repository (PostgreSQL scaffold).
@@ -25,7 +23,7 @@ const { uuidV4 } = require('../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-function isDbConfigured() {
+export function isDbConfigured() {
   /** Returns true if any PostgreSQL connection env var appears to be set. */
   return Boolean(
     (process.env.PG_CONNECTION_STRING && process.env.PG_CONNECTION_STRING.trim()) ||
@@ -46,7 +44,7 @@ function ensureDbConfigured() {
 }
 
 // PUBLIC_INTERFACE
-async function createBuild(input) {
+export async function createBuild(input) {
   /**
    * Create a build row in Postgres and return it.
    * NOTE: This is scaffold SQL; schema/table may evolve.
@@ -89,7 +87,7 @@ async function createBuild(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getBuildById(buildId) {
+export async function getBuildById(buildId) {
   /** Fetch build by id. Returns null if not found. */
   ensureDbConfigured();
 
@@ -116,7 +114,7 @@ async function getBuildById(buildId) {
 }
 
 // PUBLIC_INTERFACE
-async function updateBuild(buildId, patch) {
+export async function updateBuild(buildId, patch) {
   /**
    * Update mutable build fields.
    * NOTE: dynamic SQL kept minimal and restricted to known columns.
@@ -175,9 +173,11 @@ async function updateBuild(buildId, patch) {
   return res.rows[0] || null;
 }
 
-module.exports = {
+const buildsRepo = {
   isDbConfigured,
   createBuild,
   getBuildById,
   updateBuild
 };
+
+export default buildsRepo;

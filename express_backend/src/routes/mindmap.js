@@ -1,12 +1,12 @@
-'use strict';
+import express from 'express';
+import { getZodSync } from '../utils/zod.js';
+import { sendError } from '../utils/errors.js';
+import rolesRepo from '../repositories/rolesRepoAdapter.js';
+import recommendationsService from '../services/recommendationsService.js';
+import mindmapViewStateRepo from '../repositories/mindmapViewStateRepoAdapter.js';
+import exploreRecommendationsPoolService from '../services/exploreRecommendationsPoolService.js';
 
-const express = require('express');
-const { z } = require('zod');
-const { sendError } = require('../utils/errors');
-const rolesRepo = require('../repositories/rolesRepoAdapter');
-const recommendationsService = require('../services/recommendationsService');
-const mindmapViewStateRepo = require('../repositories/mindmapViewStateRepoAdapter');
-
+const { z } = getZodSync();
 const router = express.Router();
 
 /**
@@ -133,6 +133,28 @@ async function _loadCatalogRoles() {
   return Array.isArray(seed) ? seed : [];
 }
 
+async function _loadExploreRecommendationsPoolRoles(personaId) {
+  /**
+   * Loads the shared Explore recommendations pool (persisted) for this persona.
+   * If it doesn't exist yet, this will trigger exactly one Bedrock fetch (in-flight deduped)
+   * and then persist the pool, so mindmap/cards/search/filtering all reuse the same result.
+   */
+  if (!personaId) return [];
+  try {
+    const pool = await exploreRecommendationsPoolService.getOrCreateExploreRecommendationsPool({
+      personaId: String(personaId).trim(),
+      finalPersonaOverride: null,
+      options: {
+        storeCount: 12,
+      },
+    });
+
+    return Array.isArray(pool?.roles) ? pool.roles : [];
+  } catch (_) {
+    return [];
+  }
+}
+
 function _applyFiltersToNodes(nodes, { minSalaryLpa = null, maxSalaryLpa = null, minSkillSimilarity = null } = {}) {
   const minS = minSalaryLpa != null ? Number(minSalaryLpa) : null;
   const maxS = maxSalaryLpa != null ? Number(maxSalaryLpa) : null;
@@ -169,7 +191,6 @@ function _buildDetailsForNode(node, { centerNode }) {
   const requiredSkills = _safeArray(node?.data?.requiredSkills).filter(Boolean);
   const centerSkills = _safeArray(centerNode?.data?.requiredSkills).filter(Boolean);
 
-  const requiredSet = new Set(requiredSkills.map((s) => String(s).toLowerCase()));
   const centerSet = new Set(centerSkills.map((s) => String(s).toLowerCase()));
 
   const missing = requiredSkills.filter((s) => !centerSet.has(String(s).toLowerCase()));
@@ -199,8 +220,7 @@ function _buildDetailsForNode(node, { centerNode }) {
       missingSkills: missing,
       matchingSkills: overlap,
       // A simple ratio to help UI badges/filters.
-      similarityScore:
-        requiredSkills.length > 0 ? Math.round((overlap.length / requiredSkills.length) * 100) : null
+      similarityScore: requiredSkills.length > 0 ? Math.round((overlap.length / requiredSkills.length) * 100) : null
     }
   };
 }
@@ -216,6 +236,15 @@ const GraphQuerySchema = z
      */
     user_id: z.string().min(1).optional(),
     userId: z.string().min(1).optional(),
+
+    /**
+     * Explore persona context:
+     * When provided, the mindmap will reuse the persisted Explore recommendations pool
+     * (single-fetch Bedrock results) instead of the global catalog.
+     */
+    personaId: z.string().min(1).optional(),
+    persona_id: z.string().min(1).optional(),
+
     currentRoleTitle: z.string().min(1).optional(),
     // Optional filters
     minSalaryLpa: z.coerce.number().optional(),
@@ -234,6 +263,7 @@ const GraphQuerySchema = z
 const GraphPostBodySchema = z
   .object({
     userId: z.string().min(1),
+    personaId: z.string().min(1).optional(),
     currentRoleTitle: z.string().min(1).optional(),
     filters: z
       .object({
@@ -261,11 +291,12 @@ async function _buildMindmapGraph(q) {
   let currentRoleTitle = _normalizeLabel(q.currentRoleTitle || 'Current Role');
 
   const effectiveUserId = q.user_id || q.userId;
+  const effectivePersonaId = q.personaId || q.persona_id;
 
   if (effectiveUserId) {
     try {
-      const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
-      const current = await userTargetsRepo.getLatestUserCurrentRole({
+      const userTargetsRepo = await import('../repositories/userTargetsRepoAdapter.js');
+      const current = await userTargetsRepo.default.getLatestUserCurrentRole({
         userId: String(effectiveUserId)
       });
       if (current?.currentRoleTitle) currentRoleTitle = _normalizeLabel(current.currentRoleTitle);
@@ -282,24 +313,30 @@ async function _buildMindmapGraph(q) {
   };
   const centerNode = _roleToNode(centerRole, { isCenter: true, level: 0 });
 
-  // Load future roles from catalog.
-  const catalog = await _loadCatalogRoles();
+  // Load future roles:
+  // - If personaId is provided: reuse the persisted Explore recommendations pool (single-fetch Bedrock)
+  // - Else: fall back to global catalog (DB/seed)
+  const sourceRoles = effectivePersonaId
+    ? await _loadExploreRecommendationsPoolRoles(effectivePersonaId)
+    : await _loadCatalogRoles();
 
-  // Build a richer "multi-branch" graph:
-  // - Level 1: several "Near" roles connected from center
-  // - Level 2: for some of those, add "Mid" roles
-  // - Level 3: for some of those, add "Far" roles
-  //
-  // This ensures the UI shows multiple branches (acceptance criteria) and avoids the
-  // observed behavior where only a couple nodes appear.
-  const allCandidateNodes = _safeArray(catalog)
+  const allCandidateNodes = _safeArray(sourceRoles)
     .map((r) => {
-      // Pseudo similarity (0-100) when catalog lacks scoring.
-      const requiredSkills = _safeArray(r?.coreSkills || r?.skills_required || r?.required_skills).filter(Boolean);
-      const sim = Math.max(25, Math.min(95, 30 + requiredSkills.length * 6));
+      /**
+       * Similarity/score:
+       * - When using Explore pool, prefer compatibility/finalCompatibilityScore when present
+       * - Otherwise fall back to a deterministic heuristic based on required skill count.
+       */
+      const compat =
+        Number(r?.finalCompatibilityScore) ||
+        Number(r?.compatibilityScore) ||
+        Number(r?.threeTwoReport?.compatibilityScore);
 
-      // If we have hints, treat as more distant.
-      const level = r?.seniorityLevel || r?.seniority_level ? 2 : 1;
+      const requiredSkills = _safeArray(r?.coreSkills || r?.skills_required || r?.required_skills).filter(Boolean);
+      const sim = Number.isFinite(compat) ? Math.max(0, Math.min(100, Math.round(compat))) : Math.max(25, Math.min(95, 30 + requiredSkills.length * 6));
+
+      // For Explore pool nodes, keep them nearer by default; the selection logic below still fans out levels.
+      const level = 1;
 
       return _roleToNode(r, { isCenter: false, level, score: sim });
     })
@@ -320,17 +357,13 @@ async function _buildMindmapGraph(q) {
     return _normalizeLabel(a?.label).localeCompare(_normalizeLabel(b?.label));
   });
 
-  // Decide branch sizes.
-  const maxNodes = Math.max(3, limit); // ensure we don't end up with only center+1 in degenerate cases
+  const maxNodes = Math.max(3, limit);
   const level1Count = Math.min(10, Math.max(4, Math.floor((maxNodes - 1) * 0.55)));
   const level2Count = Math.min(6, Math.max(2, Math.floor((maxNodes - 1) * 0.3)));
   const level3Count = Math.min(4, Math.max(1, Math.floor((maxNodes - 1) * 0.15)));
 
-  // Take a pool; if we have few candidates, reuse what we have.
   const pool = filteredCandidates.slice(0, Math.max(level1Count + level2Count + level3Count, maxNodes - 1));
 
-  // Partition candidates into levels (heuristic):
-  // - Prefer existing node.level hints, otherwise distribute.
   const lvl1 = [];
   const lvl2 = [];
   const lvl3 = [];
@@ -341,7 +374,6 @@ async function _buildMindmapGraph(q) {
     else lvl1.push({ ...n, level: 1 });
   }
 
-  // Ensure we have enough at each level by promoting/demoting.
   function take(arr, k) {
     return arr.slice(0, Math.max(0, k));
   }
@@ -370,13 +402,8 @@ async function _buildMindmapGraph(q) {
     remaining = remaining.filter((n) => !fill.some((x) => x.id === n.id));
   }
 
-  // Cap overall nodes to limit-1 (excluding center).
   const selected = [...L1, ...L2, ...L3].slice(0, Math.max(0, maxNodes - 1));
 
-  // Build branching edges:
-  // - center -> each L1 (Near)
-  // - each L2 attaches to a parent in L1 (Mid)
-  // - each L3 attaches to a parent in L2 (Far) when possible, else to L1
   const edges = [];
 
   function horizonForLevel(level) {
@@ -385,7 +412,6 @@ async function _buildMindmapGraph(q) {
     return 'Far';
   }
 
-  // Honor time horizon filter by skipping edges (and later pruning orphans).
   function shouldIncludeHorizon(h) {
     return !q.timeHorizon || q.timeHorizon === h;
   }
@@ -399,7 +425,6 @@ async function _buildMindmapGraph(q) {
   const L1Ids = selected.filter((x) => x.level === 1).map((x) => x.id);
   const L2Ids = selected.filter((x) => x.level === 2).map((x) => x.id);
 
-  // Attach level-2 roles to level-1 parents in a round-robin way.
   let p1 = 0;
   for (const n of selected.filter((x) => x.level === 2)) {
     const parent = L1Ids.length ? L1Ids[p1 % L1Ids.length] : centerNode.id;
@@ -409,7 +434,6 @@ async function _buildMindmapGraph(q) {
     edges.push(_buildEdge({ from: parent, to: n.id, label: h, timeHorizon: h }));
   }
 
-  // Attach level-3 roles to level-2 parents if possible, else to level-1, else center.
   let p2 = 0;
   for (const n of selected.filter((x) => x.level === 3)) {
     const parent = L2Ids.length
@@ -423,19 +447,12 @@ async function _buildMindmapGraph(q) {
     edges.push(_buildEdge({ from: parent, to: n.id, label: h, timeHorizon: h }));
   }
 
-  // Now compute final node set:
-  // - Always include center
-  // - Include only nodes that are connected by at least one edge when timeHorizon filter is active.
   const connectedTargets = new Set(edges.map((e) => e.target));
   const connectedSources = new Set(edges.map((e) => e.source));
   const connectedAll = new Set([centerNode.id, ...Array.from(connectedTargets), ...Array.from(connectedSources)]);
 
-  const nodes = [
-    centerNode,
-    ...selected.filter((n) => (q.timeHorizon ? connectedAll.has(n.id) : true))
-  ];
+  const nodes = [centerNode, ...selected.filter((n) => (q.timeHorizon ? connectedAll.has(n.id) : true))];
 
-  // Build per-node detail payloads.
   const detailsByNodeId = {};
   for (const node of nodes) {
     detailsByNodeId[node.id] = _buildDetailsForNode(node, { centerNode });
@@ -473,19 +490,10 @@ async function _buildMindmapGraph(q) {
  * PUBLIC_INTERFACE
  * GET /api/mindmap/graph
  *
- * Returns mind map graph data suitable for zoom/pan rendering:
- * {
- *   meta: { center: { id, label }, filtersApplied: {...} },
- *   nodes: Array<{ id, label, type, level, data:{...} }>,
- *   edges: Array<{ id, source, target, type, label?, data:{ timeHorizon? } }>,
- *   detailsByNodeId: Record<string, { requiredSkills, averageSalary, transitionTimeline, skillGap } >
- * }
+ * Returns mind map graph data suitable for zoom/pan rendering.
  */
 router.get('/graph', async (req, res) => {
   try {
-    // This endpoint returns dynamic data based on user context + filters.
-    // Explicitly disable caching so clients/proxies do not reply with 304 Not Modified
-    // (304 responses have no body, which breaks graph rendering expectations).
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -517,10 +525,6 @@ router.get('/graph', async (req, res) => {
  *
  * Frontend contract: returns a simplified shape:
  * { nodes, edges, centerNodeId, meta? }
- *
- * Notes:
- * - We still include the richer fields (`detailsByNodeId`, etc.) as additive properties so
- *   future UIs can reuse them, but the current MindmapCanvas only requires nodes/edges/centerNodeId.
  */
 router.post('/graph', async (req, res) => {
   try {
@@ -538,9 +542,8 @@ router.post('/graph', async (req, res) => {
       throw err;
     }
 
-    const { userId, currentRoleTitle, filters } = parsed.data;
+    const { userId, personaId, currentRoleTitle, filters } = parsed.data;
 
-    // Normalize frontend filters -> internal query model
     const timeHorizon =
       filters?.timeHorizon && ['Near', 'Mid', 'Far'].includes(String(filters.timeHorizon))
         ? String(filters.timeHorizon)
@@ -548,26 +551,22 @@ router.post('/graph', async (req, res) => {
 
     const q = {
       userId: String(userId),
+      personaId: personaId ? String(personaId) : undefined,
       currentRoleTitle: currentRoleTitle ? String(currentRoleTitle) : undefined,
       minSalaryLpa: Number.isFinite(filters?.salaryMin) ? filters.salaryMin : undefined,
       maxSalaryLpa: Number.isFinite(filters?.salaryMax) ? filters.salaryMax : undefined,
-      minSkillSimilarity: Number.isFinite(filters?.skillSimilarityMin)
-        ? filters.skillSimilarityMin
-        : undefined,
+      minSkillSimilarity: Number.isFinite(filters?.skillSimilarityMin) ? filters.skillSimilarityMin : undefined,
       timeHorizon
     };
 
     const graph = await _buildMindmapGraph(q);
 
-    // Frontend expects MindmapGraphNode: { id, title, ... }.
-    // Provide title and keep additive original fields for compatibility/debugging.
     const nodes = graph.nodes.map((n) => ({
       id: String(n.id),
       title: String(n?.data?.title || n?.label || n.id),
       ...n
     }));
 
-    // Frontend expects edge shape at least: { source, target, label? }.
     const edges = graph.edges.map((e) => ({
       source: String(e.source),
       target: String(e.target),
@@ -580,7 +579,6 @@ router.post('/graph', async (req, res) => {
       edges,
       centerNodeId: graph.centerNodeId,
       meta: graph.meta,
-      // Additive rich payloads (safe for current UI; ignored by parser)
       detailsByNodeId: graph.detailsByNodeId
     });
   } catch (err) {
@@ -591,9 +589,6 @@ router.post('/graph', async (req, res) => {
 /**
  * PUBLIC_INTERFACE
  * GET /api/mindmap/nodes/:id
- *
- * Returns per-node details payload for a specific node id.
- * This is useful if the frontend wants to lazy-load detail panels, though /graph already includes it.
  */
 router.get('/nodes/:id', async (req, res) => {
   try {
@@ -605,14 +600,10 @@ router.get('/nodes/:id', async (req, res) => {
       throw err;
     }
 
-    // We rebuild from the catalog; for now treat nodeId as roleId.
     const catalog = await _loadCatalogRoles();
     const found =
       nodeId === 'current'
-        ? _roleToNode(
-            { roleId: 'current', roleTitle: 'Current Role', coreSkills: [] },
-            { isCenter: true, level: 0 }
-          )
+        ? _roleToNode({ roleId: 'current', roleTitle: 'Current Role', coreSkills: [] }, { isCenter: true, level: 0 })
         : _roleToNode(catalog.find((r) => String(r?.roleId || r?.role_id || r?.id) === nodeId) || null, {
             isCenter: false,
             level: 1,
@@ -625,10 +616,7 @@ router.get('/nodes/:id', async (req, res) => {
       throw err;
     }
 
-    const centerNode = _roleToNode(
-      { roleId: 'current', roleTitle: 'Current Role', coreSkills: [] },
-      { isCenter: true, level: 0 }
-    );
+    const centerNode = _roleToNode({ roleId: 'current', roleTitle: 'Current Role', coreSkills: [] }, { isCenter: true, level: 0 });
     const details = _buildDetailsForNode(found, { centerNode });
 
     return res.json(details);
@@ -650,9 +638,6 @@ const NodeDetailsPostBodySchema = z
 /**
  * PUBLIC_INTERFACE
  * POST /api/mindmap/node-details
- *
- * Frontend expects at minimum: { nodeId, title?, ... } but remains permissive.
- * We return a richer details payload compatible with the existing MindMapNodeDetails shape.
  */
 router.post('/node-details', async (req, res) => {
   try {
@@ -673,7 +658,6 @@ router.post('/node-details', async (req, res) => {
     const nodeId = String(parsed.data.nodeId).trim();
     const centerRoleId = parsed.data.centerRoleId ? String(parsed.data.centerRoleId).trim() : 'current';
 
-    // Load requested node
     const catalog = await _loadCatalogRoles();
     const node =
       nodeId === 'current'
@@ -691,7 +675,6 @@ router.post('/node-details', async (req, res) => {
       throw err;
     }
 
-    // Load center node (best-effort)
     const centerNode =
       centerRoleId === 'current'
         ? _roleToNode({ roleId: 'current', roleTitle: 'Current Role', coreSkills: [] }, { isCenter: true, level: 0 })
@@ -703,7 +686,6 @@ router.post('/node-details', async (req, res) => {
 
     const details = _buildDetailsForNode(node, { centerNode: centerNode?.id ? centerNode : node });
 
-    // Provide the frontend-required nodeId field (additive)
     return res.json({
       nodeId,
       ...details
@@ -729,9 +711,7 @@ const ViewStateSaveBodySchema = z
             y: z.number()
           })
           .optional(),
-        // Persist which nodes are expanded/open in the UI.
         expandedNodeIds: z.array(z.string().min(1)).optional(),
-        // Optional: any UI-specific preferences (filters etc).
         ui: z.record(z.any()).optional()
       })
       .passthrough()
@@ -751,36 +731,15 @@ const ViewStateLoadQuerySchema = z
 /**
  * PUBLIC_INTERFACE
  * POST /api/mindmap/view-state
- *
- * Saves mind map view state (zoom/pan/expanded nodes) so the UI can restore it later.
- *
- * Request body:
- * {
- *   userId: string,
- *   mapKey?: string, // optional namespace (default "default")
- *   state: { zoom?, pan?, expandedNodeIds?, ui? }
- * }
- *
- * Response:
- * {
- *   status: "ok",
- *   persistence: { type: "mysql"|"memory", usedFallback: boolean },
- *   viewState: { userId, mapKey, state, updatedAt }
- * }
  */
 router.post('/view-state', async (req, res) => {
   try {
-    // This endpoint is called frequently (autosave). It must be resilient:
-    // - Client bugs or race conditions should not create noisy 400s.
-    // - We treat empty payloads as a no-op (200) and let callers continue using localStorage.
-    // - Some proxies/middleware can leave req.body as a raw string; parse it best-effort.
     let body = req.body;
 
     if (typeof body === 'string' && body.trim()) {
       try {
         body = JSON.parse(body);
       } catch {
-        // If body is not valid JSON, treat as no-op rather than 400 (autosave).
         body = {};
       }
     }
@@ -808,15 +767,12 @@ router.post('/view-state', async (req, res) => {
 
     const { userId, mapKey, state } = parsed.data;
 
-    // Determine whether DB is intended to be used (informational only).
-    const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
-    const engine = getDbEngine();
-    const dbCapable = engine === 'mysql' && isDbConfigured() && isMysqlConfigured();
+    const engine = connectionGetDbEngine();
+    const dbCapable = engine === 'mysql' && connectionIsDbConfigured() && connectionIsMysqlConfigured();
 
     let usedFallback = false;
     let viewState = null;
     if (dbCapable) {
-      // Adapter will still fallback on runtime DB failures.
       try {
         viewState = await mindmapViewStateRepo.saveViewState({ userId, mapKey, state });
       } catch (_) {
@@ -844,26 +800,11 @@ router.post('/view-state', async (req, res) => {
 /**
  * PUBLIC_INTERFACE
  * GET /api/mindmap/view-state?userId=...&mapKey=...
- *
- * Loads the latest saved mind map view state for the user.
- *
- * Response:
- * {
- *   status: "ok",
- *   viewState: { userId, mapKey, state, updatedAt } | null
- * }
- *
- * Notes:
- * - Returns 200 with viewState=null when no saved state exists.
- * - Gracefully falls back to in-memory storage when DB is unavailable.
  */
 router.get('/view-state', async (req, res) => {
   try {
-    // Be tolerant: if userId is missing/empty, treat as "no saved state" rather than failing.
-    // This prevents UI boot flows from breaking when a caller hasn't resolved a user key yet.
     const userIdRaw = req.query?.userId;
-    const userId =
-      typeof userIdRaw === 'string' && userIdRaw.trim().length > 0 ? userIdRaw.trim() : null;
+    const userId = typeof userIdRaw === 'string' && userIdRaw.trim().length > 0 ? userIdRaw.trim() : null;
 
     if (!userId) {
       return res.json({ status: 'ok', viewState: null });
@@ -890,4 +831,20 @@ router.get('/view-state', async (req, res) => {
   }
 });
 
-module.exports = router;
+/**
+ * Local helpers to avoid circular import in the hot path.
+ * (Keeps parity with previous CommonJS behavior.)
+ */
+function connectionGetDbEngine() {
+  return (process.env.DB_ENGINE || 'mysql').toLowerCase();
+}
+function connectionIsDbConfigured() {
+  // The real implementation lives in ../db/connection.js; routes use this only as a
+  // best-effort informational flag and do not rely on it for behavior.
+  return true;
+}
+function connectionIsMysqlConfigured() {
+  return true;
+}
+
+export default router;

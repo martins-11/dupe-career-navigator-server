@@ -1,59 +1,68 @@
-'use strict';
+/**
+ * Request timeout middleware.
+ *
+ * Ensures requests do not hang indefinitely (especially when DB/network is misconfigured).
+ */
 
-// PUBLIC_INTERFACE
-function requestTimeout() {
-  /** Enforces a per-request timeout using REQUEST_TIMEOUT_MS (defaults to 30000).
-   *
-   * Important hardening:
-   * - Ensures we send at most one response (prevents ERR_HTTP_HEADERS_SENT).
-   * - Marks the request as timed out so downstream handlers can stop work/avoid responding.
-   *
-   * Timeout selection:
-   * - Global default: REQUEST_TIMEOUT_MS (30s)
-   * - For slow AI endpoints we allow a larger budget:
-   *   - REQUEST_TIMEOUT_INITIAL_RECOMMENDATIONS_MS (defaults to 45000)
-   */
-  const defaultTimeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
-  const initialRecommendationsTimeoutMs = Number(
-    process.env.REQUEST_TIMEOUT_INITIAL_RECOMMENDATIONS_MS || 45000
-  );
-
+/**
+ * PUBLIC_INTERFACE
+ * @returns {import('express').RequestHandler}
+ */
+export function requestTimeout() {
+  /** Express middleware enforcing an upper bound on request processing time. */
   return function requestTimeoutMiddleware(req, res, next) {
-    // Select a per-route timeout budget.
+    const msRaw = Number(process.env.REQUEST_TIMEOUT_MS || 60000);
+    const defaultTimeoutMs = Number.isFinite(msRaw) && msRaw > 0 ? msRaw : 60000;
+
+    /**
+     * Route-specific timeout override (CRITICAL for Bedrock-backed endpoints):
+     * - /api/recommendations/initial often needs >30s in some environments
+     * - Without a higher timeout, Bedrock gets aborted and the endpoint falls back.
+     *
+     * Env (optional):
+     * - REQUEST_TIMEOUT_INITIAL_RECOMMENDATIONS_MS (default: 45000)
+     */
+    const initialRecMsRaw = Number(process.env.REQUEST_TIMEOUT_INITIAL_RECOMMENDATIONS_MS || 45000);
+    const initialRecTimeoutMs =
+      Number.isFinite(initialRecMsRaw) && initialRecMsRaw > 0 ? initialRecMsRaw : 45000;
+
+    const url = String(req.originalUrl || req.url || '');
     const isInitialRecommendations =
-      req.method === 'GET' && (req.path === '/api/recommendations/initial' || req.path.endsWith('/recommendations/initial'));
+      url.includes('/recommendations/initial') || url.includes('/recommendations/pool');
 
-    const timeoutMs = isInitialRecommendations
-      ? initialRecommendationsTimeoutMs
-      : defaultTimeoutMs;
-    // Markers used by downstream handlers.
-    req.timedOut = false;
+    const timeoutMs = isInitialRecommendations ? initialRecTimeoutMs : defaultTimeoutMs;
 
-    // Expose timing metadata so downstream services can enforce a time budget
-    // (e.g., cap Bedrock invocation time to ensure we respond before timeout).
+    // Capture start time for debug/telemetry.
+    const start = Date.now();
+
+    /**
+     * Attach request timing/deadline metadata for downstream time budgeting.
+     * Routes like /api/recommendations/initial use these to compute a safe Bedrock AbortController budget.
+     */
+    req.requestStartMs = start;
     req.requestTimeoutMs = timeoutMs;
-    req.requestStartMs = Date.now();
-    req.requestDeadlineMs = req.requestStartMs + timeoutMs;
+    req.requestDeadlineMs = start + timeoutMs;
 
-    // Use an explicit timer instead of res.setTimeout callback sending a response,
-    // because res.setTimeout can still fire even if downstream sends later,
-    // causing a second response attempt.
-    const timer = setTimeout(() => {
-      req.timedOut = true;
+    // Set a hard timeout on the response.
+    res.setTimeout(timeoutMs, () => {
+      if (res.headersSent) return;
+      res.status(504).json({
+        error: 'request_timeout',
+        message: `Request exceeded ${timeoutMs}ms`
+      });
+    });
 
-      // Only attempt to respond if nothing has been sent yet.
-      if (!res.headersSent) {
-        res.status(504).json({ error: 'request_timeout' });
+    // Attach a small debug header once the response finishes.
+    res.on('finish', () => {
+      const elapsed = Date.now() - start;
+
+      // Avoid mutating headers after sent; this is just best-effort observability.
+      // eslint-disable-next-line no-console
+      if (process.env.LOG_REQUEST_TIMINGS === 'true') {
+        console.log(`[timing] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${elapsed}ms)`);
       }
-    }, timeoutMs);
-
-    // Ensure the timer is cleared when the response lifecycle ends.
-    const cleanup = () => clearTimeout(timer);
-    res.once('finish', cleanup);
-    res.once('close', cleanup);
+    });
 
     next();
   };
 }
-
-module.exports = { requestTimeout };

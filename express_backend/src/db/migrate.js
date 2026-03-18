@@ -1,7 +1,22 @@
-'use strict';
+import path from 'path';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
 
-const path = require('path');
-const dotenv = require('dotenv');
+import { getDbEngine, isDbConfigured, dbExecRaw, dbQuery, dbClose } from './connection.js';
+
+import { getMigrationSql as getPgInitSql } from './migrations/001_init.sql.js';
+import { getMigrationSql as getMysqlInitSql } from './migrations/001_init.mysql.sql.js';
+import { getMigrationSql as getMysqlDocumentsExtractedTextSql } from './migrations/002_documents_extracted_text.mysql.sql.js';
+import { getMigrationSql as getMysqlPersonasAndVersionsSql } from './migrations/003_personas_and_versions.mysql.sql.js';
+import { getMigrationSql as getMysqlPersonaDraftsSql } from './migrations/004_persona_drafts.mysql.sql.js';
+import { getMigrationSql as getMysqlPersonaFinalSql } from './migrations/005_persona_final.mysql.sql.js';
+import { getMigrationSql as getMysqlHolisticPersonaApiSql } from './migrations/006_holistic_persona_api.mysql.sql.js';
+import { getMigrationSql as getMysqlRolesCatalogSql } from './migrations/007_roles_catalog.mysql.sql.js';
+import { getMigrationSql as getMysqlUserTargetsSql } from './migrations/008_user_targets.mysql.sql.js';
+import { getMigrationSql as getMysqlMindmapViewStateSql } from './migrations/009_mindmap_view_state.mysql.sql.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * Migration runner (lightweight scaffold).
@@ -20,22 +35,6 @@ const dotenv = require('dotenv');
  */
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const { getDbEngine, isDbConfigured, dbExecRaw, dbQuery, dbClose } = require('./connection');
-const { getMigrationSql: getPgInitSql } = require('./migrations/001_init.sql');
-const { getMigrationSql: getMysqlInitSql } = require('./migrations/001_init.mysql.sql');
-const {
-  getMigrationSql: getMysqlDocumentsExtractedTextSql
-} = require('./migrations/002_documents_extracted_text.mysql.sql');
-const {
-  getMigrationSql: getMysqlPersonasAndVersionsSql
-} = require('./migrations/003_personas_and_versions.mysql.sql');
-const { getMigrationSql: getMysqlPersonaDraftsSql } = require('./migrations/004_persona_drafts.mysql.sql');
-const { getMigrationSql: getMysqlPersonaFinalSql } = require('./migrations/005_persona_final.mysql.sql');
-const { getMigrationSql: getMysqlHolisticPersonaApiSql } = require('./migrations/006_holistic_persona_api.mysql.sql');
-const { getMigrationSql: getMysqlRolesCatalogSql } = require('./migrations/007_roles_catalog.mysql.sql');
-const { getMigrationSql: getMysqlUserTargetsSql } = require('./migrations/008_user_targets.mysql.sql');
-const { getMigrationSql: getMysqlMindmapViewStateSql } = require('./migrations/009_mindmap_view_state.mysql.sql');
-
 function _splitSqlStatements(sql) {
   /**
    * Splits a SQL migration string into individual statements.
@@ -45,7 +44,7 @@ function _splitSqlStatements(sql) {
    * - We strip out full-line and inline `-- ...` comments.
    * - We do not attempt to parse semicolons inside quoted strings (not used in our DDL).
    */
-  const noLineComments = sql
+  const noLineComments = String(sql || '')
     .split('\n')
     .map((line) => {
       const idx = line.indexOf('--');
@@ -61,7 +60,7 @@ function _splitSqlStatements(sql) {
 }
 
 // PUBLIC_INTERFACE
-async function runMigrations() {
+export async function runMigrations() {
   /**
    * Runs the initial migration for the configured DB engine.
    *
@@ -98,6 +97,7 @@ async function runMigrations() {
       for (const m of migrations) {
         const statements = _splitSqlStatements(m.sql);
         for (const stmt of statements) {
+          // eslint-disable-next-line no-await-in-loop
           await dbExecRaw(stmt);
         }
         // eslint-disable-next-line no-console
@@ -124,6 +124,6 @@ async function runMigrations() {
   }
 }
 
-runMigrations();
+void runMigrations();
 
-module.exports = { runMigrations };
+export default { runMigrations };

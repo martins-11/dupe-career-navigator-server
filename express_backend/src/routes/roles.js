@@ -1,19 +1,20 @@
-'use strict';
+import express from 'express';
+import { sendError } from '../utils/errors.js';
+import rolesRepo from '../repositories/rolesRepoAdapter.js';
+import { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } from '../db/connection.js';
+import recommendationsService from '../services/recommendationsService.js';
+import bedrockService from '../services/bedrockService.js';
+import personasRepo from '../repositories/personasRepoAdapter.js';
 
-const express = require('express');
-const { sendError } = require('../utils/errors');
-const rolesRepo = require('../repositories/rolesRepoAdapter');
-const { getDbEngine, isDbConfigured, isMysqlConfigured, dbQuery } = require('../db/connection');
-const recommendationsService = require('../services/recommendationsService');
-const bedrockService = require('../services/bedrockService');
-const personasRepo = require('../repositories/personasRepoAdapter');
-
-const { validateThreeTwoBalance, buildThreeTwoReport, scoreRoleCompatibility } = require('../services/scoringEngine');
-const {
+import { validateThreeTwoBalance, buildThreeTwoReport, scoreRoleCompatibility } from '../services/scoringEngine.js';
+import {
   extractFinalPersonaObject,
   buildScoringUserSkills,
   normalizeSalaryToIndiaLpaRange,
-} = require('../services/rolesSearchUtils');
+} from '../services/rolesSearchUtils.js';
+
+import { exploreSearchRolesPersonaDriven } from '../services/rolesExploreSearchService.js';
+import { buildBedrockErrorMeta } from '../utils/bedrockErrorMeta.js';
 
 const router = express.Router();
 
@@ -233,7 +234,6 @@ router.get('/autocomplete', async (req, res) => {
      */
     const personaId = req.query?.personaId || req.query?.persona_id;
 
-    const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
     try {
       const roles = await exploreSearchRolesPersonaDriven({
         q: query,
@@ -248,7 +248,6 @@ router.get('/autocomplete', async (req, res) => {
       const unique = Array.from(new Map(titles.map((t) => [t.toLowerCase(), t])).values()).slice(0, limit);
       return res.json(unique);
     } catch (err) {
-      const { buildBedrockErrorMeta } = require('../utils/bedrockErrorMeta');
       console.error('[roles.autocomplete] Bedrock-driven autocomplete failed:', err);
 
       // Return a JSON error (not HTML), and include bedrockError meta for UI diagnostics.
@@ -291,8 +290,6 @@ router.get('/autocomplete', async (req, res) => {
  */
 router.get('/search', async (req, res) => {
   try {
-    const { exploreSearchRolesPersonaDriven } = require('../services/rolesExploreSearchService');
-
     const q = String(req.query?.q || '').trim();
     const personaId = req.query?.personaId || req.query?.persona_id;
 
@@ -308,7 +305,6 @@ router.get('/search', async (req, res) => {
     // Bedrock-only contract: always return a JSON array on success.
     return res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    const { buildBedrockErrorMeta } = require('../utils/bedrockErrorMeta');
     console.error('[roles.search] Bedrock-driven search failed:', err);
 
     // Stop returning HTTP 200 with [] on upstream failures; propagate a useful JSON error.
@@ -319,4 +315,5 @@ router.get('/search', async (req, res) => {
     return sendError(res, err);
   }
 });
-module.exports = router;
+
+export default router;

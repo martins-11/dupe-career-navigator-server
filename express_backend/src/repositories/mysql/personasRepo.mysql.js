@@ -1,8 +1,6 @@
-'use strict';
-
-const { dbQuery } = require('../../db/connection');
-const { ensureMysqlSchemaCompatible } = require('../../db/schemaSelfHeal');
-const { uuidV4 } = require('../../utils/uuid');
+import { dbQuery } from '../../db/connection.js';
+import { ensureMysqlSchemaCompatible } from '../../db/schemaSelfHeal.js';
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * MySQL repository for:
@@ -13,7 +11,7 @@ const { uuidV4 } = require('../../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-async function createPersona(input) {
+export async function createPersona(input) {
   /** Create a persona. Optionally creates version 1 if personaJson provided. */
   const personaId = uuidV4();
   const now = new Date();
@@ -48,7 +46,7 @@ async function createPersona(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getPersonaById(personaId) {
+export async function getPersonaById(personaId) {
   /** Fetch a persona row by id. Returns null if not found. */
   const res = await dbQuery(
     `
@@ -68,7 +66,7 @@ async function getPersonaById(personaId) {
 }
 
 // PUBLIC_INTERFACE
-async function updatePersona(personaId, patch) {
+export async function updatePersona(personaId, patch) {
   /**
    * Update persona metadata (e.g., title).
    * personaJson is versioned and should be written via createPersonaVersion().
@@ -101,7 +99,7 @@ async function updatePersona(personaId, patch) {
 }
 
 // PUBLIC_INTERFACE
-async function createPersonaVersion(personaId, input) {
+export async function createPersonaVersion(personaId, input) {
   /**
    * Create a persona version row.
    * If version is omitted, computes next version = max(version)+1.
@@ -150,7 +148,7 @@ async function createPersonaVersion(personaId, input) {
 }
 
 // PUBLIC_INTERFACE
-async function listPersonaVersions(personaId) {
+export async function listPersonaVersions(personaId) {
   /** List persona versions (ascending). */
   const res = await dbQuery(
     `
@@ -171,7 +169,7 @@ async function listPersonaVersions(personaId) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestPersonaVersion(personaId) {
+export async function getLatestPersonaVersion(personaId) {
   /** Get the latest persona version (highest version). Returns null if none. */
   const res = await dbQuery(
     `
@@ -203,7 +201,7 @@ async function getLatestPersonaVersion(personaId) {
  */
 
 // PUBLIC_INTERFACE
-async function saveDraft(personaId, draftJson) {
+export async function saveDraft(personaId, draftJson) {
   /** Save a persona draft JSON blob to MySQL persona_drafts (persona-scoped), returning a small payload. */
   const id = uuidV4();
   const pid = String(personaId || '').trim();
@@ -234,7 +232,7 @@ async function saveDraft(personaId, draftJson) {
 }
 
 // PUBLIC_INTERFACE
-async function getDraft(personaId) {
+export async function getDraft(personaId) {
   /** Get the latest saved draft for a persona (strict personaId-scoped lookup). */
   const pid = String(personaId || '').trim();
   if (!pid) return null;
@@ -274,7 +272,7 @@ async function getDraft(personaId) {
 }
 
 // PUBLIC_INTERFACE
-async function saveFinal(personaId, finalJson) {
+export async function saveFinal(personaId, finalJson) {
   /** Save a persona final JSON blob to MySQL persona_final (persona-scoped), returning a small payload. */
   const id = uuidV4();
   const pid = String(personaId || '').trim();
@@ -305,7 +303,7 @@ async function saveFinal(personaId, finalJson) {
 }
 
 // PUBLIC_INTERFACE
-async function getFinal(personaId) {
+export async function getFinal(personaId) {
   /**
    * Get the latest finalized persona for a given personaId (strict personaId-scoped lookup).
    *
@@ -354,7 +352,7 @@ async function getFinal(personaId) {
   };
 }
 
-module.exports = {
+const personasRepoMysql = {
   createPersona,
   getPersonaById,
   updatePersona,
@@ -366,3 +364,5 @@ module.exports = {
   saveFinal,
   getFinal
 };
+
+export default personasRepoMysql;

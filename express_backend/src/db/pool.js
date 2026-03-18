@@ -1,6 +1,4 @@
-'use strict';
-
-const { Pool } = require('pg');
+import { Pool } from 'pg';
 
 /**
  * PostgreSQL connection pool.
@@ -17,7 +15,7 @@ const { Pool } = require('pg');
 let _pool = null;
 
 // PUBLIC_INTERFACE
-function getPool() {
+export function getPool() {
   /** Returns a singleton pg Pool configured from environment variables. */
   if (_pool) return _pool;
 
@@ -28,19 +26,15 @@ function getPool() {
 
   // For RDS you typically want SSL; however we keep this env-driven and default to false to avoid surprises locally.
   const sslEnabled =
-    sslMode === 'require' ||
-    sslMode === 'verify-full' ||
-    sslMode === 'verify-ca' ||
-    pgssl === 'true';
+    sslMode === 'require' || sslMode === 'verify-full' || sslMode === 'verify-ca' || pgssl === 'true';
 
-  const ssl =
-    sslEnabled
-      ? {
-          // For early scaffolding, do not enforce CA verification unless provided.
-          // Production should set proper CA / rejectUnauthorized=true.
-          rejectUnauthorized: false
-        }
-      : undefined;
+  const ssl = sslEnabled
+    ? {
+        // For early scaffolding, do not enforce CA verification unless provided.
+        // Production should set proper CA / rejectUnauthorized=true.
+        rejectUnauthorized: false
+      }
+    : undefined;
 
   const poolConfig = connectionString
     ? { connectionString, ssl }
@@ -57,4 +51,4 @@ function getPool() {
   return _pool;
 }
 
-module.exports = { getPool };
+export default { getPool };

@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * MySQL migration: documents + extracted_text tables
@@ -27,7 +27,7 @@
  */
 
 // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for creating documents + extracted_text tables in MySQL. */
   return `
 -- 002_documents_extracted_text (mysql)
@@ -151,4 +151,4 @@ DEALLOCATE PREPARE kavia_stmt_create_view;
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };

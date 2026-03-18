@@ -1,15 +1,18 @@
-'use strict';
+import express from 'express';
 
-const express = require('express');
-const {
+import {
   PersonaCreateRequest,
   PersonaUpdateRequest,
   PersonaVersionCreateRequest
-} = require('../models/personas');
-const personasRepo = require('../repositories/personasRepoAdapter');
-const rolesRepo = require('../repositories/rolesRepoAdapter');
-const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
-const { PersonaTargetRoleSelectRequest } = require('../models/targets');
+} from '../models/personas.js';
+
+import personasRepo from '../repositories/personasRepoAdapter.js';
+import rolesRepo from '../repositories/rolesRepoAdapter.js';
+import userTargetsRepo from '../repositories/userTargetsRepoAdapter.js';
+import { PersonaTargetRoleSelectRequest } from '../models/targets.js';
+
+import { getDbEngine, isDbConfigured, isMysqlConfigured } from '../db/connection.js';
+import { DEFAULT_ROLES_CATALOG } from '../services/recommendationsService.js';
 
 const router = express.Router();
 
@@ -31,7 +34,7 @@ function handleRepoError(res, err) {
   // In adapter mode, DB-not-configured should never be fatal (memory fallback).
   // Only treat connection/runtime DB errors as 503.
   const msg = String(err && err.message ? err.message : err);
-  if (/database/i.test(msg) || /postgres/i.test(msg) || /connection/i.test(msg)) {
+  if (/database/i.test(msg) || /postgres/i.test(msg) || /connection/i.test(msg) || /mysql/i.test(msg)) {
     return res.status(503).json({ error: 'db_unavailable', message: msg });
   }
   return res.status(500).json({ error: 'internal_server_error', message: msg });
@@ -172,12 +175,11 @@ router.post('/target-role', async (req, res) => {
      *
      * IMPORTANT: role_id is not guaranteed to be a UUID.
      */
-    const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
     const dbAvailable = getDbEngine() === 'mysql' && isDbConfigured() && isMysqlConfigured();
 
     const roleId = String(parsed.data.role_id).trim();
 
-    const seed = require('../services/recommendationsService')?.DEFAULT_ROLES_CATALOG;
+    const seed = DEFAULT_ROLES_CATALOG;
     const seedHasRole =
       Array.isArray(seed) &&
       seed.some((r) => {
@@ -205,7 +207,9 @@ router.post('/target-role', async (req, res) => {
     if (dbAvailable) {
       const roleExists = await rolesRepo.roleExists(roleId);
       if (!roleExists && !seedHasRole && !isBedrockRoleId) {
-        return res.status(404).json({ error: 'role_not_found', message: 'role_id does not exist in roles catalog.' });
+        return res
+          .status(404)
+          .json({ error: 'role_not_found', message: 'role_id does not exist in roles catalog.' });
       }
     }
     // If DB is not available, allow saving (memory fallback will persist).
@@ -283,4 +287,4 @@ router.get('/target-role', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;

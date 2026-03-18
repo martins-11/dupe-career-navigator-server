@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * Normalization service used throughout the workflow.
  *
@@ -10,7 +8,7 @@
  */
 
 // PUBLIC_INTERFACE
-function normalizeText(text, options) {
+export function normalizeText(text, options) {
   /**
    * Normalize a text blob for downstream processing.
    *
@@ -44,5 +42,3 @@ function normalizeText(text, options) {
     stats: { originalLength: original.length, normalizedLength: normalized.length }
   };
 }
-
-module.exports = { normalizeText };

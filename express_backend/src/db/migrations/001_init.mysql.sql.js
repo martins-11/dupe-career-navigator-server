@@ -1,4 +1,4 @@
-'use strict';
+
 
 /**
  * Placeholder "migration" representing a MySQL schema roughly equivalent to the Postgres scaffold.
@@ -12,7 +12,7 @@
  */
 
 // PUBLIC_INTERFACE
-function getMigrationSql() {
+export function getMigrationSql() {
   /** Returns SQL statements for initializing the MySQL database schema (placeholder). */
   return `
 -- 001_init (mysql placeholder)
@@ -111,4 +111,4 @@ CREATE TABLE IF NOT EXISTS ai_runs (
 `;
 }
 
-module.exports = { getMigrationSql };
+export default { getMigrationSql };

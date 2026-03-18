@@ -1,53 +1,63 @@
-'use strict';
-
 /**
- * Express backend entrypoint.
+ * Express backend entrypoint (ESM).
  *
  * Provides:
  * - Health endpoints
  * - Document storage/extracted-text persistence stubs (PostgreSQL-ready)
  *
- * Note: PostgreSQL credentials are intentionally env-based and optional for now.
+ * Note: DB credentials are intentionally env-based and optional for now.
  */
 
-const path = require('path');
+import path from 'path';
+import { fileURLToPath, pathToFileURL } from 'url';
+
+import dotenv from 'dotenv';
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import morgan from 'morgan';
+
+import { buildCorsOptions } from './config/cors.js';
+import { requestTimeout } from './middleware/requestTimeout.js';
+
+import healthRouter from './routes/health.js';
+import documentsRouter from './routes/documents.js';
+import personasRouter from './routes/personas.js';
+import uploadsRouter from './routes/uploads.js';
+import extractionRouter from './routes/extraction.js';
+import buildsRouter from './routes/builds.js';
+import aiRouter from './routes/ai.js';
+import orchestrationRouter from './routes/orchestration.js';
+import docsRouter from './routes/docs.js';
+
+import recommendationsRouter from './routes/recommendations.js';
+import pathsRouter from './routes/paths.js';
+import planRouter from './routes/plan.js';
+import profileRouter from './routes/profile.js';
+import rolesRouter from './routes/roles.js';
+
+import { ensureMysqlSchemaCompatible } from './db/schemaSelfHeal.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Always load env vars from express_backend/.env, regardless of process CWD.
-require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
-
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const morgan = require('morgan');
-
-const { buildCorsOptions } = require('./config/cors');
-const { requestTimeout } = require('./middleware/requestTimeout');
-
-const healthRouter = require('./routes/health');
-const documentsRouter = require('./routes/documents');
-const personasRouter = require('./routes/personas');
-const uploadsRouter = require('./routes/uploads');
-const extractionRouter = require('./routes/extraction');
-const buildsRouter = require('./routes/builds');
-const aiRouter = require('./routes/ai');
-const orchestrationRouter = require('./routes/orchestration');
-const docsRouter = require('./routes/docs');
-
-const recommendationsRouter = require('./routes/recommendations');
-const pathsRouter = require('./routes/paths');
-const planRouter = require('./routes/plan');
-const profileRouter = require('./routes/profile');
-const rolesRouter = require('./routes/roles');
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const app = express();
 
-// Mindmap router is optional-but-required for the Career Navigator UI.
-// If it fails to import (e.g., require-time error), Express would otherwise silently skip mounting,
-// causing requests like POST /api/mindmap/graph to fall through to the JSON /api 404 handler.
-// We mount it defensively and emit a clear startup-time log when it cannot be mounted.
+/**
+ * Mindmap router is optional-but-required for the Career Navigator UI.
+ * If it fails to import (e.g., import-time error), Express would otherwise skip mounting,
+ * causing requests like POST /api/mindmap/graph to fall through to the JSON /api 404 handler.
+ *
+ * We mount it defensively and emit a clear startup-time log when it cannot be mounted.
+ */
 let mindmapRouter = null;
 try {
-  mindmapRouter = require('./routes/mindmap');
+  // Dynamic import keeps startup robust even if this router has optional deps.
+  const mod = await import(pathToFileURL(path.resolve(__dirname, './routes/mindmap.js')).href);
+  mindmapRouter = mod.default ?? mod;
 } catch (err) {
   // eslint-disable-next-line no-console
   console.error('[routes] Failed to load mindmap router; /api/mindmap/* will 404:', err);
@@ -56,7 +66,6 @@ try {
 
 // Best-effort runtime-safe schema fixups for known drift issues.
 // This must NOT prevent server startup (DB is optional in this project).
-const { ensureMysqlSchemaCompatible } = require('./db/schemaSelfHeal');
 void ensureMysqlSchemaCompatible();
 
 app.set('trust proxy', String(process.env.TRUST_PROXY).toLowerCase() === 'true');
@@ -93,7 +102,6 @@ app.use('/uploads', uploadsRouter);
 
 // Compatibility mount:
 // Frontend uses /api/uploads/* (same-origin) while the canonical backend routes live at /uploads/*.
-// Mount both to avoid 404: "No route for POST /api/uploads/documents".
 app.use('/api/uploads', uploadsRouter);
 
 app.use('/extraction', extractionRouter);
@@ -116,26 +124,29 @@ app.use('/documents', documentsRouter);
 
 // Compatibility mount:
 // Frontend calls /api/documents (same-origin) while the canonical backend routes live at /documents/*.
-// Mount both to avoid 404: "No route for GET /api/documents?limit=50&offset=0".
 app.use('/api/documents', documentsRouter);
 
 app.use('/personas', personasRouter);
 
 // Compatibility mount:
 // Frontend (and OpenAPI contract) call /api/personas/*, but historically personas router lived at /personas/*.
-// Mounting both keeps existing clients working and makes /api/personas/target-role reachable.
 app.use('/api/personas', personasRouter);
 
 app.use('/api/recommendations', recommendationsRouter);
 
-// Safety-net mount: ensure GET /api/recommendations/initial is reachable exactly here,
-// even if router mounting changes in some environments.
-if (typeof recommendationsRouter.getInitialRecommendationsHandler === 'function') {
-  app.get(
-    '/api/recommendations/initial',
-    recommendationsRouter.getInitialRecommendationsHandler()
-  );
+/**
+ * Safety-net mount: ensure GET /api/recommendations/initial is reachable exactly here.
+ *
+ * After ESM conversion, the recommendations router is a default export router object and
+ * we attach `getInitialRecommendationsHandler` as a property on it.
+ */
+if (
+  recommendationsRouter &&
+  typeof recommendationsRouter.getInitialRecommendationsHandler === 'function'
+) {
+  app.get('/api/recommendations/initial', recommendationsRouter.getInitialRecommendationsHandler());
 }
+
 app.use('/api/paths', pathsRouter);
 app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
@@ -149,7 +160,6 @@ if (mindmapRouter) {
 }
 
 // Debug helper: list registered routes at runtime to verify mounting.
-// This is safe to leave in place; it contains no secrets and helps diagnose mis-mounted routers.
 app.get('/api/_debug/routes', (req, res) => {
   const routes = [];
 
@@ -170,18 +180,31 @@ app.get('/api/_debug/routes', (req, res) => {
       // Nested router
       if (layer.name === 'router' && layer.handle && Array.isArray(layer.handle.stack)) {
         // Best-effort extraction of mount path from regexp (Express internals).
-        // If we can't parse it, we still traverse with the same prefix.
         let mount = '';
         const re = layer.regexp;
+
         if (re && typeof re.source === 'string') {
-          // Handles common forms like ^\\/api\\/mindmap\\/?(?=\\/|$)
-          const m = re.source.match(/\\^\\\\\\\/(.*?)\\\\\\\/\\?\\(\\?=\\\\\\\/\\|\\$\\)/);
-          if (m && m[1]) mount = `/${m[1].replace(/\\\\\\\//g, '/')}`;
+          /**
+           * NOTE (Node 18 ESM parser safety):
+           * Avoid regex literals here because some Express regexp `.source` strings can contain
+           * escape sequences that make a regex literal ambiguous to the JS parser in certain
+           * environments, causing a startup-time SyntaxError.
+           *
+           * Using `new RegExp(string)` keeps the pattern identical while avoiding parser edge cases.
+           */
+          const m = re.source.match(
+            new RegExp('\\\\^\\\\\\\\\\\\/(.*?)\\\\\\\\\\\\/\\\\?\\\\(\\\\?=\\\\\\\\\\\\/\\\\|\\\\$\\\\)')
+          );
+
+          if (m && m[1]) mount = `/${m[1].replace(/\\\\\\\\\\\\//g, '/')}`;
           else {
-            const m2 = re.source.match(/\\^\\\\\\\/(.*?)\\(\\?:\\\\\\\/\\|\\$\\)/);
-            if (m2 && m2[1]) mount = `/${m2[1].replace(/\\\\\\\//g, '/')}`;
+            const m2 = re.source.match(
+              new RegExp('\\\\^\\\\\\\\\\\\/(.*?)\\\\(\\\\?:\\\\\\\\\\\\/\\\\|\\\\$\\\\)')
+            );
+            if (m2 && m2[1]) mount = `/${m2[1].replace(/\\\\\\\\\\\\//g, '/')}`;
           }
         }
+
         collectFromStack(`${prefix}${mount}`, layer.handle.stack);
       }
     }
@@ -189,8 +212,9 @@ app.get('/api/_debug/routes', (req, res) => {
 
   collectFromStack('', app._router?.stack);
 
-  // Sort for readability
-  routes.sort((a, b) => a.path.localeCompare(b.path) || a.methods.join(',').localeCompare(b.methods.join(',')));
+  routes.sort(
+    (a, b) => a.path.localeCompare(b.path) || a.methods.join(',').localeCompare(b.methods.join(','))
+  );
 
   res.json({ count: routes.length, routes });
 });
@@ -228,10 +252,10 @@ const host = process.env.HOST || '0.0.0.0';
  * PUBLIC_INTERFACE
  * Export the Express app for integration tests and for environments that embed the server.
  */
-module.exports = app;
+export default app;
 
-// Only start listening when executed as the entrypoint (not when required by Jest/supertest).
-if (require.main === module) {
+// Only start listening when executed as the entrypoint (not when imported by Jest/supertest).
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   app.listen(port, host, () => {
     // eslint-disable-next-line no-console
     console.log(`Express backend listening on http://${host}:${port}`);

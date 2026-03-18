@@ -166,9 +166,16 @@ function normalizeSalaryToIndiaLpaRange(salaryRange) {
 
   return `₹${min}–₹${max} LPA`;
 }
-module.exports = {
+export {
   extractFinalPersonaObject,
   extractPersonaProficiencies,
   buildScoringUserSkills,
-  normalizeSalaryToIndiaLpaRange,
+  normalizeSalaryToIndiaLpaRange
+};
+
+export default {
+  extractFinalPersonaObject,
+  extractPersonaProficiencies,
+  buildScoringUserSkills,
+  normalizeSalaryToIndiaLpaRange
 };

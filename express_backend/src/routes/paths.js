@@ -1,12 +1,10 @@
-'use strict';
+import express from 'express';
+import { sendError } from '../utils/errors.js';
+import orchestrationService from '../services/orchestrationService.js';
+import holisticPersonaRepo from '../repositories/holisticPersonaRepoAdapter.js';
+import personasRepo from '../repositories/personasRepoAdapter.js';
 
-const express = require('express');
-const { sendError } = require('../utils/errors');
-const orchestrationService = require('../services/orchestrationService');
-const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
-const personasRepo = require('../repositories/personasRepoAdapter');
-
-const { enforceResponse, PathsMultiverseResponseSchema } = require('../schemas/holisticPersonaSchemas');
+import { enforceResponse, PathsMultiverseResponseSchema } from '../schemas/holisticPersonaSchemas.js';
 
 const router = express.Router();
 
@@ -201,4 +199,4 @@ router.get('/multiverse', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;

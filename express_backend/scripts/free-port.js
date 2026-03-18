@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-'use strict';
-
-const { spawnSync } = require('child_process');
+import { spawnSync } from 'child_process';
 
 /**
  * Best-effort port freeing helper for dev/start hooks.
@@ -28,7 +26,6 @@ function main() {
     if (pids.length > 0) {
       // TERM first, then KILL for anything that remains.
       killPids(pids, 'SIGTERM');
-      // Give processes a brief moment (no async; just proceed best-effort).
       killPids(pids, 'SIGKILL');
     }
   }
@@ -58,9 +55,7 @@ function run(cmd, args) {
 }
 
 function listListeningPidsWithLsof(port) {
-  // Use the simplest, most portable invocation:
-  //   lsof -nP -iTCP:<port> -sTCP:LISTEN -t
-  // -nP avoids DNS/service name lookups; -t prints only PIDs.
+  // lsof -nP -iTCP:<port> -sTCP:LISTEN -t
   try {
     const res = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' });
     if (res.status !== 0 || !res.stdout) return [];
@@ -80,7 +75,7 @@ function killPids(pids, signal) {
     try {
       process.kill(pid, signal);
     } catch {
-      // ignore (process may already be gone / permission denied)
+      // ignore
     }
   }
 }

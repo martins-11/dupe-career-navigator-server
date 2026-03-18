@@ -1,6 +1,4 @@
-'use strict';
-
-const { uuidV4 } = require('../../utils/uuid');
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * In-memory documents repository.
@@ -15,7 +13,7 @@ const _documents = new Map(); // documentId -> document
 const _extractedTextRows = new Map(); // documentId -> rows[] (append-only)
 
 // PUBLIC_INTERFACE
-async function createDocument(input) {
+export async function createDocument(input) {
   /** Create a document record in memory and return it. */
   const id = uuidV4();
   const now = new Date().toISOString();
@@ -51,7 +49,7 @@ async function createDocument(input) {
  * @param {number} [options.offset] Offset for pagination (default: 0).
  * @returns {Promise<Array<object>>} Documents list ordered by createdAt desc.
  */
-async function listDocuments(options = {}) {
+export async function listDocuments(options = {}) {
   const limitRaw = options.limit ?? 100;
   const offsetRaw = options.offset ?? 0;
 
@@ -67,13 +65,13 @@ async function listDocuments(options = {}) {
 }
 
 // PUBLIC_INTERFACE
-async function getDocumentById(documentId) {
+export async function getDocumentById(documentId) {
   /** Fetch a document by id. Returns null if not found. */
   return _documents.get(documentId) || null;
 }
 
 // PUBLIC_INTERFACE
-async function upsertExtractedText(documentId, input) {
+export async function upsertExtractedText(documentId, input) {
   /**
    * Persist extracted text history for a document in memory.
    * We keep INSERT-only semantics (append-only) to match the DB scaffold behavior.
@@ -100,7 +98,7 @@ async function upsertExtractedText(documentId, input) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestExtractedText(documentId) {
+export async function getLatestExtractedText(documentId) {
   /** Retrieve the latest extracted text blob for a given document. */
   const arr = _extractedTextRows.get(documentId) || [];
   if (arr.length === 0) return null;
@@ -115,16 +113,18 @@ async function getLatestExtractedText(documentId) {
  * @param {string} category canonical category string
  * @returns {Promise<object|null>}
  */
-async function getLatestDocumentForUserByCategory(userId, category) {
+export async function getLatestDocumentForUserByCategory(userId, category) {
   const all = Array.from(_documents.values());
 
-  const filtered = all.filter((d) => (userId ? d.userId === userId : d.userId == null) && d.category === category);
+  const filtered = all.filter(
+    (d) => (userId ? d.userId === userId : d.userId == null) && d.category === category
+  );
 
   filtered.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
   return filtered[0] || null;
 }
 
-module.exports = {
+const documentsMemoryRepo = {
   createDocument,
   listDocuments,
   getDocumentById,
@@ -132,3 +132,5 @@ module.exports = {
   getLatestExtractedText,
   getLatestDocumentForUserByCategory
 };
+
+export default documentsMemoryRepo;

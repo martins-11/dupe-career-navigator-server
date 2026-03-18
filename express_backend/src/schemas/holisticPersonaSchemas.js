@@ -1,37 +1,40 @@
-'use strict';
-
-const { z } = require('zod');
-
 /**
- * Holistic Persona (Career Navigator) schemas.
+ * Holistic Persona (Career Navigator) schemas (ESM).
  *
- * These schemas provide strict request/response validation for the 5 new /api endpoints:
+ * These schemas provide strict request/response validation for:
  * - GET /api/recommendations/roles
  * - POST /api/recommendations/compare
  * - GET /api/paths/multiverse
  * - POST /api/plan/milestones
  * - PUT /api/profile/scoring
  *
- * They are intentionally additive and align with existing services:
- * - orchestrationService (draft/final persona generation pipeline)
- * - personaService (Bedrock-backed persona draft)
- *
- * NOTE:
- * - The endpoints can be used DB-less (memory repos) and AI-less (mock mode) depending on env vars.
+ * Important:
+ * - This backend is ESM ("type":"module").
+ * - Zod may resolve as CJS in some installs, so we must use the local interop-safe wrapper.
  */
 
-// -----------------------------
-// Common / utilities
-// -----------------------------
+import { getZodSync } from '../utils/zod.js';
 
-const UuidSchema = z.string().uuid();
+const { z } = getZodSync();
+
+/**
+ * -----------------------------
+ * Common / utilities
+ * -----------------------------
+ */
+
+export const UuidSchema = z.string().uuid();
 
 function _optionalNonEmptyString() {
-  return z.string().transform((v) => String(v).trim()).refine((v) => v.length > 0, 'Required').optional();
+  return z
+    .string()
+    .transform((v) => String(v).trim())
+    .refine((v) => v.length > 0, 'Required')
+    .optional();
 }
 
 // PUBLIC_INTERFACE
-function parseWithZod(schema, input) {
+export function parseWithZod(schema, input) {
   /** Parse input with Zod and return { ok, data } or { ok, error }. */
   const res = schema.safeParse(input);
   if (res.success) return { ok: true, data: res.data };
@@ -39,7 +42,7 @@ function parseWithZod(schema, input) {
 }
 
 // PUBLIC_INTERFACE
-function enforceResponse(schema, payload) {
+export function enforceResponse(schema, payload) {
   /**
    * Enforce response validation (defensive programming).
    * Throws a ZodError which is handled by utils/errors.sendError().
@@ -47,19 +50,13 @@ function enforceResponse(schema, payload) {
   return schema.parse(payload);
 }
 
-// -----------------------------
-// /api/recommendations/roles
-// -----------------------------
-
 /**
- * Phase 1 response payload per role (per user instructions):
- * - role_id
- * - role_title
- * - industry
- * - match_reason
- * - estimated_salary_range
+ * -----------------------------
+ * /api/recommendations/roles
+ * -----------------------------
  */
-const RecommendedRoleSchema = z
+
+export const RecommendedRoleSchema = z
   .object({
     role_id: z.string().min(1),
     role_title: z.string().min(1),
@@ -69,17 +66,19 @@ const RecommendedRoleSchema = z
   })
   .strict();
 
-const RecommendationsRolesResponseSchema = z
+export const RecommendationsRolesResponseSchema = z
   .object({
     roles: z.array(RecommendedRoleSchema).min(5)
   })
   .strict();
 
-// -----------------------------
-// /api/recommendations/compare
-// -----------------------------
+/**
+ * -----------------------------
+ * /api/recommendations/compare
+ * -----------------------------
+ */
 
-const RoleCompareRequestSchema = z
+export const RoleCompareRequestSchema = z
   .object({
     leftRoleId: z.string().min(1),
     rightRoleId: z.string().min(1),
@@ -91,7 +90,7 @@ const RoleCompareRequestSchema = z
   })
   .strict();
 
-const RoleCompareResponseSchema = z
+export const RoleCompareResponseSchema = z
   .object({
     leftRoleId: z.string().min(1),
     rightRoleId: z.string().min(1),
@@ -104,11 +103,13 @@ const RoleCompareResponseSchema = z
   })
   .strict();
 
-// -----------------------------
-// /api/paths/multiverse
-// -----------------------------
+/**
+ * -----------------------------
+ * /api/paths/multiverse
+ * -----------------------------
+ */
 
-const CareerPathSchema = z
+export const CareerPathSchema = z
   .object({
     id: z.string().min(1),
     title: z.string().min(1),
@@ -121,17 +122,19 @@ const CareerPathSchema = z
   })
   .strict();
 
-const PathsMultiverseResponseSchema = z
+export const PathsMultiverseResponseSchema = z
   .object({
     paths: z.array(CareerPathSchema)
   })
   .strict();
 
-// -----------------------------
-// /api/plan/milestones
-// -----------------------------
+/**
+ * -----------------------------
+ * /api/plan/milestones
+ * -----------------------------
+ */
 
-const PlanMilestonesRequestSchema = z
+export const PlanMilestonesRequestSchema = z
   .object({
     goal: z.string().nullable().optional(),
     timeframeWeeks: z.number().int().min(1).max(520).nullable().optional(),
@@ -139,7 +142,7 @@ const PlanMilestonesRequestSchema = z
   })
   .strict();
 
-const PlanMilestoneSchema = z
+export const PlanMilestoneSchema = z
   .object({
     id: z.string().min(1),
     title: z.string().min(1),
@@ -148,7 +151,7 @@ const PlanMilestoneSchema = z
   })
   .strict();
 
-const PlanMilestonesResponseSchema = z
+export const PlanMilestonesResponseSchema = z
   .object({
     goal: z.string().min(1),
     timeframeWeeks: z.number().int().min(1),
@@ -156,15 +159,13 @@ const PlanMilestonesResponseSchema = z
   })
   .strict();
 
-// -----------------------------
-// /api/profile/scoring
-// -----------------------------
-
 /**
- * 3/2 rule override:
- * We model this as a structured override payload but keep scoring object flexible.
+ * -----------------------------
+ * /api/profile/scoring
+ * -----------------------------
  */
-const ProfileScoringOverrideSchema = z
+
+export const ProfileScoringOverrideSchema = z
   .object({
     rule: z.literal('3/2'),
     enabled: z.boolean(),
@@ -173,61 +174,59 @@ const ProfileScoringOverrideSchema = z
      * If omitted, server computes from sub-scores where possible.
      */
     overallOverride: z.number().min(0).max(100).nullable().optional(),
-    /**
-     * Optional notes for audit/UI display.
-     */
+    /** Optional notes for audit/UI display. */
     note: z.string().max(2000).nullable().optional()
   })
   .strict();
 
-const ProfileScoringRequestSchema = z
+export const ProfileScoringRequestSchema = z
   .object({
     userId: z.string().uuid().nullable().optional(),
     personaId: z.string().uuid().nullable().optional(),
     buildId: z.string().uuid().nullable().optional(),
-    /**
-     * scoring is intentionally flexible; we validate key parts we use.
-     */
+    /** scoring is intentionally flexible; we validate key parts we use. */
     scoring: z.record(z.any()).nullable().optional(),
     override: ProfileScoringOverrideSchema.nullable().optional()
   })
   .strict();
 
-const ProfileScoringResponseSchema = z
+export const ProfileScoringResponseSchema = z
   .object({
     status: z.literal('ok'),
     scoring: z.record(z.any())
   })
   .strict();
 
-module.exports = {
-  // Helpers
-  parseWithZod,
-  enforceResponse,
+// PUBLIC_INTERFACE
+export function getHolisticPersonaSchemas() {
+  /**
+   * Backward-compatible accessor (some older code used an async getter).
+   * Returns the ESM exports in a stable object shape.
+   */
+  return {
+    parseWithZod,
+    enforceResponse,
 
-  // Roles
-  RecommendedRoleSchema,
-  RecommendationsRolesResponseSchema,
+    RecommendedRoleSchema,
+    RecommendationsRolesResponseSchema,
 
-  // Compare
-  RoleCompareRequestSchema,
-  RoleCompareResponseSchema,
+    RoleCompareRequestSchema,
+    RoleCompareResponseSchema,
 
-  // Paths
-  CareerPathSchema,
-  PathsMultiverseResponseSchema,
+    CareerPathSchema,
+    PathsMultiverseResponseSchema,
 
-  // Plan
-  PlanMilestonesRequestSchema,
-  PlanMilestonesResponseSchema,
-  PlanMilestoneSchema,
+    PlanMilestonesRequestSchema,
+    PlanMilestonesResponseSchema,
+    PlanMilestoneSchema,
 
-  // Profile scoring
-  ProfileScoringRequestSchema,
-  ProfileScoringResponseSchema,
-  ProfileScoringOverrideSchema,
+    ProfileScoringRequestSchema,
+    ProfileScoringResponseSchema,
+    ProfileScoringOverrideSchema,
 
-  // Common exports if needed later
-  UuidSchema,
-  _optionalNonEmptyString
-};
+    UuidSchema,
+    _optionalNonEmptyString
+  };
+}
+
+export default getHolisticPersonaSchemas();
