@@ -1,7 +1,5 @@
-'use strict';
-
-const express = require('express');
-const { query } = require('../db/query');
+import express from 'express';
+import { query } from '../db/query.js';
 
 const router = express.Router();
 
@@ -23,4 +21,4 @@ router.get('/db', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;

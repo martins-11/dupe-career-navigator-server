@@ -1,8 +1,3 @@
-'use strict';
-
-const { Pool: PgPool } = require('pg');
-const mysql = require('mysql2/promise');
-
 /**
  * This module provides a lightweight, engine-agnostic DB connection helper.
  *
@@ -25,11 +20,14 @@ const mysql = require('mysql2/promise');
  * - PGSSLMODE / PGSSL
  */
 
+import { Pool as PgPool } from 'pg';
+import mysql from 'mysql2/promise';
+
 let _pgPool = null;
 let _mysqlPool = null;
 
 // PUBLIC_INTERFACE
-function getDbEngine() {
+export function getDbEngine() {
   /** Returns configured DB engine. Defaults to 'mysql'. */
   const v = String(process.env.DB_ENGINE || 'mysql').toLowerCase().trim();
   if (v === 'postgres' || v === 'postgresql' || v === 'pg') return 'postgres';
@@ -38,7 +36,7 @@ function getDbEngine() {
 }
 
 // PUBLIC_INTERFACE
-function isMysqlConfigured() {
+export function isMysqlConfigured() {
   /** Returns true if MySQL env vars appear to be configured. */
   return Boolean(
     (process.env.MYSQL_CONNECTION_STRING && process.env.MYSQL_CONNECTION_STRING.trim()) ||
@@ -52,7 +50,7 @@ function isMysqlConfigured() {
 }
 
 // PUBLIC_INTERFACE
-function isPostgresConfigured() {
+export function isPostgresConfigured() {
   /** Returns true if Postgres env vars appear to be configured. */
   return Boolean(
     (process.env.PG_CONNECTION_STRING && process.env.PG_CONNECTION_STRING.trim()) ||
@@ -63,7 +61,7 @@ function isPostgresConfigured() {
 }
 
 // PUBLIC_INTERFACE
-function isDbConfigured() {
+export function isDbConfigured() {
   /** Returns true if the configured engine appears to have env vars set. */
   const engine = getDbEngine();
   return engine === 'mysql' ? isMysqlConfigured() : isPostgresConfigured();
@@ -111,11 +109,8 @@ function _ensureMysqlPool() {
 
   /**
    * CRITICAL HARDENING (timeout):
-   * In preview environments, DB env vars may be present but the DB may be unreachable
-   * (network policy / security group / DNS issues). mysql2's default connect behavior
-   * can take a long time, which blocks request handlers and surfaces as 504s.
-   *
-   * Make connection establishment fail fast by default; allow overrides via env.
+   * In preview environments, DB env vars may be present but the DB may be unreachable.
+   * mysql2's default connect behavior can take a long time, which blocks handlers and surfaces as 504s.
    */
   const connectTimeout = _parseTimeoutMs('MYSQL_CONNECT_TIMEOUT_MS', 4000);
   const acquireTimeout = _parseTimeoutMs('MYSQL_ACQUIRE_TIMEOUT_MS', 4000);
@@ -171,7 +166,6 @@ function _ensurePgPool() {
   const connectionString = process.env.PG_CONNECTION_STRING;
   const ssl = _pgSslOptions();
 
-  // Similar hardening to MySQL: keep connection attempts bounded.
   const connectionTimeoutMillis = _parseTimeoutMs('PG_CONNECT_TIMEOUT_MS', 4000);
 
   const poolConfig = connectionString
@@ -191,7 +185,7 @@ function _ensurePgPool() {
 }
 
 // PUBLIC_INTERFACE
-async function dbQuery(sql, params = []) {
+export async function dbQuery(sql, params = []) {
   /**
    * Execute a SQL query for the configured engine.
    *
@@ -212,8 +206,6 @@ async function dbQuery(sql, params = []) {
       // - pool.query() is appropriate for raw SQL (incl DDL) and is what we want for migrations.
       const [rows] = await pool.query(sql, params);
 
-      // MySQL returns RowDataPacket[] for SELECT; OkPacket for INSERT/UPDATE/DDL.
-      // We normalize to { rows } for SELECT-like queries.
       return { rows: Array.isArray(rows) ? rows : [rows] };
     }
 
@@ -221,7 +213,6 @@ async function dbQuery(sql, params = []) {
     const res = await pool.query(sql, params);
     return res;
   } catch (err) {
-    // Improve common misconfig errors while preserving original error as cause.
     const msg = String((err && err.message) || '');
     const lower = msg.toLowerCase();
 
@@ -240,7 +231,7 @@ async function dbQuery(sql, params = []) {
 }
 
 // PUBLIC_INTERFACE
-async function dbClose() {
+export async function dbClose() {
   /** Close the configured engine pool (best-effort). */
   const engine = getDbEngine();
   try {
@@ -251,12 +242,13 @@ async function dbClose() {
     }
     if (_pgPool) await _pgPool.end();
     _pgPool = null;
-  } catch (_) {
+  } catch {
     // ignore close errors
   }
 }
 
-async function dbExecRaw(sql) {
+// PUBLIC_INTERFACE
+export async function dbExecRaw(sql) {
   /**
    * Execute raw SQL without parameters for the configured engine.
    *
@@ -265,13 +257,3 @@ async function dbExecRaw(sql) {
    */
   return dbQuery(sql);
 }
-
-module.exports = {
-  getDbEngine,
-  isMysqlConfigured,
-  isPostgresConfigured,
-  isDbConfigured,
-  dbQuery,
-  dbExecRaw,
-  dbClose
-};

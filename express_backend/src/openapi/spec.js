@@ -15,7 +15,7 @@
  * - This spec documents that behavior explicitly via 503 responses.
  */
 
-const swaggerJSDoc = require('swagger-jsdoc');
+import swaggerJSDoc from 'swagger-jsdoc';
 
 const openapiDefinition = {
   openapi: '3.0.3',
@@ -2553,9 +2553,7 @@ const options = {
 };
 
 // PUBLIC_INTERFACE
-function getOpenApiSpec() {
+export function getOpenApiSpec() {
   /** Returns the OpenAPI JSON document for this API. */
   return swaggerJSDoc(options);
 }
-
-module.exports = { getOpenApiSpec };

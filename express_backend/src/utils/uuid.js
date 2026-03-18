@@ -1,11 +1,10 @@
-'use strict';
+import crypto from 'crypto';
 
-const crypto = require('crypto');
-
-// PUBLIC_INTERFACE
-function uuidV4() {
+/**
+ * PUBLIC_INTERFACE
+ * @returns {string}
+ */
+export function uuidV4() {
   /** Generate a v4 UUID using Node's crypto (no external dependency). */
   return crypto.randomUUID();
 }
-
-module.exports = { uuidV4 };
