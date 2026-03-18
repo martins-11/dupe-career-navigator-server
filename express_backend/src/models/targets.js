@@ -1,6 +1,6 @@
 'use strict';
 
-const { z } = require('zod');
+const { z } = require('zod/lib');
 
 /**
  * Zod models for target-role selection.

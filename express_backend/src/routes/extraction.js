@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { z } = require('zod');
+const { z } = require('zod/lib');
 const { uuidV4 } = require('../utils/uuid');
 const { extractTextFromUploadedFile } = require('../services/extractionService');
 const { normalizeText } = require('../services/normalizationService');

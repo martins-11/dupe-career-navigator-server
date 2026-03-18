@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { z } = require('zod');
+const { z } = require('zod/lib');
 const buildsService = require('../services/buildsService');
 const { getDbEngine } = require('../db/connection');
 
