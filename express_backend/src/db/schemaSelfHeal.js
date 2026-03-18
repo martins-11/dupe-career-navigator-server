@@ -1,6 +1,4 @@
-'use strict';
-
-const { dbQuery, isDbConfigured, getDbEngine } = require('./connection');
+import { dbQuery, isDbConfigured, getDbEngine } from './connection.js';
 
 /**
  * Runtime-safe, best-effort schema self-healing for MySQL.
@@ -153,7 +151,7 @@ async function _ensurePersonaFinalPersonaIdColumnMysql() {
 }
 
 // PUBLIC_INTERFACE
-async function ensureMysqlSchemaCompatible() {
+export async function ensureMysqlSchemaCompatible() {
   /**
    * Ensure the MySQL schema is compatible with the repository expectations.
    *
@@ -199,7 +197,7 @@ async function ensureMysqlSchemaCompatible() {
   }
 }
 
-module.exports = {
+// Kept for convenience/compat with any default-import usage.
+export default {
   ensureMysqlSchemaCompatible
 };
-
