@@ -2,6 +2,7 @@
 
 const bedrockService = require('./bedrockService');
 const personasRepo = require('../repositories/personasRepoAdapter');
+const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
 const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine');
 const { extractFinalPersonaObject, buildScoringUserSkills, normalizeSalaryToIndiaLpaRange } = require('./rolesSearchUtils');
 
@@ -74,9 +75,12 @@ function _decorateAndScoreRoles({ roles, scoringUserSkills }) {
     const masteryScore = requiredSkillsCount ? Math.round((masteryCount / requiredSkillsCount) * 100) : 0;
     const growthScore = requiredSkillsCount ? Math.round((growthCount / requiredSkillsCount) * 100) : 0;
 
+    const salaryRaw = r.salary_range || r.salaryRange || r.salary_lpa_range || r.salaryLpaRange || '';
+
     out.push({
       ...r,
-      salary_range: normalizeSalaryToIndiaLpaRange(r.salary_range || ''),
+      // Ensure a consistent field name for UI filtering across stored vs Bedrock-search roles.
+      salary_range: normalizeSalaryToIndiaLpaRange(salaryRaw),
       required_skills: requiredSkills,
 
       // Keep existing payload, but add explicit fields the frontend rings can reliably use.
@@ -131,8 +135,50 @@ async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null
   // Honor caller limit, but keep it within a safe bound.
   const limitNum = Number(limit);
   const effectiveLimit =
-    Number.isFinite(limitNum) && limitNum > 0 ? Math.max(1, Math.min(limitNum, 50)) : 30;
+    Number.isFinite(limitNum) && limitNum > 0 ? Math.max(1, Math.min(limitNum, 100)) : 30;
 
+  // 1) Prefer stored recommendations roles for this personaId (source of truth for Explore UX).
+  if (personaId) {
+    try {
+      const cached = await holisticPersonaRepo.getLatestRecommendationsRoles({ personaId: String(personaId).trim() });
+      const cachedRoles = Array.isArray(cached?.roles) ? cached.roles : [];
+
+      if (cachedRoles.length >= 5) {
+        const qLower = searchQuery.toLowerCase();
+
+        const matchesQuery = (role) => {
+          if (!qLower) return true;
+
+          const title = _normStr(role?.title || role?.role_title || role?.roleTitle).toLowerCase();
+          const industry = _normStr(role?.industry).toLowerCase();
+          const desc = _normStr(role?.description).toLowerCase();
+
+          const skillsRaw = role?.required_skills || role?.skills_required || role?.skills || [];
+          const skills = (Array.isArray(skillsRaw) ? skillsRaw : [])
+            .map((s) => (typeof s === 'string' ? s : s?.name || s?.skill || s?.label))
+            .map((s) => _normStr(s).toLowerCase())
+            .filter(Boolean);
+
+          // Token-based matching across multiple fields.
+          const haystack = `${title} ${industry} ${desc} ${skills.join(' ')}`;
+          const tokens = qLower.split(/\s+/g).map((t) => t.trim()).filter(Boolean);
+
+          // Require ALL tokens to be present somewhere (keeps results tighter).
+          return tokens.every((t) => haystack.includes(t));
+        };
+
+        const filtered = cachedRoles.filter(matchesQuery);
+
+        // Keep existing ordering (already compatibility-ranked by initial recommendations).
+        return _safeSlice(filtered, effectiveLimit);
+      }
+    } catch (err) {
+      console.error('[ExploreService] Failed to read cached recommendations roles:', err?.message || String(err));
+      // Fall through to Bedrock if cache is unavailable.
+    }
+  }
+
+  // 2) If no stored pool exists, fall back to Bedrock (strict mode; no deterministic padding).
   let finalEnvelope = null;
   let finalPersonaObj = null;
 
@@ -168,7 +214,6 @@ async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null
   const roles = Array.isArray(bedrock?.roles) ? bedrock.roles : [];
   const scored = _decorateAndScoreRoles({ roles, scoringUserSkills });
 
-  // Return up to the requested limit (no forced 5).
   return _safeSlice(scored, effectiveLimit);
 }
 

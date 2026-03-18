@@ -147,8 +147,12 @@ function _normalizeRoleForInitialRecommendations(role) {
     .filter(Boolean)
     .slice(0, 8);
 
+  // Ensure salary_range exists for filtering logic used across the app.
+  const salaryRange = role.salary_range || role.salaryRange || role.salary_lpa_range || role.salaryLpaRange || null;
+
   return {
     ...role,
+    ...(salaryRange ? { salary_range: salaryRange } : {}),
     key_responsibilities: Array.isArray(role.key_responsibilities) ? role.key_responsibilities.slice(0, 3) : [],
     required_skills: requiredSkills
   };
@@ -546,8 +550,16 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   }
 
   const opt = options && typeof options === 'object' ? options : {};
+
+  // Minimum requirement: >=5 roles for the Explore landing. Callers may request more to store.
   const minCountRaw = Number(opt.minCount);
-  const minCount = Number.isFinite(minCountRaw) ? Math.max(1, Math.min(5, Math.floor(minCountRaw))) : 5;
+  const minCount = Number.isFinite(minCountRaw) ? Math.max(1, Math.min(50, Math.floor(minCountRaw))) : 5;
+
+  // How many roles to return when Bedrock provides enough. Must be >= minCount.
+  const returnCountRaw = Number(opt.returnCount);
+  const returnCount = Number.isFinite(returnCountRaw)
+    ? Math.max(minCount, Math.min(20, Math.floor(returnCountRaw)))
+    : minCount;
 
   const allowPadding =
     opt.allowPadding === true ||
@@ -563,8 +575,8 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
 
   const initialRequestedCountRaw = Number(opt.requestedCount);
   const initialRequestedCount = Number.isFinite(initialRequestedCountRaw)
-    ? Math.max(minCount, Math.min(10, Math.floor(initialRequestedCountRaw)))
-    : Math.min(10, Math.max(minCount, 7));
+    ? Math.max(returnCount, Math.min(20, Math.floor(initialRequestedCountRaw)))
+    : Math.min(20, Math.max(returnCount, 12));
 
   // Enforce a single global time budget across all Bedrock attempts.
   const startMs = Date.now();
@@ -613,14 +625,16 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
     const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 10);
 
     if (uniqueBedrock.length >= minCount) {
-      finalBedrockUnique = uniqueBedrock.slice(0, minCount);
+      // IMPORTANT: keep more than 5 when requested, so Explore search/mindmap can use the full stored pool.
+      finalBedrockUnique = uniqueBedrock.slice(0, returnCount);
       break;
     }
 
     finalBedrockUnique = uniqueBedrock;
   }
 
-  let rolesForScoring = finalBedrockUnique.slice(0, minCount);
+  // In normal mode, return up to returnCount. Still enforce the >=minCount requirement.
+  let rolesForScoring = finalBedrockUnique.slice(0, returnCount);
   let paddedCount = 0;
 
   if (rolesForScoring.length < minCount) {
@@ -640,6 +654,8 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       throw err;
     }
 
+    // Padding is only used to meet the minimum UX contract (>=5),
+    // not to fabricate extra items beyond that.
     const padded = _padToExactlyFiveRoles({
       bedrockRoles: rolesForScoring,
       fallbackCatalog: INITIAL_RECOMMENDATIONS_FALLBACK_CATALOG,
@@ -663,7 +679,8 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
     },
   }));
 
-  const reranked = _rerankByThreeTwoAndCompatibility(scored).slice(0, minCount);
+  // Rerank, but do not force down to 5; keep the full pool for storage/search/mindmap.
+  const reranked = _rerankByThreeTwoAndCompatibility(scored).slice(0, returnCount);
 
   return {
     roles: reranked,
@@ -671,6 +688,8 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       personaId: personaId || null,
       hasPersonaProficiencies,
       count: reranked.length,
+      minCount,
+      returnCount,
       onetGrounded: false,
       onetError: null,
       bedrockUsedFallback: false,

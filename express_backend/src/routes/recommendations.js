@@ -157,7 +157,7 @@ async function handleInitialRecommendations(req, res) {
        * from being used once it becomes available again.
        */
       const arr = Array.isArray(roles) ? roles : [];
-      if (arr.length !== 5) return false;
+      if (arr.length < 5) return false;
 
       const anyEndpointFallback = arr.some((r) => r?.match_metadata?.endpointFallbackUsed === true);
       if (anyEndpointFallback) return true;
@@ -178,7 +178,7 @@ async function handleInitialRecommendations(req, res) {
 
     // CRITICAL: never serve fallback-only cached results; they are considered stale and should be
     // regenerated via Bedrock when possible.
-    if (cachedRoles && cachedRoles.length === 5 && !isFallbackOnlyCachedRoles(cachedRoles)) {
+    if (cachedRoles && cachedRoles.length >= 5 && !isFallbackOnlyCachedRoles(cachedRoles)) {
       if (req.timedOut || res.headersSent) return;
       return res.json({
         roles: cachedRoles,
@@ -281,6 +281,11 @@ async function handleInitialRecommendations(req, res) {
 
     try {
       // Keep Bedrock attempts to 1 to avoid latency stacking in previews.
+      // Fetch/store more than 5 roles; Explore landing still renders 5 initially.
+      const storeCountRaw = Number(process.env.INITIAL_RECOMMENDATIONS_STORE_COUNT || 12);
+      const storeCount =
+        Number.isFinite(storeCountRaw) && storeCountRaw > 5 ? Math.min(20, Math.floor(storeCountRaw)) : 12;
+
       result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
         finalPersona,
         personaId: personaIdRaw,
@@ -288,7 +293,8 @@ async function handleInitialRecommendations(req, res) {
           timeBudgetMs,
           allowPadding,
           maxAttempts: 1,
-          requestedCount: 7,
+          requestedCount: storeCount,
+          returnCount: storeCount,
           minCount: 5,
         },
       });
@@ -313,7 +319,7 @@ async function handleInitialRecommendations(req, res) {
     }
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
-    if (roles.length !== 5) {
+    if (roles.length < 5) {
       // Last guard: never fail the request—return fallback.
       const fallback = await generateInitialRecommendationsFallbackOnly({
         finalPersona,
