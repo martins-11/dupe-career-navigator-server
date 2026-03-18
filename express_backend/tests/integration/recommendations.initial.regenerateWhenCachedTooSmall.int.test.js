@@ -2,8 +2,8 @@
 
 const request = require('supertest');
 
-describe('GET /api/recommendations/initial regenerates when cached count is insufficient', () => {
-  test('cached 5-role pool is bypassed/regenerated when storeCount desires >5, then subsequent request is cacheHit with >5', async () => {
+describe('GET /api/recommendations/initial reuses cached Bedrock pool even when smaller than storeCount', () => {
+  test('cached 5-role pool is returned as cacheHit=true even when storeCount desires >5 (no Bedrock re-invocation)', async () => {
     jest.resetModules();
 
     // Ensure the endpoint desires >5 roles.
@@ -21,7 +21,7 @@ describe('GET /api/recommendations/initial regenerates when cached count is insu
       match_metadata: { isFallbackFilled: false },
     });
 
-    // Return as many roles as requested by options.count so we can fill the stored pool.
+    // If the service incorrectly re-invokes Bedrock, this mock would be called.
     const mockGetInitial = jest.fn(async (_finalPersona, options) => ({
       modelId: 'test-model',
       prompt: 'test-prompt',
@@ -61,25 +61,31 @@ describe('GET /api/recommendations/initial regenerates when cached count is insu
       roles: cachedFive,
     });
 
-    // First call should see cached count insufficient and regenerate (cacheHit=false).
+    // First call should return cached roles (cacheHit=true) even though the pool is "undersized".
     const res1 = await request(app).get('/api/recommendations/initial').query({ personaId });
 
     expect([200]).toContain(res1.status);
     expect(Array.isArray(res1.body?.roles)).toBe(true);
-    expect(res1.body.roles.length).toBeGreaterThan(5);
-    expect(res1.body).toHaveProperty('meta');
-    expect(res1.body.meta).toHaveProperty('cacheHit', false);
+    expect(res1.body.roles.length).toBe(5);
 
-    // Second call should now be a cacheHit=true with the larger pool.
+    expect(res1.body).toHaveProperty('meta');
+    expect(res1.body.meta).toHaveProperty('cacheHit', true);
+    expect(res1.body.meta).toHaveProperty('cacheUndersized', true);
+
+    // Bedrock should NOT be invoked.
+    expect(mockGetInitial).not.toHaveBeenCalled();
+
+    // Second call should also be a cache hit and still not invoke Bedrock.
     const res2 = await request(app).get('/api/recommendations/initial').query({ personaId });
 
     expect([200]).toContain(res2.status);
     expect(Array.isArray(res2.body?.roles)).toBe(true);
-    expect(res2.body.roles.length).toBeGreaterThan(5);
+    expect(res2.body.roles.length).toBe(5);
+
     expect(res2.body).toHaveProperty('meta');
     expect(res2.body.meta).toHaveProperty('cacheHit', true);
 
-    expect(mockGetInitial).toHaveBeenCalled();
+    expect(mockGetInitial).not.toHaveBeenCalled();
 
     jest.dontMock('../../src/services/bedrockService');
   });

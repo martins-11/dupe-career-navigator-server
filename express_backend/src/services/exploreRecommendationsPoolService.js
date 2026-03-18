@@ -218,22 +218,36 @@ export async function getOrCreateExploreRecommendationsPool({
     ? Math.max(50, Number(opt.cacheReadTimeoutMs))
     : 250;
 
-  const cached = await _withTimeout(holisticPersonaRepo.getLatestRecommendationsRoles({ personaId: pid }), cacheReadTimeoutMs);
+  const cached = await _withTimeout(
+    holisticPersonaRepo.getLatestRecommendationsRoles({ personaId: pid }),
+    cacheReadTimeoutMs
+  );
   const cachedRoles = Array.isArray(cached?.roles) ? cached.roles : null;
 
+  /**
+   * IMPORTANT (bugfix):
+   * Treat the persisted pool as a true get-or-create cache.
+   *
+   * Previously we required cachedRoles.length >= desiredStoreCount. That caused repeated Bedrock
+   * invocations when Bedrock returned fewer unique roles than requested (e.g., asked for 12 but got 7–9).
+   *
+   * New policy:
+   * - If the cached pool looks like an initial-recommendations role-card set AND is not fallback-only,
+   *   return it immediately (even if smaller than desiredStoreCount).
+   * - This guarantees subsequent requests reuse the persisted pool and do not re-invoke Bedrock.
+   */
   const cacheLooksLikeInitialPool =
-    Array.isArray(cachedRoles) &&
-    cachedRoles.length >= 5 &&
-    cachedRoles.some((r) => r && typeof r === 'object' && r.match_metadata && typeof r.match_metadata === 'object');
+    Array.isArray(cachedRoles) && cachedRoles.length >= 5 && cachedRoles.some(_looksLikeInitialRecommendationRoleCard);
 
-  const cacheSatisfiesDesiredCount = Array.isArray(cachedRoles) && cachedRoles.length >= desiredStoreCount;
+  if (cacheLooksLikeInitialPool && !_isFallbackOnlyCachedRoles(cachedRoles)) {
+    const cacheUndersized = cachedRoles.length < desiredStoreCount;
 
-  if (cacheLooksLikeInitialPool && cacheSatisfiesDesiredCount && !_isFallbackOnlyCachedRoles(cachedRoles)) {
     return {
       roles: cachedRoles,
       meta: {
         personaId: pid,
         cacheHit: true,
+        cacheUndersized,
         endpointFallbackUsed: false,
         requestedCount: desiredStoreCount,
         receivedCount: cachedRoles.length,
