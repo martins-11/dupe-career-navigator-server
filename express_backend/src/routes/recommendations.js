@@ -233,13 +233,45 @@ async function handleInitialRecommendations(req, res) {
     const deadline = Number(req.requestDeadlineMs) || (now + Number(process.env.REQUEST_TIMEOUT_MS || 30000));
     const remainingMs = Math.max(0, deadline - now);
 
-    // Conservative preview-safe cap: default 15s total generation budget (env overridable).
-    const previewCapMsRaw = Number(process.env.INITIAL_RECOMMENDATIONS_MAX_MS || 15000);
-    const previewCapMs =
-      Number.isFinite(previewCapMsRaw) && previewCapMsRaw > 0 ? previewCapMsRaw : 15000;
+    /**
+     * Time-budget policy (CRITICAL):
+     * The primary failure mode reported for this endpoint is a *self-imposed* Bedrock abort at ~14s,
+     * which forces endpoint-level fallback even when the HTTP request still has time remaining.
+     *
+     * Historically this happened because INITIAL_RECOMMENDATIONS_MAX_MS defaulted to 15000 and we
+     * subtract a response buffer (600ms) => ~14400ms effective Bedrock budget.
+     *
+     * Fix:
+     * - Derive a sane default cap from the request timeout (set by requestTimeout middleware),
+     *   with a higher minimum to allow Bedrock to complete in typical environments.
+     * - Still allow env overrides, but never allow the effective cap to drop below a safe minimum
+     *   unless the request timeout itself is lower.
+     *
+     * Env knobs (optional):
+     * - INITIAL_RECOMMENDATIONS_MAX_MS: preferred explicit cap (ms)
+     * - INITIAL_RECOMMENDATIONS_MIN_MS: safety floor for the cap (ms, default 25000)
+     */
+    const requestTimeoutMs = Number(req.requestTimeoutMs) || Number(process.env.REQUEST_TIMEOUT_MS || 30000);
+
+    const configuredCapMsRaw = Number(process.env.INITIAL_RECOMMENDATIONS_MAX_MS);
+    const configuredCapMs =
+      Number.isFinite(configuredCapMsRaw) && configuredCapMsRaw > 0 ? configuredCapMsRaw : null;
+
+    const minCapMsRaw = Number(process.env.INITIAL_RECOMMENDATIONS_MIN_MS || 25000);
+    const minCapMs = Number.isFinite(minCapMsRaw) && minCapMsRaw > 0 ? minCapMsRaw : 25000;
+
+    // If no explicit cap is configured, default to the request timeout, but never below minCapMs
+    // (unless the request timeout itself is lower).
+    const defaultCapMs = Math.min(requestTimeoutMs, Math.max(minCapMs, requestTimeoutMs));
+
+    // Apply configured cap if present, but enforce safety floor; never exceed request timeout.
+    const effectiveCapMs = Math.min(
+      requestTimeoutMs,
+      Math.max(configuredCapMs != null ? configuredCapMs : defaultCapMs, minCapMs)
+    );
 
     const bufferMs = 600; // leave time to respond even under load
-    const timeBudgetMs = Math.max(0, Math.min(remainingMs, previewCapMs) - bufferMs);
+    const timeBudgetMs = Math.max(0, Math.min(remainingMs, effectiveCapMs) - bufferMs);
 
     // Always allow padding for this endpoint so we always return exactly 5.
     const allowPadding = true;
