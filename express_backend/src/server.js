@@ -76,11 +76,22 @@ app.use(express.json({ limit: '10mb' }));
 app.use(morgan('dev'));
 app.use(requestTimeout());
 
+// Static assets (fallback): allows fetching /assets/purp.png from the backend as well.
+// Note: This backend does not serve a UI; the Next.js frontend is the UI container.
+app.use('/assets', express.static(path.resolve(__dirname, '../public/assets')));
+
 app.get('/', (req, res) => {
   res.json({
     name: 'professional-persona-builder-express-backend',
     status: 'ok'
   });
+});
+
+app.get('/ui', (req, res) => {
+  res
+    .status(200)
+    .type('text/plain')
+    .send('This backend service provides an API only (no UI). Use the Next.js frontend for the user interface.');
 });
 
 app.use('/health', healthRouter);
