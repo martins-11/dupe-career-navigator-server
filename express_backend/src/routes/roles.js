@@ -296,9 +296,12 @@ router.get('/search', async (req, res) => {
     const q = String(req.query?.q || '').trim();
     const personaId = req.query?.personaId || req.query?.persona_id;
 
+    const limitRaw = req.query?.limit != null ? Number(req.query.limit) : undefined;
+    const limit = Number.isFinite(limitRaw) && limitRaw != null ? Math.max(1, Math.min(limitRaw, 200)) : 30;
+
     const rows = await exploreSearchRolesPersonaDriven({
       q,
-      limit: 30,
+      limit,
       personaId: personaId ? String(personaId).trim() : null,
     });
 

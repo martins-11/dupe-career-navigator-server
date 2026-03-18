@@ -76,6 +76,10 @@ app.get('/', (req, res) => {
 
 app.use('/health', healthRouter);
 
+// Compatibility mount:
+// Some clients/tooling call health under /api/* (same-origin convention).
+app.use('/api/health', healthRouter);
+
 /**
  * Route mounts (verification note):
  * The following 5 base routers are required and must remain mounted (non-404 reachability):
@@ -86,12 +90,35 @@ app.use('/health', healthRouter);
  * - /orchestration  (e.g., POST /orchestration/start)
  */
 app.use('/uploads', uploadsRouter);
+
+// Compatibility mount:
+// Frontend uses /api/uploads/* (same-origin) while the canonical backend routes live at /uploads/*.
+// Mount both to avoid 404: "No route for POST /api/uploads/documents".
+app.use('/api/uploads', uploadsRouter);
+
 app.use('/extraction', extractionRouter);
+// Compatibility mount: /api/extraction/*
+app.use('/api/extraction', extractionRouter);
+
 app.use('/builds', buildsRouter);
+// Compatibility mount: /api/builds/*
+app.use('/api/builds', buildsRouter);
+
 app.use('/ai', aiRouter);
+// Compatibility mount: /api/ai/*
+app.use('/api/ai', aiRouter);
+
 app.use('/orchestration', orchestrationRouter);
+// Compatibility mount: /api/orchestration/* (required for POST /api/orchestration/run-all)
+app.use('/api/orchestration', orchestrationRouter);
 
 app.use('/documents', documentsRouter);
+
+// Compatibility mount:
+// Frontend calls /api/documents (same-origin) while the canonical backend routes live at /documents/*.
+// Mount both to avoid 404: "No route for GET /api/documents?limit=50&offset=0".
+app.use('/api/documents', documentsRouter);
+
 app.use('/personas', personasRouter);
 
 // Compatibility mount:
@@ -197,7 +224,16 @@ app.use((err, req, res, next) => {
 const port = Number(process.env.PORT || 3001);
 const host = process.env.HOST || '0.0.0.0';
 
-app.listen(port, host, () => {
-  // eslint-disable-next-line no-console
-  console.log(`Express backend listening on http://${host}:${port}`);
-});
+/**
+ * PUBLIC_INTERFACE
+ * Export the Express app for integration tests and for environments that embed the server.
+ */
+module.exports = app;
+
+// Only start listening when executed as the entrypoint (not when required by Jest/supertest).
+if (require.main === module) {
+  app.listen(port, host, () => {
+    // eslint-disable-next-line no-console
+    console.log(`Express backend listening on http://${host}:${port}`);
+  });
+}

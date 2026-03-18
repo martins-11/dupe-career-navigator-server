@@ -647,31 +647,72 @@ function _extractPersonaProficiencies(finalizedPersona) {
  * - request new schema fields for the Explore UI
  */
 function _buildStrictJsonPrompt(userPersona) {
-  const personaObj =
-    userPersona?.persona && typeof userPersona.persona === 'object' ? userPersona.persona : null;
-  const requestType = _normStr(userPersona?.requestType) || 'searched';
-  const query = _normStr(userPersona?.query);
+  const up = userPersona && typeof userPersona === 'object' ? userPersona : {};
 
-  const skills = Array.isArray(userPersona?.skills)
-    ? userPersona.skills
-    : Array.isArray(userPersona?.validated_skills)
-      ? userPersona.validated_skills
-      : Array.isArray(userPersona?.validatedSkills)
-        ? userPersona.validatedSkills
-        : Array.isArray(userPersona?.user_skills)
-          ? userPersona.user_skills.map((s) =>
-              s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
-            )
-          : Array.isArray(userPersona?.userSkills)
-            ? userPersona.userSkills.map((s) =>
-                s && typeof s === 'object' ? s.name || s.skill || s.skill_name : s
+  /**
+   * Explore Search/Autocomplete path passes `finalPersonaObj` + `scoringUserSkills` (with proficiency),
+   * not `persona`. Use those as the primary context so Claude has enough signal to stay schema-compliant
+   * and return 5 distinct roles.
+   */
+  const personaObj =
+    (up.finalPersonaObj && typeof up.finalPersonaObj === 'object' && !Array.isArray(up.finalPersonaObj)
+      ? up.finalPersonaObj
+      : null) ||
+    (up.persona && typeof up.persona === 'object' && !Array.isArray(up.persona) ? up.persona : null);
+
+  const query = _normStr(up.query);
+
+  /**
+   * Request type:
+   * - If explicitly provided, honor it.
+   * - Else infer from query: empty => suggested; non-empty => searched.
+   */
+  const inferredRequestType = query ? 'searched' : 'suggested';
+  const requestType = _normStr(up.requestType) || inferredRequestType;
+
+  // Prefer proficiency-bearing scoring skills when available.
+  const scoringSkills = Array.isArray(up.scoringUserSkills) ? up.scoringUserSkills : [];
+
+  const scoringSkillNames = scoringSkills
+    .map((s) => (s && typeof s === 'object' ? s.name || s.skill || s.skill_name || s.skillName : s))
+    .map((s) => _normStr(s))
+    .filter(Boolean);
+
+  // Secondary sources: validated skills, skills, user_skills etc.
+  const skills = scoringSkillNames.length
+    ? scoringSkillNames
+    : Array.isArray(up.skills)
+      ? up.skills
+      : Array.isArray(up.validated_skills)
+        ? up.validated_skills
+        : Array.isArray(up.validatedSkills)
+          ? up.validatedSkills
+          : Array.isArray(up.user_skills)
+            ? up.user_skills.map((s) =>
+                s && typeof s === 'object' ? s.name || s.skill || s.skill_name || s.skillName : s
               )
-            : [];
+            : Array.isArray(up.userSkills)
+              ? up.userSkills.map((s) =>
+                  s && typeof s === 'object' ? s.name || s.skill || s.skill_name || s.skillName : s
+                )
+              : [];
 
   const skillsList = _asStringArray(skills).slice(0, 30);
   const skillsInline = skillsList.length > 0 ? skillsList.join(', ') : 'N/A';
 
-  const profs = _extractPersonaProficiencies(personaObj);
+  // Prefer proficiencies from scoringUserSkills; fallback to personaObj extraction.
+  const scoringProfs = scoringSkills
+    .map((s) => {
+      if (!s || typeof s !== 'object') return null;
+      const name = _normStr(s.name || s.skill || s.skill_name || s.skillName || '');
+      const prof = Number(s.proficiency ?? s.proficiency_percent ?? s.proficiencyPercent ?? s.percent ?? s.score);
+      if (!name || !Number.isFinite(prof)) return null;
+      return { name, proficiency: Math.max(0, Math.min(100, Math.round(prof))) };
+    })
+    .filter(Boolean);
+
+  const profs = scoringProfs.length > 0 ? scoringProfs : _extractPersonaProficiencies(personaObj);
+
   const profInline =
     profs.length > 0
       ? profs
@@ -681,43 +722,64 @@ function _buildStrictJsonPrompt(userPersona) {
       : 'N/A';
 
   const personaIndustry =
-    _normStr(personaObj?.industry || personaObj?.profile?.industry || userPersona?.industry || '') ||
-    'N/A';
+    _normStr(
+      personaObj?.industry ||
+        personaObj?.profile?.industry ||
+        up.industry ||
+        up.personaIndustry ||
+        ''
+    ) || 'N/A';
+
+  const queryLine = query ? `"${query}"` : 'N/A';
 
   return [
-    'You are a Global Recruitment Expert with deep knowledge of current market roles, skills, and compensation.',
+    'You are a Global Recruitment Expert for the Indian job market.',
+    'You know realistic job titles, responsibilities, required skills, and compensation bands in ₹ LPA.',
     '',
-    'REQUEST TYPE (important for variety):',
+    'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT):',
+    '1) Output MUST be valid JSON (RFC 8259).',
+    '2) Output MUST be a single JSON array (not an object).',
+    '3) Output MUST contain NO markdown, NO code fences, NO commentary, NO headings.',
+    '4) Output MUST contain EXACTLY 5 elements.',
+    '',
+    'REQUEST TYPE:',
     `- requestType: ${requestType} (suggested = no query; searched = query-driven)`,
-    `- query (may be empty): ${query || 'N/A'}`,
+    `- query: ${queryLine}`,
     '',
-    'CONTEXT (FinalizedPersona):',
+    'CONTEXT (Final Persona / Skills):',
     `- Persona industry: ${personaIndustry}`,
     `- User skills (names): [${skillsInline}]`,
     `- User proficiencies (name:percent): [${profInline}]`,
     '',
     'TASK:',
     requestType === 'suggested'
-      ? 'Generate EXACTLY 5 realistic job roles that fit this persona and are common in the current market. Do NOT assume any specific query intent.'
+      ? 'Generate EXACTLY 5 realistic job roles that fit this persona and are common in India today.'
       : 'Generate EXACTLY 5 realistic job roles that match BOTH the persona and the search query intent.',
     '',
-    'OUTPUT FORMAT:',
-    'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
-    'Do NOT wrap the array in an object (no {"roles": ...}).',
-    'Each element MUST be an object with EXACTLY these keys:',
-    '- "title": string',
-    '- "industry": string',
-    '- "description": string (exactly 2 sentences)',
-    '- "key_responsibilities": array of strings (EXACTLY 3 items; high-impact tasks)',
-    '- "experience_range": string (e.g., "3-5 years")',
-    '- "salary_range": string (REALISTIC for India; use ₹ and LPA, e.g., "₹18–₹30 LPA")',
-    '- "required_skills": array of strings (5-8 items; mix technical + soft skills; concrete)',
+    'SCHEMA (MUST MATCH EXACTLY):',
+    'Return a JSON array of 5 objects. EACH object MUST have ALL of these keys (no missing keys):',
+    '- "title": string (non-empty; unique across all 5 roles)',
+    '- "industry": string (non-empty)',
+    '- "description": string (EXACTLY 2 sentences; role-specific; no bullet lists)',
+    '- "key_responsibilities": string[] (EXACTLY 3 items; each item is 8–20 words; no trailing punctuation-only)',
+    '- "experience_range": string (realistic; e.g., "2-4 years" or "5-8 years")',
+    '- "salary_range": string (MUST include ₹ and "LPA"; realistic; e.g., "₹18–₹30 LPA")',
+    '- "required_skills": string[] (6–8 UNIQUE items; concrete skills; mix technical + soft; no duplicates)',
     '',
-    'QUALITY RULES:',
-    '- Avoid generic filler. Use role-accurate responsibilities and skills.',
-    '- Ensure required_skills contain skills that can be compared against the user skill list.',
-    '- Keep outputs consistent and market-realistic.',
-    '- Ensure the set of roles differs between suggested and searched mode when query is non-empty.'
+    'UNIQUENESS RULES (CRITICAL):',
+    '- All 5 titles MUST be distinct and not minor variants (avoid {Role} vs "Senior {Role}" as separate roles).',
+    '- Avoid near-duplicates/synonyms (e.g., "Backend Engineer" vs "Server-side Engineer").',
+    '',
+    'VALIDATION CHECKLIST (DO THIS BEFORE YOU OUTPUT):',
+    '- Count check: array length is exactly 5.',
+    '- Each object has ALL required keys and values are non-empty strings/arrays.',
+    '- key_responsibilities length is exactly 3 for every role.',
+    '- required_skills length is between 6 and 8 for every role.',
+    '- salary_range contains both ₹ and LPA for every role.',
+    '- Titles are unique (case-insensitive).',
+    '',
+    'OUTPUT:',
+    'Return ONLY the JSON array.'
   ].join('\n');
 }
 
@@ -1239,6 +1301,9 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
 }
 
 function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
+  const rawCount = Number(options?.count);
+  // Support requesting/storing >5 roles; cap at 20 to keep responses bounded.
+  const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(20, Math.floor(rawCount))) : 5;
   const personaObj =
     finalPersona && typeof finalPersona === 'object'
       ? finalPersona.finalJson && typeof finalPersona.finalJson === 'object'
@@ -1345,7 +1410,7 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
     '',
     onetSnippet,
     'TASK:',
-    'Return EXACTLY 5 realistic India-market job roles that best fit this persona today.',
+    `Return EXACTLY ${count} realistic India-market job roles that best fit this persona today.`,
     '',
     'OUTPUT FORMAT:',
     'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
@@ -1386,11 +1451,21 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     envKeys: ['BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
   });
 
-  const prompt = _buildInitialRecommendationsPrompt(finalPersona, { context: options?.context || null });
+  const rawCount = Number(options?.count);
+  // Support requesting/storing >5 roles; cap at 20 to keep responses bounded.
+  const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(20, Math.floor(rawCount))) : 5;
+
+  const prompt = _buildInitialRecommendationsPrompt(finalPersona, {
+    context: options?.context || null,
+    count
+  });
+
+  // Scale token budget when requesting more roles (avoid truncation for >10 roles).
+  const maxTokens = Math.max(700, Math.min(3200, 1100 + Math.max(0, count - 5) * 190));
 
   const body = {
     anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 1100,
+    max_tokens: maxTokens,
     temperature: 0.2,
     messages: [
       {
@@ -1562,8 +1637,8 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       throw err;
     }
 
-    // Return up to 5; do not error if fewer than 5 are valid.
-    return { roles: roles.slice(0, 5), usedFallback: false, modelId, prompt };
+    // Return up to requested count; do not error if fewer than 5 are valid.
+    return { roles: roles.slice(0, count), usedFallback: false, modelId, prompt };
   };
 
   try {
@@ -1605,7 +1680,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const validatedFallback = _validateAndNormalizeInitialRecommendations(fallbackRoles, { debug: false });
 
     return {
-      roles: (validatedFallback?.roles || []).slice(0, 5),
+      roles: (validatedFallback?.roles || []).slice(0, count),
       usedFallback: true,
       modelId,
       prompt,

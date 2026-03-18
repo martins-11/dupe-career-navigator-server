@@ -50,7 +50,8 @@ describe('recommendationsInitialService - 3/2 rerank + ring fields', () => {
 
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
-      personaId: 'p1'
+      personaId: 'p1',
+      options: { minCount: 2, requestedCount: 2, maxAttempts: 1, allowPadding: false }
     });
 
     expect(result).toBeTruthy();
