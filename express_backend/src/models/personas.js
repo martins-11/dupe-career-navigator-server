@@ -1,55 +1,72 @@
 'use strict';
 
-const { z } = require('zod');
+const { getZod } = require('../utils/zod');
 
-const uuid = z.string().uuid();
+let _schemasPromise;
 
-/**
- * Persona API models (scaffold).
- *
- * These validate payloads for persona CRUD and version history operations.
- * The backing repository is designed to be a safe stub until DB env vars exist.
- */
+async function _initSchemas() {
+  const { z } = await getZod();
 
-const PersonaCreateRequest = z.object({
-  userId: uuid.nullable().optional(),
-  title: z.string().min(1).nullable().optional(),
-  /** Arbitrary persona JSON payload (draft). */
-  personaJson: z.record(z.any()).optional()
-});
+  const uuid = z.string().uuid();
 
-const PersonaUpdateRequest = z.object({
   /**
-   * Title is optional + nullable.
+   * Persona API models (scaffold).
    *
-   * UI inputs often emit an empty string when a user clears the field.
-   * Treat "" as null so we don't reject otherwise-valid updates with a 400.
+   * These validate payloads for persona CRUD and version history operations.
+   * The backing repository is designed to be a safe stub until DB env vars exist.
    */
-  title: z.preprocess(
-    (v) => (typeof v === 'string' && v.trim().length === 0 ? null : v),
-    z.string().min(1).nullable().optional()
-  ),
-  /**
-   * Arbitrary persona JSON payload (draft/final).
-   *
-   * NOTE:
-   * Frontends may send `null` when a field is cleared or when only metadata (title)
-   * is being updated. We accept null and interpret it as "no personaJson update".
-   */
-  personaJson: z.record(z.any()).nullable().optional()
-});
 
-const PersonaVersionCreateRequest = z.object({
-  /**
-   * When omitted, repository may auto-increment from latest version.
-   * This is optional in the scaffold (final behavior TBD).
-   */
-  version: z.number().int().positive().optional(),
-  personaJson: z.record(z.any())
-});
+  const PersonaCreateRequest = z.object({
+    userId: uuid.nullable().optional(),
+    title: z.string().min(1).nullable().optional(),
+    /** Arbitrary persona JSON payload (draft). */
+    personaJson: z.record(z.any()).optional()
+  });
+
+  const PersonaUpdateRequest = z.object({
+    /**
+     * Title is optional + nullable.
+     *
+     * UI inputs often emit an empty string when a user clears the field.
+     * Treat "" as null so we don't reject otherwise-valid updates with a 400.
+     */
+    title: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim().length === 0 ? null : v),
+      z.string().min(1).nullable().optional()
+    ),
+    /**
+     * Arbitrary persona JSON payload (draft/final).
+     *
+     * NOTE:
+     * Frontends may send `null` when a field is cleared or when only metadata (title)
+     * is being updated. We accept null and interpret it as "no personaJson update".
+     */
+    personaJson: z.record(z.any()).nullable().optional()
+  });
+
+  const PersonaVersionCreateRequest = z.object({
+    /**
+     * When omitted, repository may auto-increment from latest version.
+     * This is optional in the scaffold (final behavior TBD).
+     */
+    version: z.number().int().positive().optional(),
+    personaJson: z.record(z.any())
+  });
+
+  return {
+    PersonaCreateRequest,
+    PersonaUpdateRequest,
+    PersonaVersionCreateRequest
+  };
+}
+
+// PUBLIC_INTERFACE
+async function getPersonaSchemas() {
+  /** Lazily initialize Zod schemas without triggering ESM/CJS crashes at require-time. */
+  if (!_schemasPromise) _schemasPromise = _initSchemas();
+  return _schemasPromise;
+}
 
 module.exports = {
-  PersonaCreateRequest,
-  PersonaUpdateRequest,
-  PersonaVersionCreateRequest
+  getPersonaSchemas
 };
