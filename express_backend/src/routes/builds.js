@@ -1,9 +1,7 @@
-'use strict';
-
-const express = require('express');
-const { getZod } = require('../utils/zod');
-const buildsService = require('../services/buildsService');
-const { getDbEngine } = require('../db/connection');
+import express from 'express';
+import { getZod } from '../utils/zod.js';
+import buildsService from '../services/buildsService.js';
+import { getDbEngine } from '../db/connection.js';
 
 const router = express.Router();
 
@@ -140,4 +138,4 @@ router.post('/:id/cancel', async (req, res) => {
   }
 });
 
-module.exports = router;
+export default router;

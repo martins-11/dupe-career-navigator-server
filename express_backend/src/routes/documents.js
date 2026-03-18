@@ -1,8 +1,6 @@
-'use strict';
-
-const express = require('express');
-const { DocumentCreateRequest, ExtractedTextUpsertRequest } = require('../models/documents');
-const documentsRepo = require('../repositories/documentsRepoAdapter');
+import express from 'express';
+import { DocumentCreateRequest, ExtractedTextUpsertRequest } from '../models/documents.js';
+import documentsRepo from '../repositories/documentsRepoAdapter.js';
 
 const router = express.Router();
 
@@ -108,4 +106,4 @@ router.get('/:id/extracted-text/latest', _getLatestExtractedTextHandler);
  */
 router.get('/:id/extracted-text', _getLatestExtractedTextHandler);
 
-module.exports = router;
+export default router;
