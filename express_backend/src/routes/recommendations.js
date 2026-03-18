@@ -145,6 +145,36 @@ async function handleInitialRecommendations(req, res) {
       ]).catch(() => null);
     };
 
+    const _looksLikeLegacySimpleRecommendedRole = (r) => {
+      /**
+       * /api/recommendations/roles returns objects shaped like:
+       * { role_id, role_title, industry, match_reason, estimated_salary_range }
+       *
+       * Those entries must NOT be used as the cached pool for /api/recommendations/initial.
+       */
+      if (!r || typeof r !== 'object') return false;
+      return typeof r.match_reason === 'string' && r.match_reason.length > 0;
+    };
+
+    const _looksLikeInitialRecommendationRoleCard = (r) => {
+      /**
+       * Bedrock initial recommendations role cards typically have:
+       * - match_metadata (with bedrockModelId / endpointFallbackUsed / isFallbackFilled)
+       * - required_skills array
+       * - key_responsibilities array (often)
+       *
+       * We keep this heuristic loose and additive so older stored pools still qualify.
+       */
+      if (!r || typeof r !== 'object') return false;
+      if (_looksLikeLegacySimpleRecommendedRole(r)) return false;
+
+      const hasMatchMeta = r.match_metadata && typeof r.match_metadata === 'object' && !Array.isArray(r.match_metadata);
+      const hasSkills = Array.isArray(r.required_skills) || Array.isArray(r.skills_required);
+      const hasResponsibilities = Array.isArray(r.key_responsibilities) || Array.isArray(r.keyResponsibilities);
+
+      return Boolean(hasMatchMeta || (hasSkills && hasResponsibilities));
+    };
+
     const isFallbackOnlyCachedRoles = (roles) => {
       /**
        * A cached entry should be considered "fallback-only" (and therefore non-cacheable)
@@ -156,6 +186,9 @@ async function handleInitialRecommendations(req, res) {
        */
       const arr = Array.isArray(roles) ? roles : [];
       if (arr.length < 5) return false;
+
+      // If the cache isn't even the right shape for /initial, treat it as unusable for caching decisions.
+      if (!arr.some(_looksLikeInitialRecommendationRoleCard)) return true;
 
       const anyEndpointFallback = arr.some((r) => r?.match_metadata?.endpointFallbackUsed === true);
       if (anyEndpointFallback) return true;
@@ -190,10 +223,16 @@ async function handleInitialRecommendations(req, res) {
 
     // CRITICAL:
     // - never serve fallback-only cached results
+    // - never serve cached results that are not "initial recommendations role card" shape
     // - and do NOT serve a too-small cached set when we now want to store/serve >5
     const cacheSatisfiesDesiredCount = cachedRoles && cachedRoles.length >= storeCount;
 
-    if (cacheSatisfiesDesiredCount && !isFallbackOnlyCachedRoles(cachedRoles)) {
+    const cacheLooksLikeInitialPool =
+      Array.isArray(cachedRoles) &&
+      cachedRoles.length >= 5 &&
+      cachedRoles.some((r) => r && typeof r === 'object' && r.match_metadata && typeof r.match_metadata === 'object');
+
+    if (cacheSatisfiesDesiredCount && cacheLooksLikeInitialPool && !isFallbackOnlyCachedRoles(cachedRoles)) {
       if (req.timedOut || res.headersSent) return;
       return res.json({
         roles: cachedRoles,
@@ -524,21 +563,18 @@ router.get('/roles', async (req, res) => {
     // Apply limit after computation/fallback, but never below schema minimum.
     const capped = Array.isArray(recommendations) ? recommendations.slice(0, Math.max(limit, 5)) : [];
 
-    // Best-effort persist latest computed roles (for refresh/reload). We keep this non-blocking.
-    // Only persist when we have some identity to attach it to.
-    if (userId || resolvedPersonaId) {
-      try {
-        await holisticPersonaRepo.upsertRecommendationsRoles({
-          userId,
-          personaId: resolvedPersonaId,
-          buildId: null,
-          inferredTags: [],
-          roles: capped
-        });
-      } catch (_) {
-        // ignore persistence failures
-      }
-    }
+    /**
+     * IMPORTANT (bugfix):
+     * Do NOT persist /api/recommendations/roles output into the shared `recommendations_roles` store.
+     *
+     * Why:
+     * - That persistence is used as the Explore "source of truth" pool and by /api/recommendations/initial caching.
+     * - /api/recommendations/roles returns a *different* role shape (RecommendedRoleSchema) and is often
+     *   deterministic/fallback-like.
+     * - Persisting it can overwrite Bedrock initial recommendations, causing the UI to always show fallback roles.
+     *
+     * If we need persistence for this endpoint in the future, introduce a separate table/column or a dedicated repo key.
+     */
 
     const payload = enforceResponse(RecommendationsRolesResponseSchema, { roles: capped });
     return res.json(payload);

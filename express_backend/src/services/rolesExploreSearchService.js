@@ -139,13 +139,34 @@ async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null
   const effectiveLimit =
     Number.isFinite(limitNum) && limitNum > 0 ? Math.max(1, Math.min(limitNum, 100)) : 30;
 
-  // 1) Prefer stored recommendations roles for this personaId (source of truth for Explore UX).
+  const _looksLikeLegacySimpleRecommendedRole = (r) => {
+    // /api/recommendations/roles shape (must NOT be treated as Explore pool)
+    return Boolean(r && typeof r === 'object' && typeof r.match_reason === 'string' && r.match_reason.length > 0);
+  };
+
+  const _looksLikeInitialRecommendationsPool = (roles) => {
+    /**
+     * Bedrock initial recommendations pool is expected to include match_metadata and/or role-card fields.
+     * If the cached entry is the legacy "simple recommended roles" shape, do not use it here—otherwise
+     * it will suppress Bedrock Explore search indefinitely.
+     */
+    const arr = Array.isArray(roles) ? roles : [];
+    if (arr.length < 5) return false;
+
+    if (arr.some(_looksLikeLegacySimpleRecommendedRole)) return false;
+
+    // Heuristic: initial pool entries have match_metadata and required_skills.
+    return arr.some((r) => r?.match_metadata && typeof r.match_metadata === 'object');
+  };
+
+  // 1) Prefer stored recommendations roles for this personaId (source of truth for Explore UX),
+  //    but ONLY if it is the Bedrock initial-recommendations pool.
   if (personaId) {
     try {
       const cached = await holisticPersonaRepo.getLatestRecommendationsRoles({ personaId: String(personaId).trim() });
       const cachedRoles = Array.isArray(cached?.roles) ? cached.roles : [];
 
-      if (cachedRoles.length >= 5) {
+      if (_looksLikeInitialRecommendationsPool(cachedRoles)) {
         const qLower = searchQuery.toLowerCase();
 
         const matchesQuery = (role) => {
