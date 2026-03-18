@@ -66,6 +66,102 @@ function getInitialRecommendationsHandler() {
  * NOTE: We intentionally support TWO paths below to avoid 404s caused by router
  * mount-prefix mistakes (double-prefixing /recommendations).
  */
+function _coercePersonaJson(value) {
+  if (!value) return null;
+  let next = value;
+
+  if (typeof next === 'string') {
+    try {
+      next = JSON.parse(next);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  if (!next || typeof next !== 'object' || Array.isArray(next)) return null;
+
+  return (
+    next.finalJson ||
+    next.personaJson ||
+    next.final ||
+    next.persona ||
+    next.draftJson ||
+    next.draft ||
+    next
+  );
+}
+
+function _readFinalPersonaFromRequest(req) {
+  /**
+   * Additive input (optional): allow callers to pass final persona JSON directly to avoid
+   * DB timing/race issues.
+   */
+  let finalPersonaFromRequest = null;
+  const finalPersonaJsonRaw = req.query?.finalPersonaJson ? String(req.query.finalPersonaJson).trim() : '';
+  if (finalPersonaJsonRaw) {
+    try {
+      finalPersonaFromRequest = JSON.parse(finalPersonaJsonRaw);
+    } catch (_) {
+      // ignore
+    }
+  } else if (req.body?.finalPersona && typeof req.body.finalPersona === 'object') {
+    finalPersonaFromRequest = req.body.finalPersona;
+  }
+
+  return finalPersonaFromRequest;
+}
+
+function _computeTimeBudgetMs(req) {
+  // Enforce a time budget so this endpoint returns within preview/proxy timeouts.
+  const now = Date.now();
+  const deadline = Number(req.requestDeadlineMs) || (now + Number(process.env.REQUEST_TIMEOUT_MS || 30000));
+  const remainingMs = Math.max(0, deadline - now);
+
+  const requestTimeoutMs = Number(req.requestTimeoutMs) || Number(process.env.REQUEST_TIMEOUT_MS || 30000);
+
+  const configuredCapMsRaw = Number(process.env.INITIAL_RECOMMENDATIONS_MAX_MS);
+  const configuredCapMs =
+    Number.isFinite(configuredCapMsRaw) && configuredCapMsRaw > 0 ? configuredCapMsRaw : null;
+
+  const minCapMsRaw = Number(process.env.INITIAL_RECOMMENDATIONS_MIN_MS || 25000);
+  const minCapMs = Number.isFinite(minCapMsRaw) && minCapMsRaw > 0 ? minCapMsRaw : 25000;
+
+  const defaultCapMs = Math.min(requestTimeoutMs, Math.max(minCapMs, requestTimeoutMs));
+
+  const effectiveCapMs = Math.min(
+    requestTimeoutMs,
+    Math.max(configuredCapMs != null ? configuredCapMs : defaultCapMs, minCapMs)
+  );
+
+  const bufferMs = 600; // leave time to respond even under load
+  const timeBudgetMs = Math.max(0, Math.min(remainingMs, effectiveCapMs) - bufferMs);
+
+  return timeBudgetMs;
+}
+
+function _computeStoreCount(req) {
+  // Desired persisted pool size for Explore (mindmap/cards/search/filtering all reuse it).
+  // Allow override via query param for debugging.
+  const storeCountQueryRaw = req.query?.storeCount != null ? String(req.query.storeCount).trim() : '';
+  const storeCountQueryParsed = Number.parseInt(storeCountQueryRaw, 10);
+
+  if (Number.isFinite(storeCountQueryParsed) && storeCountQueryParsed > 5) {
+    return Math.min(20, storeCountQueryParsed);
+  }
+
+  const storeCountEnvRaw = process.env.INITIAL_RECOMMENDATIONS_STORE_COUNT;
+  const storeCountParsed = Number.parseInt(String(storeCountEnvRaw ?? '').trim(), 10);
+  const storeCount =
+    Number.isFinite(storeCountParsed) && storeCountParsed > 5 ? Math.min(20, storeCountParsed) : 12;
+
+  return storeCount;
+}
+
+/**
+ * Shared handler for initial recommendations.
+ * NOTE: We intentionally support TWO paths below to avoid 404s caused by router
+ * mount-prefix mistakes (double-prefixing /recommendations).
+ */
 async function handleInitialRecommendations(req, res) {
   try {
     // Prevent caching of persona-driven scoring results (persona can change quickly during debugging/iteration).
@@ -79,79 +175,68 @@ async function handleInitialRecommendations(req, res) {
       throw err;
     }
 
-    const coercePersonaJson = (value) => {
-      if (!value) return null;
-      let next = value;
-
-      if (typeof next === 'string') {
-        try {
-          next = JSON.parse(next);
-        } catch (_) {
-          return null;
-        }
-      }
-
-      if (!next || typeof next !== 'object' || Array.isArray(next)) return null;
-
-      return (
-        next.finalJson ||
-        next.personaJson ||
-        next.final ||
-        next.persona ||
-        next.draftJson ||
-        next.draft ||
-        next
-      );
-    };
-
-    /**
-     * Additive input (optional): allow callers to pass final persona JSON directly to avoid
-     * DB timing/race issues.
-     */
-    let finalPersonaFromRequest = null;
-    const finalPersonaJsonRaw = req.query?.finalPersonaJson ? String(req.query.finalPersonaJson).trim() : '';
-    if (finalPersonaJsonRaw) {
-      try {
-        finalPersonaFromRequest = JSON.parse(finalPersonaJsonRaw);
-      } catch (_) {
-        // ignore
-      }
-    } else if (req.body?.finalPersona && typeof req.body.finalPersona === 'object') {
-      finalPersonaFromRequest = req.body.finalPersona;
-    }
-
-    // Enforce a time budget so this endpoint returns within preview/proxy timeouts.
-    const now = Date.now();
-    const deadline = Number(req.requestDeadlineMs) || (now + Number(process.env.REQUEST_TIMEOUT_MS || 30000));
-    const remainingMs = Math.max(0, deadline - now);
-
-    const requestTimeoutMs = Number(req.requestTimeoutMs) || Number(process.env.REQUEST_TIMEOUT_MS || 30000);
-
-    const configuredCapMsRaw = Number(process.env.INITIAL_RECOMMENDATIONS_MAX_MS);
-    const configuredCapMs =
-      Number.isFinite(configuredCapMsRaw) && configuredCapMsRaw > 0 ? configuredCapMsRaw : null;
-
-    const minCapMsRaw = Number(process.env.INITIAL_RECOMMENDATIONS_MIN_MS || 25000);
-    const minCapMs = Number.isFinite(minCapMsRaw) && minCapMsRaw > 0 ? minCapMsRaw : 25000;
-
-    const defaultCapMs = Math.min(requestTimeoutMs, Math.max(minCapMs, requestTimeoutMs));
-
-    const effectiveCapMs = Math.min(
-      requestTimeoutMs,
-      Math.max(configuredCapMs != null ? configuredCapMs : defaultCapMs, minCapMs)
-    );
-
-    const bufferMs = 600; // leave time to respond even under load
-    const timeBudgetMs = Math.max(0, Math.min(remainingMs, effectiveCapMs) - bufferMs);
-
-    // Desired persisted pool size for Explore (mindmap/cards/search/filtering all reuse it).
-    const storeCountEnvRaw = process.env.INITIAL_RECOMMENDATIONS_STORE_COUNT;
-    const storeCountParsed = Number.parseInt(String(storeCountEnvRaw ?? '').trim(), 10);
-    const storeCount =
-      Number.isFinite(storeCountParsed) && storeCountParsed > 5 ? Math.min(20, storeCountParsed) : 12;
+    const finalPersonaFromRequest = _readFinalPersonaFromRequest(req);
+    const timeBudgetMs = _computeTimeBudgetMs(req);
+    const storeCount = _computeStoreCount(req);
 
     // Prefer request-provided persona if present (fastest), otherwise the pool service loads it.
-    const finalPersonaOverride = coercePersonaJson(finalPersonaFromRequest) || null;
+    const finalPersonaOverride = _coercePersonaJson(finalPersonaFromRequest) || null;
+
+    const pool = await exploreRecommendationsPoolService.getOrCreateExploreRecommendationsPool({
+      personaId: personaIdRaw,
+      finalPersonaOverride,
+      options: {
+        storeCount,
+        timeBudgetMs,
+      },
+    });
+
+    const roles = Array.isArray(pool?.roles) ? pool.roles : [];
+    const meta = pool?.meta && typeof pool.meta === 'object' ? pool.meta : {};
+
+    if (req.timedOut || res.headersSent) return;
+    return res.json({ roles, meta });
+  } catch (err) {
+    if (req.timedOut || res.headersSent) return;
+    return sendError(res, err);
+  }
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/recommendations/pool
+ *
+ * Explore recommendations pool endpoint.
+ *
+ * Purpose:
+ * - Provide a single Bedrock-backed pool fetch that is persisted and reused across Explore views.
+ * - Avoid falling back to /api/recommendations/roles (guest_*), which is a different contract.
+ *
+ * Query params:
+ * - personaId: string (REQUIRED)
+ * - storeCount: number (optional; min 6; max 20; default from env)
+ * - finalPersonaJson: stringified JSON (optional; additive fast-path to avoid DB lookups)
+ *
+ * Response:
+ * { roles: any[], meta: object }
+ */
+async function handleRecommendationsPool(req, res) {
+  try {
+    res.set('Cache-Control', 'no-store');
+
+    const personaIdRaw = req.query?.personaId ? String(req.query.personaId).trim() : '';
+    if (!personaIdRaw) {
+      const err = new Error('personaId query parameter is required.');
+      err.code = 'missing_persona_id';
+      err.httpStatus = 400;
+      throw err;
+    }
+
+    const finalPersonaFromRequest = _readFinalPersonaFromRequest(req);
+    const timeBudgetMs = _computeTimeBudgetMs(req);
+    const storeCount = _computeStoreCount(req);
+
+    const finalPersonaOverride = _coercePersonaJson(finalPersonaFromRequest) || null;
 
     const pool = await exploreRecommendationsPoolService.getOrCreateExploreRecommendationsPool({
       personaId: personaIdRaw,
@@ -187,6 +272,18 @@ router.get('/initial', handleInitialRecommendations);
  * this keeps the endpoint reachable at `/api/recommendations/initial`.
  */
 router.get('/recommendations/initial', handleInitialRecommendations);
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/recommendations/pool
+ */
+router.get('/pool', handleRecommendationsPool);
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /api/recommendations/pool (defensive alias)
+ */
+router.get('/recommendations/pool', handleRecommendationsPool);
 
 // PUBLIC_INTERFACE
 router.get('/roles', async (req, res) => {

@@ -27,7 +27,8 @@ export function requestTimeout() {
       Number.isFinite(initialRecMsRaw) && initialRecMsRaw > 0 ? initialRecMsRaw : 45000;
 
     const url = String(req.originalUrl || req.url || '');
-    const isInitialRecommendations = url.includes('/recommendations/initial');
+    const isInitialRecommendations =
+      url.includes('/recommendations/initial') || url.includes('/recommendations/pool');
 
     const timeoutMs = isInitialRecommendations ? initialRecTimeoutMs : defaultTimeoutMs;
 
