@@ -1,7 +1,5 @@
-'use strict';
-
-const { query } = require('../db/query');
-const { uuidV4 } = require('../utils/uuid');
+import { query } from '../db/query.js';
+import { uuidV4 } from '../utils/uuid.js';
 
 /**
  * Personas repository (scaffold).
@@ -16,7 +14,7 @@ const { uuidV4 } = require('../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-function isDbConfigured() {
+export function isDbConfigured() {
   /** Returns true if any PostgreSQL connection env var appears to be set. */
   return Boolean(
     (process.env.PG_CONNECTION_STRING && process.env.PG_CONNECTION_STRING.trim()) ||
@@ -37,7 +35,7 @@ function ensureDbConfigured() {
 }
 
 // PUBLIC_INTERFACE
-async function createPersona(input) {
+export async function createPersona(input) {
   /** Create a persona. Optionally creates version 1 if personaJson provided. */
   ensureDbConfigured();
 
@@ -68,7 +66,7 @@ async function createPersona(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getPersonaById(personaId) {
+export async function getPersonaById(personaId) {
   /** Fetch a persona row by id. Returns null if not found. */
   ensureDbConfigured();
 
@@ -90,7 +88,7 @@ async function getPersonaById(personaId) {
 }
 
 // PUBLIC_INTERFACE
-async function updatePersona(personaId, patch) {
+export async function updatePersona(personaId, patch) {
   /**
    * Update persona metadata (e.g., title).
    * Note: personaJson is versioned and should be written via createPersonaVersion().
@@ -133,7 +131,7 @@ async function updatePersona(personaId, patch) {
 }
 
 // PUBLIC_INTERFACE
-async function createPersonaVersion(personaId, input) {
+export async function createPersonaVersion(personaId, input) {
   /**
    * Create a persona version row.
    * If version is omitted, computes next version = max(version)+1.
@@ -176,7 +174,7 @@ async function createPersonaVersion(personaId, input) {
 }
 
 // PUBLIC_INTERFACE
-async function listPersonaVersions(personaId) {
+export async function listPersonaVersions(personaId) {
   /** List persona versions (ascending). */
   ensureDbConfigured();
 
@@ -199,7 +197,7 @@ async function listPersonaVersions(personaId) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestPersonaVersion(personaId) {
+export async function getLatestPersonaVersion(personaId) {
   /** Get the latest persona version (highest version). Returns null if none. */
   ensureDbConfigured();
 
@@ -222,7 +220,7 @@ async function getLatestPersonaVersion(personaId) {
   return res.rows[0] || null;
 }
 
-module.exports = {
+const personasRepo = {
   isDbConfigured,
   createPersona,
   getPersonaById,
@@ -231,3 +229,5 @@ module.exports = {
   listPersonaVersions,
   getLatestPersonaVersion
 };
+
+export default personasRepo;

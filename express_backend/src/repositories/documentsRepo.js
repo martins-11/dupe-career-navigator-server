@@ -1,7 +1,5 @@
-'use strict';
-
-const { query } = require('../db/query');
-const { uuidV4 } = require('../utils/uuid');
+import { query } from '../db/query.js';
+import { uuidV4 } from '../utils/uuid.js';
 
 /**
  * Repository functions aligned to the placeholder schema:
@@ -10,7 +8,7 @@ const { uuidV4 } = require('../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-async function createDocument(input) {
+export async function createDocument(input) {
   /** Create a document row in PostgreSQL and return the created record. */
   const id = uuidV4();
 
@@ -53,7 +51,7 @@ async function createDocument(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getDocumentById(documentId) {
+export async function getDocumentById(documentId) {
   /** Fetch a document by id. Returns null if not found. */
   const res = await query(
     `
@@ -80,7 +78,7 @@ async function getDocumentById(documentId) {
 }
 
 // PUBLIC_INTERFACE
-async function upsertExtractedText(documentId, input) {
+export async function upsertExtractedText(documentId, input) {
   /**
    * Persist extracted text for a document.
    *
@@ -120,7 +118,7 @@ async function upsertExtractedText(documentId, input) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestExtractedText(documentId) {
+export async function getLatestExtractedText(documentId) {
   /** Retrieve the latest extracted text blob for a given document. */
   const res = await query(
     `
@@ -152,7 +150,7 @@ async function getLatestExtractedText(documentId) {
  * @param {string} category canonical category string
  * @returns {Promise<object|null>}
  */
-async function getLatestDocumentForUserByCategory(userId, category) {
+export async function getLatestDocumentForUserByCategory(userId, category) {
   // Note: explicit NULL match keeps anonymous flows supported.
   const res = await query(
     `
@@ -181,10 +179,12 @@ async function getLatestDocumentForUserByCategory(userId, category) {
   return res.rows[0] || null;
 }
 
-module.exports = {
+const documentsRepo = {
   createDocument,
   getDocumentById,
   upsertExtractedText,
   getLatestExtractedText,
   getLatestDocumentForUserByCategory
 };
+
+export default documentsRepo;
