@@ -1,7 +1,6 @@
-'use strict';
-
-const buildsRepo = require('../repositories/buildsRepoAdapter');
-const workflowService = require('./workflowService');
+import buildsRepo from '../repositories/buildsRepoAdapter.js';
+import workflowService from './workflowService.js';
+import buildsMemoryRepo from '../repositories/memory/buildsMemoryRepo.js';
 
 /**
  * Build/workflow service.
@@ -81,8 +80,7 @@ async function createBuild(input) {
 
   // Persist build record (memory by default; DB-backed when configured), but allow forced memory.
   if (input && input.forceMemory) {
-    const memRepo = require('../repositories/memory/buildsMemoryRepo');
-    await memRepo.createBuild({
+    await buildsMemoryRepo.createBuild({
       id: wf.id,
       personaId: wf.personaId,
       documentId: wf.documentId,
@@ -196,7 +194,17 @@ async function linkDocumentsToBuild(buildId, documentIds) {
   return { linked: false, count: 0 };
 }
 
-module.exports = {
+export {
+  isDbConfiguredForBuilds,
+  createBuild,
+  getBuild,
+  getBuildStatus,
+  cancelBuild,
+  linkDocumentToBuild,
+  linkDocumentsToBuild
+};
+
+export default {
   isDbConfiguredForBuilds,
   createBuild,
   getBuild,

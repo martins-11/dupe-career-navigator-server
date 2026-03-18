@@ -1,6 +1,4 @@
-'use strict';
-
-const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
+import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 
 /**
  * Bedrock Role Generation Service
@@ -1954,10 +1952,18 @@ async function extractCurrentRoleFromText({ text, hints = {}, options = {} }) {
   return { currentRoleTitle, confidence, evidence, rawText, prompt, modelId };
 }
 
-module.exports = {
+export {
   generateTargetedRoles,
   generateTargetedRolesSafe,
   getInitialRecommendations,
   extractNameAndCurrentRoleFromText,
-  extractCurrentRoleFromText,
+  extractCurrentRoleFromText
+};
+
+export default {
+  generateTargetedRoles,
+  generateTargetedRolesSafe,
+  getInitialRecommendations,
+  extractNameAndCurrentRoleFromText,
+  extractCurrentRoleFromText
 };

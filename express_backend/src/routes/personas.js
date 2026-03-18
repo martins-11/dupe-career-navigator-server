@@ -12,7 +12,7 @@ import userTargetsRepo from '../repositories/userTargetsRepoAdapter.js';
 import { PersonaTargetRoleSelectRequest } from '../models/targets.js';
 
 import { getDbEngine, isDbConfigured, isMysqlConfigured } from '../db/connection.js';
-import recommendationsService from '../services/recommendationsService.js';
+import { DEFAULT_ROLES_CATALOG } from '../services/recommendationsService.js';
 
 const router = express.Router();
 
@@ -179,7 +179,7 @@ router.post('/target-role', async (req, res) => {
 
     const roleId = String(parsed.data.role_id).trim();
 
-    const seed = recommendationsService?.DEFAULT_ROLES_CATALOG;
+    const seed = DEFAULT_ROLES_CATALOG;
     const seedHasRole =
       Array.isArray(seed) &&
       seed.some((r) => {

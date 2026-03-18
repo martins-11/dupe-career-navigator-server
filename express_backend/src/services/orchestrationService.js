@@ -1,15 +1,17 @@
-'use strict';
+import { getZodSync } from '../utils/zod.js';
+import documentsRepo from '../repositories/documentsRepoAdapter.js';
+import personasRepo from '../repositories/personasRepoAdapter.js';
+import { normalizeText } from './normalizationService.js';
+import buildsService from './buildsService.js';
+import workflowService from './workflowService.js';
+import aiRunsRepo from '../repositories/aiRunsRepoAdapter.js';
+import userTargetsRepo from '../repositories/userTargetsRepoAdapter.js';
+import { uuidV4 } from '../utils/uuid.js';
+import personaService from './personaService.js';
+import { extractBestNameAndRoleFromDocuments, extractNameAndCurrentRole } from '../utils/nameRoleExtraction.js';
+import { DOCUMENT_CATEGORIES } from '../models/documentCategories.js';
 
-const { z } = require('zod');
-const documentsRepo = require('../repositories/documentsRepoAdapter');
-const personasRepo = require('../repositories/personasRepoAdapter');
-const { normalizeText } = require('./normalizationService');
-const buildsService = require('./buildsService');
-const workflowService = require('./workflowService');
-const aiRunsRepo = require('../repositories/aiRunsRepoAdapter');
-const userTargetsRepo = require('../repositories/userTargetsRepoAdapter');
-const { uuidV4 } = require('../utils/uuid');
-const personaService = require('./personaService');
+const { z } = getZodSync();
 
 /**
  * Best-effort display normalization for persona "header" fields.
@@ -433,8 +435,6 @@ function _makePlaceholderPersona({ sourceText, context }) {
   if (/\baws\b/.test(lower)) maybeSkills.push('AWS');
   if (/\bpython\b/.test(lower)) maybeSkills.push('Python');
 
-  const { extractBestNameAndRoleFromDocuments } = require('../utils/nameRoleExtraction');
-
   const targetRole = context?.targetRole || null;
   const industry = context?.industry || null;
   const seniority = context?.seniority || null;
@@ -709,7 +709,6 @@ async function generatePersonaDraftForBuild(buildId, input) {
 
     const { persona: basePersonaDraft, mode, warnings } = result;
 
-    const { extractNameAndCurrentRole } = require('../utils/nameRoleExtraction');
     const extracted = extractNameAndCurrentRole(sourceText);
 
     // Prefer authoritative per-document extraction persisted during uploads (extracted_text.metadataJson).
@@ -980,8 +979,6 @@ async function runAllOrchestration(input) {
         runAll: { ...orch.runAll, progress: 20, step: 'auto_select', message: 'Selecting latest uploaded docs…' }
       });
 
-      const { DOCUMENT_CATEGORIES } = require('../models/documentCategories');
-
       // Fetch latest docs for each category.
       const latestResume = await documentsRepo.getLatestDocumentForUserByCategory(
         effectiveUserId,
@@ -1116,7 +1113,23 @@ async function runAllOrchestration(input) {
   }
 }
 
-module.exports = {
+export {
+  OrchestrationStartRequest,
+  OrchestrationUploadLinkRequest,
+  OrchestrationExtractRequest,
+  OrchestrationGenerateRequest,
+  OrchestrationFinalizeRequest,
+  OrchestrationRunAllRequest,
+  getOrchestration,
+  startOrchestration,
+  linkUploadToBuild,
+  extractAndNormalizeForBuild,
+  generatePersonaDraftForBuild,
+  finalizePersonaForBuild,
+  runAllOrchestration
+};
+
+export default {
   OrchestrationStartRequest,
   OrchestrationUploadLinkRequest,
   OrchestrationExtractRequest,

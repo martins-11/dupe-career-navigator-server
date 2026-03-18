@@ -1,10 +1,11 @@
 import express from 'express';
-import { z } from 'zod';
+import { getZodSync } from '../utils/zod.js';
 import { sendError } from '../utils/errors.js';
 import rolesRepo from '../repositories/rolesRepoAdapter.js';
 import recommendationsService from '../services/recommendationsService.js';
 import mindmapViewStateRepo from '../repositories/mindmapViewStateRepoAdapter.js';
 
+const { z } = getZodSync();
 const router = express.Router();
 
 /**

@@ -1,10 +1,12 @@
-'use strict';
-
-const bedrockService = require('./bedrockService');
-const personasRepo = require('../repositories/personasRepoAdapter');
-const holisticPersonaRepo = require('../repositories/holisticPersonaRepoAdapter');
-const { buildThreeTwoReport, scoreRoleCompatibility } = require('./scoringEngine');
-const { extractFinalPersonaObject, buildScoringUserSkills, normalizeSalaryToIndiaLpaRange } = require('./rolesSearchUtils');
+import bedrockService from './bedrockService.js';
+import personasRepo from '../repositories/personasRepoAdapter.js';
+import holisticPersonaRepo from '../repositories/holisticPersonaRepoAdapter.js';
+import { buildThreeTwoReport, scoreRoleCompatibility } from './scoringEngine.js';
+import {
+  extractFinalPersonaObject,
+  buildScoringUserSkills,
+  normalizeSalaryToIndiaLpaRange
+} from './rolesSearchUtils.js';
 
 function _normStr(v) {
   return String(v || '').trim();
@@ -217,4 +219,5 @@ async function exploreSearchRolesPersonaDriven({ q, limit = 30, personaId = null
   return _safeSlice(scored, effectiveLimit);
 }
 
-module.exports = { exploreSearchRolesPersonaDriven };
+export { exploreSearchRolesPersonaDriven };
+export default { exploreSearchRolesPersonaDriven };

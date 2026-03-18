@@ -258,7 +258,14 @@ function scoreRoleCompatibility(userSkills, roleRequiredSkills) {
   };
 }
 
-module.exports = {
+export {
+  classifySkillProficiency,
+  validateThreeTwoBalance,
+  buildThreeTwoReport,
+  scoreRoleCompatibility
+};
+
+export default {
   classifySkillProficiency,
   validateThreeTwoBalance,
   buildThreeTwoReport,
