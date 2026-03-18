@@ -15,7 +15,10 @@ const {
   RoleCompareResponseSchema
 } = require('../schemas/holisticPersonaSchemas');
 
-const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = require('../services/recommendationsInitialService');
+const {
+  generateInitialRecommendationsPersonaDrivenBedrockOnly,
+  generateInitialRecommendationsFallbackOnly,
+} = require('../services/recommendationsInitialService');
 
 const router = express.Router();
 
@@ -132,7 +135,7 @@ async function handleInitialRecommendations(req, res) {
      * Do NOT wait for multiple DB lookups in parallel; instead try sources in priority order with
      * short per-attempt timeouts, and keep Bedrock time budget intact.
      */
-    const withTimeout = async (promise, ms, label) => {
+    const withTimeout = async (promise, ms) => {
       const timeoutMs = Number.isFinite(ms) ? Math.max(50, ms) : 0;
       if (!timeoutMs) return await promise;
 
@@ -144,84 +147,151 @@ async function handleInitialRecommendations(req, res) {
       ]).catch(() => null);
     };
 
+    // FAST PATH: if we already have recommendations persisted for this persona, return immediately.
+    // Keep this extremely short so it never contributes to preview/proxy timeouts.
+    const cached = await withTimeout(
+      holisticPersonaRepo.getLatestRecommendationsRoles({ personaId: personaIdRaw }),
+      250
+    );
+    const cachedRoles = Array.isArray(cached?.roles) ? cached.roles : null;
+    if (cachedRoles && cachedRoles.length === 5) {
+      if (req.timedOut || res.headersSent) return;
+      return res.json({
+        roles: cachedRoles,
+        meta: {
+          count: cachedRoles.length,
+          personaId: personaIdRaw,
+          cacheHit: true,
+          endpointFallbackUsed: false,
+        },
+      });
+    }
+
     // Prefer request-provided persona (fastest) if present.
     let finalPersona = coercePersonaJson(finalPersonaFromRequest);
 
     // If not provided, attempt repo reads in priority order with a bounded time budget.
     if (!finalPersona) {
-      // Keep persona lookup short; leave most time for Bedrock.
-      const personaLookupBudgetMs = Math.min(6000, Math.max(1500, Math.floor(remaining0 * 0.25)));
-      const perAttemptMs = Math.max(600, Math.floor(personaLookupBudgetMs / 3));
+      /**
+       * IMPORTANT:
+       * Preview environments frequently have an upstream timeout ~22s.
+       * Keep persona lookup *tight* so we do not burn most of the request on DB/network.
+       */
+      const personaLookupBudgetMs = Math.min(1500, Math.max(600, Math.floor(remaining0 * 0.12)));
+      const perAttemptMs = Math.max(250, Math.floor(personaLookupBudgetMs / 3));
 
-      const finalWrapValue = await withTimeout(personasRepo.getFinal(personaIdRaw), perAttemptMs, 'getFinal');
+      const finalWrapValue = await withTimeout(personasRepo.getFinal(personaIdRaw), perAttemptMs);
       finalPersona = coercePersonaJson(finalWrapValue?.finalJson || finalWrapValue);
 
       if (!finalPersona) {
         const latestVersionValue = await withTimeout(
           personasRepo.getLatestPersonaVersion(personaIdRaw),
-          perAttemptMs,
-          'getLatestPersonaVersion'
+          perAttemptMs
         );
         finalPersona = coercePersonaJson(latestVersionValue?.personaJson || latestVersionValue);
       }
 
       if (!finalPersona) {
-        const draftWrapValue = await withTimeout(personasRepo.getDraft(personaIdRaw), perAttemptMs, 'getDraft');
+        const draftWrapValue = await withTimeout(personasRepo.getDraft(personaIdRaw), perAttemptMs);
         finalPersona = coercePersonaJson(draftWrapValue?.draftJson || draftWrapValue);
       }
     }
 
+    // If persona resolution fails, degrade gracefully (do not 422/504).
+    let personaFallbackReason = null;
     if (!finalPersona) {
-      const err = new Error(
-        'Final persona is missing or not retrievable for this personaId. Cannot generate persona-based recommendations.'
-      );
-      err.code = 'final_persona_missing';
-      err.httpStatus = 422;
-      err.details = {
-        personaId: personaIdRaw,
-        resolutionTried: [
-          'query.finalPersonaJson / body.finalPersona',
-          'personasRepo.getFinal(personaId)',
-          'personasRepo.getLatestPersonaVersion(personaId)',
-          'personasRepo.getDraft(personaId)',
-        ],
-        dbConfigured: typeof personasRepo.isDbConfigured === 'function' ? personasRepo.isDbConfigured() : null,
-      };
-      throw err;
+      finalPersona = {};
+      personaFallbackReason = 'final_persona_missing_or_slow';
     }
 
-    // Enforce a time budget so this endpoint returns within the requestTimeout window.
+    // Enforce a time budget so this endpoint returns within preview/proxy timeouts.
     const now = Date.now();
     const deadline = Number(req.requestDeadlineMs) || (now + Number(process.env.REQUEST_TIMEOUT_MS || 30000));
     const remainingMs = Math.max(0, deadline - now);
-    const bufferMs = 750; // leave time to respond even under load
-    const timeBudgetMs = Math.max(0, remainingMs - bufferMs);
 
-    if (timeBudgetMs < 500) {
-      const err = new Error('Request time budget exhausted before Bedrock invocation.');
-      err.code = 'bedrock_timeout';
-      err.details = { remainingMs, bufferMs, timeBudgetMs };
-      throw err;
+    // Conservative preview-safe cap: default 15s total generation budget (env overridable).
+    const previewCapMsRaw = Number(process.env.INITIAL_RECOMMENDATIONS_MAX_MS || 15000);
+    const previewCapMs =
+      Number.isFinite(previewCapMsRaw) && previewCapMsRaw > 0 ? previewCapMsRaw : 15000;
+
+    const bufferMs = 600; // leave time to respond even under load
+    const timeBudgetMs = Math.max(0, Math.min(remainingMs, previewCapMs) - bufferMs);
+
+    // Always allow padding for this endpoint so we always return exactly 5.
+    const allowPadding = true;
+
+    let result = null;
+    let bedrockErrorMeta = null;
+
+    try {
+      // Keep Bedrock attempts to 1 to avoid latency stacking in previews.
+      result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
+        finalPersona,
+        personaId: personaIdRaw,
+        options: {
+          timeBudgetMs,
+          allowPadding,
+          maxAttempts: 1,
+          requestedCount: 7,
+          minCount: 5,
+        },
+      });
+    } catch (err) {
+      // Convert Bedrock timeouts/errors into a fast 200 fallback (avoid 504s in previews).
+      bedrockErrorMeta = {
+        code: err?.code || err?.name || 'BEDROCK_FAILED',
+        message: err?.message || String(err),
+      };
+
+      result = await generateInitialRecommendationsFallbackOnly({
+        finalPersona,
+        personaId: personaIdRaw,
+        options: { minCount: 5 },
+      });
+
+      // Attach error meta without changing status code.
+      result.meta = {
+        ...(result.meta || {}),
+        bedrockError: bedrockErrorMeta,
+      };
     }
-
-    const allowPadding =
-      String(req.query?.allowPadding || '').toLowerCase() === 'true' ||
-      String(process.env.RECOMMENDATIONS_INITIAL_ALLOW_PADDING || '').toLowerCase() === 'true';
-
-    const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
-      finalPersona,
-      personaId: personaIdRaw,
-      options: { timeBudgetMs, allowPadding },
-    });
 
     const roles = Array.isArray(result?.roles) ? result.roles : [];
     if (roles.length !== 5) {
-      const err = new Error(
-        `Initial recommendations generator returned ${roles.length} roles; expected exactly 5 roles.`
-      );
-      err.code = 'initial_recommendations_invalid_count';
-      err.httpStatus = 502;
-      throw err;
+      // Last guard: never fail the request—return fallback.
+      const fallback = await generateInitialRecommendationsFallbackOnly({
+        finalPersona,
+        personaId: personaIdRaw,
+        options: { minCount: 5 },
+      });
+
+      const fallbackRoles = Array.isArray(fallback?.roles) ? fallback.roles : [];
+      if (req.timedOut || res.headersSent) return;
+
+      // Best-effort persist (non-blocking).
+      try {
+        await holisticPersonaRepo.upsertRecommendationsRoles({
+          userId: null,
+          personaId: personaIdRaw,
+          buildId: null,
+          inferredTags: [],
+          roles: fallbackRoles,
+        });
+      } catch (_) {
+        // ignore persistence failures
+      }
+
+      return res.json({
+        roles: fallbackRoles,
+        meta: {
+          ...(fallback?.meta || {}),
+          count: fallbackRoles.length,
+          personaFallbackReason,
+          cacheHit: false,
+          endpointFallbackUsed: true,
+          bedrockError: bedrockErrorMeta,
+        },
+      });
     }
 
     // Best-effort persist for refresh/reload (non-blocking).
@@ -240,8 +310,8 @@ async function handleInitialRecommendations(req, res) {
     const meta = {
       ...(result?.meta || {}),
       count: roles.length,
-      personaFallbackReason: null,
-      bedrockUsedFallback: false,
+      personaFallbackReason,
+      cacheHit: false,
     };
 
     if (req.timedOut || res.headersSent) return;

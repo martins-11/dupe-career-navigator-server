@@ -683,5 +683,82 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   };
 }
 
-module.exports = { generateInitialRecommendationsPersonaDrivenBedrockOnly };
+/**
+ * PUBLIC_INTERFACE
+ * Generate initial recommendations without calling Bedrock.
+ *
+ * Why:
+ * - The Explore page must render within preview/proxy timeouts.
+ * - Bedrock can take >20s in some environments and cause a 504.
+ * - This function provides a deterministic, local fallback that still emits the same
+ *   scored role-card shape (rings + threeTwoReport) so the UI can render reliably.
+ *
+ * @param {object} params
+ * @param {object} params.finalPersona - Final persona JSON (may be minimal/empty object).
+ * @param {string} [params.personaId] - Persona identifier (optional; used for meta).
+ * @param {object} [params.options]
+ * @param {number} [params.options.minCount] - Always clamped to 5 for this endpoint contract.
+ * @returns {Promise<{roles: Array, meta: object}>}
+ */
+async function generateInitialRecommendationsFallbackOnly({ finalPersona, personaId, options = {} } = {}) {
+  if (!finalPersona || typeof finalPersona !== 'object' || Array.isArray(finalPersona)) {
+    // Keep this resilient: treat missing persona as an empty object.
+    finalPersona = {};
+  }
+
+  const opt = options && typeof options === 'object' ? options : {};
+  const minCountRaw = Number(opt.minCount);
+  const minCount = Number.isFinite(minCountRaw) ? Math.max(1, Math.min(5, Math.floor(minCountRaw))) : 5;
+
+  const profs = _extractPersonaSkillsWithProficiency(finalPersona);
+  const hasPersonaProficiencies = Array.isArray(profs) && profs.length > 0;
+
+  // All roles come from deterministic fallback catalog.
+  const padded = _padToExactlyFiveRoles({
+    bedrockRoles: [],
+    fallbackCatalog: INITIAL_RECOMMENDATIONS_FALLBACK_CATALOG,
+  });
+
+  const rolesForScoring = Array.isArray(padded?.roles) ? padded.roles.slice(0, minCount) : [];
+
+  const scored = _scoreRoles(finalPersona, rolesForScoring).map((r) => ({
+    ...r,
+    match_metadata: {
+      ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+      persona: {
+        personaId: personaId || null,
+        usedPersonaProficiencies: hasPersonaProficiencies,
+      },
+      grounding: { source: 'none' },
+      bedrockUsedFallback: false,
+      bedrockModelId: null,
+      // Explicitly mark this as endpoint-level fallback.
+      endpointFallbackUsed: true,
+    },
+  }));
+
+  const reranked = _rerankByThreeTwoAndCompatibility(scored).slice(0, minCount);
+
+  return {
+    roles: reranked,
+    meta: {
+      personaId: personaId || null,
+      hasPersonaProficiencies,
+      count: reranked.length,
+      onetGrounded: false,
+      onetError: null,
+      bedrockUsedFallback: false,
+      endpointFallbackUsed: true,
+      endpointPaddingUsed: true,
+      paddedCount: 5,
+      bedrockError: null,
+      rerankedBy: 'fallback_only_then_threeTwoValidation_then_compatibility',
+    },
+  };
+}
+
+module.exports = {
+  generateInitialRecommendationsPersonaDrivenBedrockOnly,
+  generateInitialRecommendationsFallbackOnly,
+};
 

@@ -222,9 +222,18 @@ app.use((err, req, res, next) => {
 });
 
 const port = Number(process.env.PORT || 3001);
-const host = process.env.HOST || '0.0.0.0';
+const host = process.env.HOST || '0.0.0.0');
 
-app.listen(port, host, () => {
-  // eslint-disable-next-line no-console
-  console.log(`Express backend listening on http://${host}:${port}`);
-});
+/**
+ * PUBLIC_INTERFACE
+ * Export the Express app for integration tests and for environments that embed the server.
+ */
+module.exports = app;
+
+// Only start listening when executed as the entrypoint (not when required by Jest/supertest).
+if (require.main === module) {
+  app.listen(port, host, () => {
+    // eslint-disable-next-line no-console
+    console.log(`Express backend listening on http://${host}:${port}`);
+  });
+}
