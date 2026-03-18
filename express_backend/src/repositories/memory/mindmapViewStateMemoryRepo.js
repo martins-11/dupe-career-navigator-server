@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * In-memory mind map view-state repository.
  *
@@ -21,7 +19,7 @@ function _key(userId, mapKey) {
 }
 
 // PUBLIC_INTERFACE
-async function saveViewState({ userId, mapKey, state }) {
+export async function saveViewState({ userId, mapKey, state }) {
   /** Save the view state in memory and return a normalized record shape. */
   const now = _nowIso();
   const record = {
@@ -35,12 +33,10 @@ async function saveViewState({ userId, mapKey, state }) {
 }
 
 // PUBLIC_INTERFACE
-async function loadViewState({ userId, mapKey }) {
+export async function loadViewState({ userId, mapKey }) {
   /** Load the view state from memory. Returns null if not found. */
   return _store.get(_key(userId, mapKey)) || null;
 }
 
-module.exports = {
-  saveViewState,
-  loadViewState
-};
+const mindmapViewStateMemoryRepo = { saveViewState, loadViewState };
+export default mindmapViewStateMemoryRepo;

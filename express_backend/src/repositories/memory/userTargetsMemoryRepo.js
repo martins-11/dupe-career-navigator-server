@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * In-memory user targets repository.
  *
@@ -18,7 +16,7 @@ function _nowIso() {
 }
 
 // PUBLIC_INTERFACE
-async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
+export async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
   /** Save latest target role selection in memory and return a normalized record shape. */
   const now = _nowIso();
   const record = {
@@ -27,7 +25,7 @@ async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
     roleId: String(roleId),
     timeHorizon: String(timeHorizon),
     createdAt: now,
-    updatedAt: now,
+    updatedAt: now
   };
 
   _targetStore.set(String(userId), record);
@@ -35,13 +33,13 @@ async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestUserTargetRole({ userId }) {
+export async function getLatestUserTargetRole({ userId }) {
   /** Load latest target role selection from memory. Returns null if not found. */
   return _targetStore.get(String(userId)) || null;
 }
 
 // PUBLIC_INTERFACE
-async function upsertUserCurrentRole({ userId, currentRoleTitle, source = 'bedrock' }) {
+export async function upsertUserCurrentRole({ userId, currentRoleTitle, source = 'bedrock' }) {
   /** Save latest current role extraction in memory and return a normalized record shape. */
   const now = _nowIso();
   const record = {
@@ -50,7 +48,7 @@ async function upsertUserCurrentRole({ userId, currentRoleTitle, source = 'bedro
     currentRoleTitle: String(currentRoleTitle || '').trim(),
     source: String(source || 'bedrock'),
     createdAt: now,
-    updatedAt: now,
+    updatedAt: now
   };
 
   _currentStore.set(String(userId), record);
@@ -58,14 +56,16 @@ async function upsertUserCurrentRole({ userId, currentRoleTitle, source = 'bedro
 }
 
 // PUBLIC_INTERFACE
-async function getLatestUserCurrentRole({ userId }) {
+export async function getLatestUserCurrentRole({ userId }) {
   /** Load latest current role extraction from memory. Returns null if not found. */
   return _currentStore.get(String(userId)) || null;
 }
 
-module.exports = {
+const userTargetsMemoryRepo = {
   upsertUserTargetRole,
   getLatestUserTargetRole,
   upsertUserCurrentRole,
-  getLatestUserCurrentRole,
+  getLatestUserCurrentRole
 };
+
+export default userTargetsMemoryRepo;
