@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { z } = require('zod');
+const { getZod } = require('../utils/zod');
 const { uuidV4 } = require('../utils/uuid');
 const { extractTextFromUploadedFile } = require('../services/extractionService');
 const { normalizeText } = require('../services/normalizationService');
@@ -17,45 +17,64 @@ const router = express.Router();
  * - shared normalization logic via normalizationService
  *
  * Still does NOT persist extracted text; persistence remains via /documents/:id/extracted-text.
+ *
+ * IMPORTANT:
+ * This router runs in a CommonJS Node 18 process. Direct `require('zod')` may resolve
+ * an ESM entrypoint and crash at startup. We therefore lazily initialize all Zod
+ * schemas via `await getZod()` inside request handlers.
  */
 
-const ExtractTextRequest = z.object({
-  /**
-   * Optional: client-side known filename (for tracing / UI).
-   * In real extractor, might inform parsing heuristics.
-   */
-  filename: z.string().min(1).optional(),
-  /**
-   * Optional: hint for mime type (e.g., application/pdf, text/plain).
-   */
-  mimeType: z.string().min(1).optional(),
-  /**
-   * The raw content as a string.
-   * For PDFs this is a placeholder; a future version should accept multipart or base64 bytes.
-   */
-  content: z.string().min(1),
-  /**
-   * Optional language hint (BCP-47-ish, e.g., "en").
-   */
-  languageHint: z.string().min(1).optional()
-});
+let _schemasPromise;
 
-const NormalizeTextRequest = z.object({
-  /**
-   * Free-form text to normalize (cleanup whitespace, unify line breaks, etc.).
-   */
-  text: z.string().min(1),
-  /**
-   * Optional normalization options (placeholder).
-   */
-  options: z
-    .object({
-      removeExtraWhitespace: z.boolean().optional(),
-      normalizeLineBreaks: z.boolean().optional(),
-      maxLength: z.number().int().positive().optional()
-    })
-    .optional()
-});
+async function getSchemas() {
+  if (_schemasPromise) return _schemasPromise;
+
+  _schemasPromise = (async () => {
+    const { z } = await getZod();
+
+    const ExtractTextRequest = z.object({
+      /**
+       * Optional: client-side known filename (for tracing / UI).
+       * In real extractor, might inform parsing heuristics.
+       */
+      filename: z.string().min(1).optional(),
+      /**
+       * Optional: hint for mime type (e.g., application/pdf, text/plain).
+       */
+      mimeType: z.string().min(1).optional(),
+      /**
+       * The raw content as a string.
+       * For PDFs this is a placeholder; a future version should accept multipart or base64 bytes.
+       */
+      content: z.string().min(1),
+      /**
+       * Optional language hint (BCP-47-ish, e.g., "en").
+       */
+      languageHint: z.string().min(1).optional()
+    });
+
+    const NormalizeTextRequest = z.object({
+      /**
+       * Free-form text to normalize (cleanup whitespace, unify line breaks, etc.).
+       */
+      text: z.string().min(1),
+      /**
+       * Optional normalization options (placeholder).
+       */
+      options: z
+        .object({
+          removeExtraWhitespace: z.boolean().optional(),
+          normalizeLineBreaks: z.boolean().optional(),
+          maxLength: z.number().int().positive().optional()
+        })
+        .optional()
+    });
+
+    return { ExtractTextRequest, NormalizeTextRequest };
+  })();
+
+  return _schemasPromise;
+}
 
 function validationError(res, parsed) {
   return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
@@ -70,6 +89,8 @@ router.post('/pdf/extract-text', async (req, res) => {
    * A future implementation should use multipart/form-data or base64-encoded bytes,
    * then run a real PDF parser (e.g., pdf-parse) safely with file size limits.
    */
+  const { ExtractTextRequest } = await getSchemas();
+
   const parsed = ExtractTextRequest.safeParse(req.body);
   if (!parsed.success) return validationError(res, parsed);
 
@@ -142,6 +163,8 @@ router.post('/txt/extract-text', async (req, res) => {
    *
    * For plain text this is close to "real" behavior; we just normalize line breaks.
    */
+  const { ExtractTextRequest } = await getSchemas();
+
   const parsed = ExtractTextRequest.safeParse(req.body);
   if (!parsed.success) return validationError(res, parsed);
 
@@ -179,6 +202,8 @@ router.post('/normalize', async (req, res) => {
    * - cleaning up extracted text before downstream AI usage
    * - standardizing whitespace/line breaks
    */
+  const { NormalizeTextRequest } = await getSchemas();
+
   const parsed = NormalizeTextRequest.safeParse(req.body);
   if (!parsed.success) return validationError(res, parsed);
 

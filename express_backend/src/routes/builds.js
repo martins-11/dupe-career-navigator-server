@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { z } = require('zod/lib');
+const { getZod } = require('../utils/zod');
 const buildsService = require('../services/buildsService');
 const { getDbEngine } = require('../db/connection');
 
@@ -22,11 +22,22 @@ const router = express.Router();
  *   these routes MUST NOT crash the Node process; they should degrade gracefully.
  */
 
-const BuildCreateRequest = z.object({
-  personaId: z.string().uuid().nullable().optional(),
-  documentId: z.string().uuid().nullable().optional(),
-  mode: z.enum(['persona_build', 'workflow']).nullable().optional()
-});
+let _buildCreateRequestSchemaPromise;
+
+async function getBuildCreateRequestSchema() {
+  if (_buildCreateRequestSchemaPromise) return _buildCreateRequestSchemaPromise;
+
+  _buildCreateRequestSchemaPromise = (async () => {
+    const { z } = await getZod();
+    return z.object({
+      personaId: z.string().uuid().nullable().optional(),
+      documentId: z.string().uuid().nullable().optional(),
+      mode: z.enum(['persona_build', 'workflow']).nullable().optional()
+    });
+  })();
+
+  return _buildCreateRequestSchemaPromise;
+}
 
 function validationError(res, parsed) {
   return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
@@ -50,6 +61,8 @@ function isConnectivityError(err) {
 }
 
 router.post('/', async (req, res) => {
+  const BuildCreateRequest = await getBuildCreateRequestSchema();
+
   const parsed = BuildCreateRequest.safeParse(req.body || {});
   if (!parsed.success) return validationError(res, parsed);
 
