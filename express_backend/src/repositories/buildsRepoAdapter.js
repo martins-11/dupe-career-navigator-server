@@ -1,9 +1,7 @@
-'use strict';
-
-const pgRepo = require('./buildsRepo');
-const mysqlRepo = require('./mysql/buildsRepo.mysql');
-const memRepo = require('./memory/buildsMemoryRepo');
-const { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } = require('../db/connection');
+import pgRepo from './buildsRepo.js';
+import mysqlRepo from './mysql/buildsRepo.mysql.js';
+import memRepo from './memory/buildsMemoryRepo.js';
+import { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } from '../db/connection.js';
 
 /**
  * Builds repository adapter:
@@ -25,30 +23,31 @@ function _repo() {
 }
 
 // PUBLIC_INTERFACE
-function isDbConfiguredPublic() {
+export function isDbConfiguredPublic() {
   /** Returns true if configured DB engine appears configured. */
   return isDbConfigured();
 }
 
 // PUBLIC_INTERFACE
-async function createBuild(input) {
+export async function createBuild(input) {
   /** Create a build using configured persistence (memory by default). */
   return _repo().createBuild(input);
 }
 
 // PUBLIC_INTERFACE
-async function getBuildById(buildId) {
+export async function getBuildById(buildId) {
   /** Get build by id using configured persistence (memory by default). */
   return _repo().getBuildById(buildId);
 }
 
 // PUBLIC_INTERFACE
-async function updateBuild(buildId, patch) {
+export async function updateBuild(buildId, patch) {
   /** Update build using configured persistence (memory by default). */
   return _repo().updateBuild(buildId, patch);
 }
 
-module.exports = {
+// PUBLIC_INTERFACE
+export default {
   isDbConfigured: isDbConfiguredPublic,
   createBuild,
   getBuildById,

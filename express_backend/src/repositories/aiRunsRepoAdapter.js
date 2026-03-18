@@ -1,9 +1,7 @@
-'use strict';
-
-const pgRepo = require('./aiRunsRepo');
-const mysqlRepo = require('./mysql/aiRunsRepo.mysql');
-const memRepo = require('./memory/aiRunsMemoryRepo');
-const { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } = require('../db/connection');
+import pgRepo from './aiRunsRepo.js';
+import mysqlRepo from './mysql/aiRunsRepo.mysql.js';
+import memRepo from './memory/aiRunsMemoryRepo.js';
+import { getDbEngine, isDbConfigured, isPostgresConfigured, isMysqlConfigured } from '../db/connection.js';
 
 /**
  * AI Runs repository adapter:
@@ -25,36 +23,37 @@ function _repo() {
 }
 
 // PUBLIC_INTERFACE
-function isDbConfiguredPublic() {
+export function isDbConfiguredPublic() {
   /** Returns true if configured DB engine appears configured. */
   return isDbConfigured();
 }
 
 // PUBLIC_INTERFACE
-async function createAiRun(input) {
+export async function createAiRun(input) {
   /** Create an AI run using configured persistence (memory by default). */
   return _repo().createAiRun(input);
 }
 
 // PUBLIC_INTERFACE
-async function getAiRunById(aiRunId) {
+export async function getAiRunById(aiRunId) {
   /** Get AI run by id using configured persistence (memory by default). */
   return _repo().getAiRunById(aiRunId);
 }
 
 // PUBLIC_INTERFACE
-async function updateAiRun(aiRunId, patch) {
+export async function updateAiRun(aiRunId, patch) {
   /** Update AI run using configured persistence (memory by default). */
   return _repo().updateAiRun(aiRunId, patch);
 }
 
 // PUBLIC_INTERFACE
-async function listAiRunsByBuildId(buildId) {
+export async function listAiRunsByBuildId(buildId) {
   /** List AI runs for a build using configured persistence (memory by default). */
   return _repo().listAiRunsByBuildId(buildId);
 }
 
-module.exports = {
+// PUBLIC_INTERFACE
+export default {
   isDbConfigured: isDbConfiguredPublic,
   createAiRun,
   getAiRunById,

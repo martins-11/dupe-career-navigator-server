@@ -1,9 +1,7 @@
-'use strict';
-
-const pgRepo = require('./documentsRepo');
-const mysqlRepo = require('./mysql/documentsRepo.mysql');
-const memRepo = require('./memory/documentsMemoryRepo');
-const { selectRepo } = require('./_repoSelector');
+import pgRepo from './documentsRepo.js';
+import mysqlRepo from './mysql/documentsRepo.mysql.js';
+import memRepo from './memory/documentsMemoryRepo.js';
+import { selectRepo } from './_repoSelector.js';
 
 /**
  * Documents repository adapter:
@@ -19,7 +17,7 @@ function _repo() {
 }
 
 // PUBLIC_INTERFACE
-async function createDocument(input) {
+export async function createDocument(input) {
   /** Create a document using configured persistence (memory by default). */
   return _repo().createDocument(input);
 }
@@ -33,18 +31,18 @@ async function createDocument(input) {
  * @param {number} [options.offset] Offset for pagination.
  * @returns {Promise<Array<object>>} Documents list.
  */
-async function listDocuments(options = {}) {
+export async function listDocuments(options = {}) {
   return _repo().listDocuments(options);
 }
 
 // PUBLIC_INTERFACE
-async function getDocumentById(documentId) {
+export async function getDocumentById(documentId) {
   /** Get a document using configured persistence (memory by default). */
   return _repo().getDocumentById(documentId);
 }
 
 // PUBLIC_INTERFACE
-async function upsertExtractedText(documentId, input) {
+export async function upsertExtractedText(documentId, input) {
   /** Store extracted text using configured persistence (memory by default). */
   return _repo().upsertExtractedText(documentId, input);
 }
@@ -57,17 +55,18 @@ async function upsertExtractedText(documentId, input) {
  * @param {string} category - Canonical document category.
  * @returns {Promise<object|null>} Latest document row or null if none exists.
  */
-async function getLatestDocumentForUserByCategory(userId, category) {
+export async function getLatestDocumentForUserByCategory(userId, category) {
   return _repo().getLatestDocumentForUserByCategory(userId, category);
 }
 
 // PUBLIC_INTERFACE
-async function getLatestExtractedText(documentId) {
+export async function getLatestExtractedText(documentId) {
   /** Get the latest extracted text using configured persistence (memory by default). */
   return _repo().getLatestExtractedText(documentId);
 }
 
-module.exports = {
+// PUBLIC_INTERFACE
+export default {
   createDocument,
   listDocuments,
   getDocumentById,

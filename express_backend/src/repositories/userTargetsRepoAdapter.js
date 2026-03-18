@@ -1,7 +1,6 @@
-'use strict';
-
-const mysqlRepo = require('./mysql/userTargetsRepo.mysql');
-const memoryRepo = require('./memory/userTargetsMemoryRepo');
+import mysqlRepo from './mysql/userTargetsRepo.mysql.js';
+import memoryRepo from './memory/userTargetsMemoryRepo.js';
+import { getDbEngine, isDbConfigured, isMysqlConfigured } from '../db/connection.js';
 
 /**
  * Adapter strategy:
@@ -12,13 +11,12 @@ const memoryRepo = require('./memory/userTargetsMemoryRepo');
  * UI can work in early scaffolding environments.
  */
 function _isMysqlOnline() {
-  const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
   const engine = getDbEngine();
   return engine === 'mysql' && isDbConfigured() && isMysqlConfigured();
 }
 
 // PUBLIC_INTERFACE
-async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
+export async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
   /** Persist a user's target role (MySQL when available; otherwise memory fallback). */
   if (_isMysqlOnline()) {
     try {
@@ -33,7 +31,7 @@ async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestUserTargetRole({ userId }) {
+export async function getLatestUserTargetRole({ userId }) {
   /** Fetch latest user's target role (MySQL when available; otherwise memory fallback). */
   if (_isMysqlOnline()) {
     try {
@@ -50,7 +48,7 @@ async function getLatestUserTargetRole({ userId }) {
 }
 
 // PUBLIC_INTERFACE
-async function upsertUserCurrentRole({ userId, currentRoleTitle, source }) {
+export async function upsertUserCurrentRole({ userId, currentRoleTitle, source }) {
   /** Persist a user's current role extraction (MySQL when available; otherwise memory fallback). */
   if (_isMysqlOnline()) {
     try {
@@ -63,7 +61,7 @@ async function upsertUserCurrentRole({ userId, currentRoleTitle, source }) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestUserCurrentRole({ userId }) {
+export async function getLatestUserCurrentRole({ userId }) {
   /** Fetch latest user's current role extraction (MySQL when available; otherwise memory fallback). */
   if (_isMysqlOnline()) {
     try {
@@ -77,9 +75,10 @@ async function getLatestUserCurrentRole({ userId }) {
   return memoryRepo.getLatestUserCurrentRole({ userId });
 }
 
-module.exports = {
+// PUBLIC_INTERFACE
+export default {
   upsertUserTargetRole,
   getLatestUserTargetRole,
   upsertUserCurrentRole,
-  getLatestUserCurrentRole,
+  getLatestUserCurrentRole
 };

@@ -1,9 +1,8 @@
-'use strict';
-
-const pgRepo = require('./personasRepo');
-const mysqlRepo = require('./mysql/personasRepo.mysql');
-const memRepo = require('./memory/personasMemoryRepo');
-const { selectRepo } = require('./_repoSelector');
+import pgRepo from './personasRepo.js';
+import mysqlRepo from './mysql/personasRepo.mysql.js';
+import memRepo from './memory/personasMemoryRepo.js';
+import { selectRepo } from './_repoSelector.js';
+import { isDbConfigured as isDbConfiguredConn } from '../db/connection.js';
 
 /**
  * Personas repository adapter:
@@ -19,78 +18,78 @@ function _repo() {
 }
 
 // PUBLIC_INTERFACE
-function isDbConfiguredPublic() {
+export function isDbConfigured() {
   /** Returns true if configured DB engine appears configured. */
-  const { isDbConfigured } = require('../db/connection');
-  return isDbConfigured();
+  return isDbConfiguredConn();
 }
 
 // PUBLIC_INTERFACE
-async function createPersona(input) {
+export async function createPersona(input) {
   /** Create a persona using configured persistence (memory by default). */
   return _repo().createPersona(input);
 }
 
 // PUBLIC_INTERFACE
-async function getPersonaById(personaId) {
+export async function getPersonaById(personaId) {
   /** Get persona by id using configured persistence (memory by default). */
   return _repo().getPersonaById(personaId);
 }
 
 // PUBLIC_INTERFACE
-async function updatePersona(personaId, patch) {
+export async function updatePersona(personaId, patch) {
   /** Update persona metadata using configured persistence (memory by default). */
   return _repo().updatePersona(personaId, patch);
 }
 
 // PUBLIC_INTERFACE
-async function createPersonaVersion(personaId, input) {
+export async function createPersonaVersion(personaId, input) {
   /** Create persona version using configured persistence (memory by default). */
   return _repo().createPersonaVersion(personaId, input);
 }
 
 // PUBLIC_INTERFACE
-async function listPersonaVersions(personaId) {
+export async function listPersonaVersions(personaId) {
   /** List persona versions using configured persistence (memory by default). */
   return _repo().listPersonaVersions(personaId);
 }
 
 // PUBLIC_INTERFACE
-async function getLatestPersonaVersion(personaId) {
+export async function getLatestPersonaVersion(personaId) {
   /** Get latest persona version using configured persistence (memory by default). */
   return _repo().getLatestPersonaVersion(personaId);
 }
 
 // PUBLIC_INTERFACE
-async function saveDraft(personaId, draftJson) {
+export async function saveDraft(personaId, draftJson) {
   /** Save a draft blob (in-memory; DB support can be added later). */
   const repo = _repo();
   return (repo.saveDraft || memRepo.saveDraft)(personaId, draftJson);
 }
 
 // PUBLIC_INTERFACE
-async function getDraft(personaId) {
+export async function getDraft(personaId) {
   /** Get a draft blob (in-memory; DB support can be added later). */
   const repo = _repo();
   return (repo.getDraft || memRepo.getDraft)(personaId);
 }
 
 // PUBLIC_INTERFACE
-async function saveFinal(personaId, finalJson) {
+export async function saveFinal(personaId, finalJson) {
   /** Save a final blob (in-memory; DB support can be added later). */
   const repo = _repo();
   return (repo.saveFinal || memRepo.saveFinal)(personaId, finalJson);
 }
 
 // PUBLIC_INTERFACE
-async function getFinal(personaId) {
+export async function getFinal(personaId) {
   /** Get a final blob (in-memory; DB support can be added later). */
   const repo = _repo();
   return (repo.getFinal || memRepo.getFinal)(personaId);
 }
 
-module.exports = {
-  isDbConfigured: isDbConfiguredPublic,
+// PUBLIC_INTERFACE
+export default {
+  isDbConfigured,
   createPersona,
   getPersonaById,
   updatePersona,
