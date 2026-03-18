@@ -168,6 +168,12 @@ async function handleInitialRecommendations(req, res) {
       return false;
     };
 
+    // How many roles we WANT to store/serve for Explore (still show 5 by default in UI).
+    // If cached has fewer than this, we regenerate so mindmap/filters can use the larger pool.
+    const storeCountRaw = Number(process.env.INITIAL_RECOMMENDATIONS_STORE_COUNT || 12);
+    const storeCount =
+      Number.isFinite(storeCountRaw) && storeCountRaw > 5 ? Math.min(20, Math.floor(storeCountRaw)) : 12;
+
     // FAST PATH: if we already have recommendations persisted for this persona, return immediately.
     // Keep this extremely short so it never contributes to preview/proxy timeouts.
     const cached = await withTimeout(
@@ -176,9 +182,12 @@ async function handleInitialRecommendations(req, res) {
     );
     const cachedRoles = Array.isArray(cached?.roles) ? cached.roles : null;
 
-    // CRITICAL: never serve fallback-only cached results; they are considered stale and should be
-    // regenerated via Bedrock when possible.
-    if (cachedRoles && cachedRoles.length >= 5 && !isFallbackOnlyCachedRoles(cachedRoles)) {
+    // CRITICAL:
+    // - never serve fallback-only cached results
+    // - and do NOT serve a too-small cached set when we now want to store/serve >5
+    const cacheSatisfiesDesiredCount = cachedRoles && cachedRoles.length >= storeCount;
+
+    if (cacheSatisfiesDesiredCount && !isFallbackOnlyCachedRoles(cachedRoles)) {
       if (req.timedOut || res.headersSent) return;
       return res.json({
         roles: cachedRoles,
@@ -187,6 +196,9 @@ async function handleInitialRecommendations(req, res) {
           personaId: personaIdRaw,
           cacheHit: true,
           endpointFallbackUsed: false,
+          requestedCount: storeCount,
+          receivedCount: cachedRoles.length,
+          uniqueAcceptedCount: cachedRoles.length,
         },
       });
     }
@@ -282,10 +294,6 @@ async function handleInitialRecommendations(req, res) {
     try {
       // Keep Bedrock attempts to 1 to avoid latency stacking in previews.
       // Fetch/store more than 5 roles; Explore landing still renders 5 initially.
-      const storeCountRaw = Number(process.env.INITIAL_RECOMMENDATIONS_STORE_COUNT || 12);
-      const storeCount =
-        Number.isFinite(storeCountRaw) && storeCountRaw > 5 ? Math.min(20, Math.floor(storeCountRaw)) : 12;
-
       result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
         finalPersona,
         personaId: personaIdRaw,

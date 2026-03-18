@@ -589,13 +589,20 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
   let lastBedrockResult = null;
   let finalBedrockUnique = [];
 
+  // Meta instrumentation (requested vs received vs unique accepted).
+  let lastRequestedCount = null;
+  let lastReceivedCount = null;
+  let lastUniqueAcceptedCount = null;
+
   for (let attempt = 1; attempt <= maxAttemptsDefault; attempt += 1) {
     const rem = remainingMs();
 
     // If we are close to the request timeout, stop trying and let padding/error handling decide.
     if (rem != null && rem < 1200) break;
 
-    const requestedCount = Math.min(10, initialRequestedCount + (attempt - 1) * 2);
+    // Support requesting/storing >5 roles; cap at 20 to keep responses bounded.
+    const requestedCount = Math.min(20, initialRequestedCount + (attempt - 1) * 2);
+    lastRequestedCount = requestedCount;
 
     // Allocate the *remaining* time to this attempt (minus a small buffer for parsing/scoring).
     const attemptBudgetMs = rem != null ? Math.max(1, rem - 250) : undefined;
@@ -618,11 +625,15 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
 
     lastBedrockResult = bedrockResult;
 
+    const received = Array.isArray(bedrockResult?.roles) ? bedrockResult.roles.length : 0;
+    lastReceivedCount = received;
+
     const cleanedBedrock = (Array.isArray(bedrockResult?.roles) ? bedrockResult.roles : [])
       .map(_markNonFallback)
       .filter(Boolean);
 
-    const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 10);
+    const uniqueBedrock = _dedupeByRoleTitle(cleanedBedrock).slice(0, 20);
+    lastUniqueAcceptedCount = uniqueBedrock.length;
 
     if (uniqueBedrock.length >= minCount) {
       // IMPORTANT: keep more than 5 when requested, so Explore search/mindmap can use the full stored pool.
@@ -690,6 +701,12 @@ async function generateInitialRecommendationsPersonaDrivenBedrockOnly({ finalPer
       count: reranked.length,
       minCount,
       returnCount,
+
+      // Diagnostics: how many were requested vs returned by Bedrock vs kept after validation/dedupe.
+      requestedCount: lastRequestedCount,
+      receivedCount: lastReceivedCount,
+      uniqueAcceptedCount: lastUniqueAcceptedCount,
+
       onetGrounded: false,
       onetError: null,
       bedrockUsedFallback: false,

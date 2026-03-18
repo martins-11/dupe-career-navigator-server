@@ -1302,7 +1302,8 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
 
 function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
   const rawCount = Number(options?.count);
-  const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(10, Math.floor(rawCount))) : 5;
+  // Support requesting/storing >5 roles; cap at 20 to keep responses bounded.
+  const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(20, Math.floor(rawCount))) : 5;
   const personaObj =
     finalPersona && typeof finalPersona === 'object'
       ? finalPersona.finalJson && typeof finalPersona.finalJson === 'object'
@@ -1451,15 +1452,16 @@ async function getInitialRecommendations(finalPersona, options = {}) {
   });
 
   const rawCount = Number(options?.count);
-  const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(10, Math.floor(rawCount))) : 5;
+  // Support requesting/storing >5 roles; cap at 20 to keep responses bounded.
+  const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(20, Math.floor(rawCount))) : 5;
 
   const prompt = _buildInitialRecommendationsPrompt(finalPersona, {
     context: options?.context || null,
     count
   });
 
-  // Scale token budget slightly when requesting more roles.
-  const maxTokens = Math.max(600, Math.min(2000, 1100 + Math.max(0, count - 5) * 160));
+  // Scale token budget when requesting more roles (avoid truncation for >10 roles).
+  const maxTokens = Math.max(700, Math.min(3200, 1100 + Math.max(0, count - 5) * 190));
 
   const body = {
     anthropic_version: 'bedrock-2023-05-31',
