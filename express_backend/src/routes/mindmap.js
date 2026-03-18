@@ -4,6 +4,7 @@ import { sendError } from '../utils/errors.js';
 import rolesRepo from '../repositories/rolesRepoAdapter.js';
 import recommendationsService from '../services/recommendationsService.js';
 import mindmapViewStateRepo from '../repositories/mindmapViewStateRepoAdapter.js';
+import exploreRecommendationsPoolService from '../services/exploreRecommendationsPoolService.js';
 
 const { z } = getZodSync();
 const router = express.Router();
@@ -132,6 +133,28 @@ async function _loadCatalogRoles() {
   return Array.isArray(seed) ? seed : [];
 }
 
+async function _loadExploreRecommendationsPoolRoles(personaId) {
+  /**
+   * Loads the shared Explore recommendations pool (persisted) for this persona.
+   * If it doesn't exist yet, this will trigger exactly one Bedrock fetch (in-flight deduped)
+   * and then persist the pool, so mindmap/cards/search/filtering all reuse the same result.
+   */
+  if (!personaId) return [];
+  try {
+    const pool = await exploreRecommendationsPoolService.getOrCreateExploreRecommendationsPool({
+      personaId: String(personaId).trim(),
+      finalPersonaOverride: null,
+      options: {
+        storeCount: 12,
+      },
+    });
+
+    return Array.isArray(pool?.roles) ? pool.roles : [];
+  } catch (_) {
+    return [];
+  }
+}
+
 function _applyFiltersToNodes(nodes, { minSalaryLpa = null, maxSalaryLpa = null, minSkillSimilarity = null } = {}) {
   const minS = minSalaryLpa != null ? Number(minSalaryLpa) : null;
   const maxS = maxSalaryLpa != null ? Number(maxSalaryLpa) : null;
@@ -213,6 +236,15 @@ const GraphQuerySchema = z
      */
     user_id: z.string().min(1).optional(),
     userId: z.string().min(1).optional(),
+
+    /**
+     * Explore persona context:
+     * When provided, the mindmap will reuse the persisted Explore recommendations pool
+     * (single-fetch Bedrock results) instead of the global catalog.
+     */
+    personaId: z.string().min(1).optional(),
+    persona_id: z.string().min(1).optional(),
+
     currentRoleTitle: z.string().min(1).optional(),
     // Optional filters
     minSalaryLpa: z.coerce.number().optional(),
@@ -231,6 +263,7 @@ const GraphQuerySchema = z
 const GraphPostBodySchema = z
   .object({
     userId: z.string().min(1),
+    personaId: z.string().min(1).optional(),
     currentRoleTitle: z.string().min(1).optional(),
     filters: z
       .object({
@@ -258,6 +291,7 @@ async function _buildMindmapGraph(q) {
   let currentRoleTitle = _normalizeLabel(q.currentRoleTitle || 'Current Role');
 
   const effectiveUserId = q.user_id || q.userId;
+  const effectivePersonaId = q.personaId || q.persona_id;
 
   if (effectiveUserId) {
     try {
@@ -279,17 +313,30 @@ async function _buildMindmapGraph(q) {
   };
   const centerNode = _roleToNode(centerRole, { isCenter: true, level: 0 });
 
-  // Load future roles from catalog.
-  const catalog = await _loadCatalogRoles();
+  // Load future roles:
+  // - If personaId is provided: reuse the persisted Explore recommendations pool (single-fetch Bedrock)
+  // - Else: fall back to global catalog (DB/seed)
+  const sourceRoles = effectivePersonaId
+    ? await _loadExploreRecommendationsPoolRoles(effectivePersonaId)
+    : await _loadCatalogRoles();
 
-  const allCandidateNodes = _safeArray(catalog)
+  const allCandidateNodes = _safeArray(sourceRoles)
     .map((r) => {
-      // Pseudo similarity (0-100) when catalog lacks scoring.
-      const requiredSkills = _safeArray(r?.coreSkills || r?.skills_required || r?.required_skills).filter(Boolean);
-      const sim = Math.max(25, Math.min(95, 30 + requiredSkills.length * 6));
+      /**
+       * Similarity/score:
+       * - When using Explore pool, prefer compatibility/finalCompatibilityScore when present
+       * - Otherwise fall back to a deterministic heuristic based on required skill count.
+       */
+      const compat =
+        Number(r?.finalCompatibilityScore) ||
+        Number(r?.compatibilityScore) ||
+        Number(r?.threeTwoReport?.compatibilityScore);
 
-      // If we have hints, treat as more distant.
-      const level = r?.seniorityLevel || r?.seniority_level ? 2 : 1;
+      const requiredSkills = _safeArray(r?.coreSkills || r?.skills_required || r?.required_skills).filter(Boolean);
+      const sim = Number.isFinite(compat) ? Math.max(0, Math.min(100, Math.round(compat))) : Math.max(25, Math.min(95, 30 + requiredSkills.length * 6));
+
+      // For Explore pool nodes, keep them nearer by default; the selection logic below still fans out levels.
+      const level = 1;
 
       return _roleToNode(r, { isCenter: false, level, score: sim });
     })
@@ -495,7 +542,7 @@ router.post('/graph', async (req, res) => {
       throw err;
     }
 
-    const { userId, currentRoleTitle, filters } = parsed.data;
+    const { userId, personaId, currentRoleTitle, filters } = parsed.data;
 
     const timeHorizon =
       filters?.timeHorizon && ['Near', 'Mid', 'Far'].includes(String(filters.timeHorizon))
@@ -504,6 +551,7 @@ router.post('/graph', async (req, res) => {
 
     const q = {
       userId: String(userId),
+      personaId: personaId ? String(personaId) : undefined,
       currentRoleTitle: currentRoleTitle ? String(currentRoleTitle) : undefined,
       minSalaryLpa: Number.isFinite(filters?.salaryMin) ? filters.salaryMin : undefined,
       maxSalaryLpa: Number.isFinite(filters?.salaryMax) ? filters.salaryMax : undefined,
