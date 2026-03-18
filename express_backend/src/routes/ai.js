@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { z } = require('zod');
+const { getZod } = require('../utils/zod');
 const { uuidV4 } = require('../utils/uuid');
 
 const router = express.Router();
@@ -15,66 +15,87 @@ const personaService = require('../services/personaService');
  * - Provide stable API contracts for AI persona generation before real LLM integration exists.
  * - Keep behavior safe: no external calls, no DB access, no secrets required.
  * - Return deterministic, explainable placeholder output for frontend integration.
+ *
+ * IMPORTANT (Node18 CJS / Zod):
+ * This backend runs as CommonJS. Direct `require('zod')` may resolve an ESM entrypoint
+ * and crash the process at startup. We therefore lazy-load Zod via `await getZod()`
+ * and initialize schemas only when needed.
  */
 
-const PersonaGenerateRequest = z.object({
-  /**
-   * Optional: user identifier for multi-tenant attribution (not used by placeholder).
-   */
-  userId: z.string().uuid().nullable().optional(),
-  /**
-   * Optional: reference to a document stored in DB (not used by placeholder).
-   * In future this may allow server-side retrieval of extracted text.
-   */
-  documentId: z.string().uuid().nullable().optional(),
-  /**
-   * Optional: raw extracted/normalized text from documents.
-   * This is the recommended field for the placeholder so it remains DB-independent.
-   */
-  sourceText: z.string().min(1).nullable().optional(),
-  /**
-   * Optional: additional context such as job target, seniority, or industry.
-   */
-  context: z
-    .object({
-      targetRole: z.string().min(1).nullable().optional(),
-      seniority: z.string().min(1).nullable().optional(),
-      industry: z.string().min(1).nullable().optional()
-    })
-    .nullable()
-    .optional(),
-  /**
-   * Optional: output format hint. Reserved for future.
-   */
-  outputFormat: z.enum(['json']).nullable().optional()
-});
+let _schemasPromise;
+
+async function getSchemas() {
+  if (_schemasPromise) return _schemasPromise;
+
+  _schemasPromise = (async () => {
+    const { z } = await getZod();
+
+    const PersonaGenerateRequest = z.object({
+      /**
+       * Optional: user identifier for multi-tenant attribution (not used by placeholder).
+       */
+      userId: z.string().uuid().nullable().optional(),
+      /**
+       * Optional: reference to a document stored in DB (not used by placeholder).
+       * In future this may allow server-side retrieval of extracted text.
+       */
+      documentId: z.string().uuid().nullable().optional(),
+      /**
+       * Optional: raw extracted/normalized text from documents.
+       * This is the recommended field for the placeholder so it remains DB-independent.
+       */
+      sourceText: z.string().min(1).nullable().optional(),
+      /**
+       * Optional: additional context such as job target, seniority, or industry.
+       */
+      context: z
+        .object({
+          targetRole: z.string().min(1).nullable().optional(),
+          seniority: z.string().min(1).nullable().optional(),
+          industry: z.string().min(1).nullable().optional()
+        })
+        .nullable()
+        .optional(),
+      /**
+       * Optional: output format hint. Reserved for future.
+       */
+      outputFormat: z.enum(['json']).nullable().optional()
+    });
+
+    const PersonaDraftSchema = z
+      .object({
+        schemaVersion: z.string().min(1),
+        title: z.string().min(1),
+        summary: z.string().min(1),
+        profile: z.object({
+          headline: z.string().min(1),
+          seniority: z.string().nullable(),
+          industry: z.string().nullable(),
+          location: z.string().nullable()
+        }),
+        strengths: z.array(z.string().min(1)).min(1),
+        skills: z.array(z.string().min(1)).min(1),
+        experienceHighlights: z.array(z.string().min(1)).min(1),
+        provenance: z.object({
+          source: z.string().min(1),
+          sourceTextLength: z.number().int().nonnegative()
+        })
+      })
+      .strict();
+
+    return { z, PersonaGenerateRequest, PersonaDraftSchema };
+  })();
+
+  return _schemasPromise;
+}
 
 function validationError(res, parsed) {
   return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
 }
 
-const PersonaDraftSchema = z
-  .object({
-    schemaVersion: z.string().min(1),
-    title: z.string().min(1),
-    summary: z.string().min(1),
-    profile: z.object({
-      headline: z.string().min(1),
-      seniority: z.string().nullable(),
-      industry: z.string().nullable(),
-      location: z.string().nullable()
-    }),
-    strengths: z.array(z.string().min(1)).min(1),
-    skills: z.array(z.string().min(1)).min(1),
-    experienceHighlights: z.array(z.string().min(1)).min(1),
-    provenance: z.object({
-      source: z.string().min(1),
-      sourceTextLength: z.number().int().nonnegative()
-    })
-  })
-  .strict();
+async function makePlaceholderPersona({ sourceText, context }) {
+  const { PersonaDraftSchema } = await getSchemas();
 
-function makePlaceholderPersona({ sourceText, context }) {
   // Deterministic non-LLM implementation while Claude API credentials are pending.
   const text = (sourceText || '').trim();
   const length = text.length;
@@ -199,6 +220,7 @@ router.post('/personas/generate', async (req, res) => {
    * - persona: legacy schema (for integration compatibility)
    * - persona_v2: the underlying generated v2 persona (for forward compatibility)
    */
+  const { PersonaGenerateRequest } = await getSchemas();
   const parsed = PersonaGenerateRequest.safeParse(req.body || {});
   if (!parsed.success) return validationError(res, parsed);
 
