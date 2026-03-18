@@ -1,5 +1,6 @@
 import express from 'express';
 import { sendError } from '../utils/errors.js';
+import { buildBedrockErrorMeta } from '../utils/bedrockErrorMeta.js';
 import holisticPersonaRepo from '../repositories/holisticPersonaRepoAdapter.js';
 
 import recommendationsService from '../services/recommendationsService.js';
@@ -353,9 +354,15 @@ async function handleInitialRecommendations(req, res) {
       });
     } catch (err) {
       // Convert Bedrock timeouts/errors into a fast 200 fallback (avoid 504s in previews).
-      bedrockErrorMeta = {
-        code: err?.code || err?.name || 'BEDROCK_FAILED',
-        message: err?.message || String(err),
+      bedrockErrorMeta = buildBedrockErrorMeta(err);
+
+      // Add route-level timing context (helps explain why the budget was ~29s, etc.).
+      bedrockErrorMeta.details = {
+        ...(bedrockErrorMeta.details && typeof bedrockErrorMeta.details === 'object' ? bedrockErrorMeta.details : {}),
+        timeBudgetMs,
+        requestTimeoutMs,
+        remainingMs,
+        storeCount,
       };
 
       result = await generateInitialRecommendationsFallbackOnly({

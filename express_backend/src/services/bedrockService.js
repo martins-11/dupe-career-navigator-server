@@ -791,6 +791,13 @@ function _getBedrockClient() {
    * Region:
    * - In some preview environments, AWS credentials are present but AWS_REGION is not injected into
    *   the Node process. Support multiple standard env var names and an explicit BEDROCK_REGION override.
+   *
+   * Retries (IMPORTANT):
+   * - AWS SDK has its own retry strategy. For latency-sensitive endpoints we want to keep
+   *   internal retries small because they can stack with our own retry/attempt logic.
+   *
+   * Env (optional):
+   * - BEDROCK_MAX_ATTEMPTS: total attempts the AWS SDK may make (default: 2)
    */
   const region =
     process.env.BEDROCK_REGION ||
@@ -810,7 +817,11 @@ function _getBedrockClient() {
     throw err;
   }
 
-  return new BedrockRuntimeClient({ region });
+  const maxAttemptsRaw = Number(process.env.BEDROCK_MAX_ATTEMPTS || 2);
+  const maxAttempts =
+    Number.isFinite(maxAttemptsRaw) && maxAttemptsRaw > 0 ? Math.max(1, Math.min(5, maxAttemptsRaw)) : 2;
+
+  return new BedrockRuntimeClient({ region, maxAttempts });
 }
 
 /**
@@ -1522,13 +1533,13 @@ async function getInitialRecommendations(finalPersona, options = {}) {
      * Previously the cap defaulted to 12000ms which caused premature `bedrock_timeout`
      * for /api/recommendations/initial even when the endpoint is allowed to run longer.
      */
-    const bedrockTimeoutMsRaw = Number(process.env.BEDROCK_TIMEOUT_MS || 40000);
+    const bedrockTimeoutMsRaw = Number(process.env.BEDROCK_TIMEOUT_MS || 55000);
     const bedrockTimeoutDefault =
-      Number.isFinite(bedrockTimeoutMsRaw) && bedrockTimeoutMsRaw > 0 ? bedrockTimeoutMsRaw : 40000;
+      Number.isFinite(bedrockTimeoutMsRaw) && bedrockTimeoutMsRaw > 0 ? bedrockTimeoutMsRaw : 55000;
 
-    const capRaw = Number(process.env.BEDROCK_TIMEOUT_CAP_MS || 45000);
+    const capRaw = Number(process.env.BEDROCK_TIMEOUT_CAP_MS || 60000);
     const bedrockTimeoutCap =
-      Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 45000;
+      Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 60000;
 
     const budgetRaw = Number(options?.timeBudgetMs);
     const timeBudgetMs = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : null;
@@ -1543,7 +1554,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     if (timeBudgetMs != null && timeBudgetMs < 250) {
       const err = new Error(`Bedrock skipped: insufficient time budget (${timeBudgetMs}ms)`);
       err.code = 'bedrock_timeout';
-      err.details = { timeBudgetMs, bedrockTimeoutMs };
+      err.details = { timeBudgetMs, bedrockTimeoutMs, modelId };
       throw err;
     }
 
@@ -1563,7 +1574,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       if (isAbort) {
         const err = new Error(`Bedrock request timed out after ${bedrockTimeoutMs}ms`);
         err.code = 'bedrock_timeout';
-        err.details = { bedrockTimeoutMs };
+        err.details = { bedrockTimeoutMs, timeBudgetMs, modelId };
         throw err;
       }
       throw e;
