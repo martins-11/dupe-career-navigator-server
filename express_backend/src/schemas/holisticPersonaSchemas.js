@@ -1,6 +1,6 @@
 'use strict';
 
-const { z } = require('zod/lib');
+const { z } = require('zod');
 
 /**
  * Holistic Persona (Career Navigator) schemas.

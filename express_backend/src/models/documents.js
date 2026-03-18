@@ -1,6 +1,6 @@
 'use strict';
 
-const { z } = require('zod/lib');
+const { z } = require('zod');
 
 const uuid = z.string().uuid();
 
