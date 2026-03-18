@@ -1,7 +1,5 @@
-'use strict';
-
-const { dbQuery } = require('../../db/connection');
-const { uuidV4 } = require('../../utils/uuid');
+import { dbQuery } from '../../db/connection.js';
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * MySQL repository for Holistic Persona /api endpoint persistence.
@@ -28,7 +26,7 @@ function _jsonParseIfNeeded(v) {
 }
 
 // PUBLIC_INTERFACE
-async function upsertRecommendationsRoles({ userId = null, personaId = null, buildId = null, inferredTags = [], roles }) {
+export async function upsertRecommendationsRoles({ userId = null, personaId = null, buildId = null, inferredTags = [], roles }) {
   /** Upsert "latest roles recommendations" for a given build/persona/user. */
   const id = uuidV4();
   const now = new Date();
@@ -47,7 +45,7 @@ async function upsertRecommendationsRoles({ userId = null, personaId = null, bui
 }
 
 // PUBLIC_INTERFACE
-async function getLatestRecommendationsRoles({ userId = null, personaId = null, buildId = null }) {
+export async function getLatestRecommendationsRoles({ userId = null, personaId = null, buildId = null }) {
   /** Get latest role recommendations row matching the most specific identifier provided (buildId > personaId > userId). */
   let where = '1=1';
   const params = [];
@@ -93,7 +91,7 @@ async function getLatestRecommendationsRoles({ userId = null, personaId = null, 
 }
 
 // PUBLIC_INTERFACE
-async function createRecommendationsCompare({ userId = null, personaId = null, buildId = null, leftRoleId, rightRoleId, comparison }) {
+export async function createRecommendationsCompare({ userId = null, personaId = null, buildId = null, leftRoleId, rightRoleId, comparison }) {
   /** Persist a role comparison matrix result. */
   const id = uuidV4();
 
@@ -111,7 +109,7 @@ async function createRecommendationsCompare({ userId = null, personaId = null, b
 }
 
 // PUBLIC_INTERFACE
-async function getLatestRecommendationsCompare({ buildId = null, leftRoleId, rightRoleId }) {
+export async function getLatestRecommendationsCompare({ buildId = null, leftRoleId, rightRoleId }) {
   /** Fetch latest comparison for a buildId + (left,right). If buildId omitted, fetch latest overall for pair. */
   const where = [];
   const params = [];
@@ -151,7 +149,7 @@ async function getLatestRecommendationsCompare({ buildId = null, leftRoleId, rig
 }
 
 // PUBLIC_INTERFACE
-async function upsertPathsMultiverse({ userId = null, personaId = null, buildId = null, paths }) {
+export async function upsertPathsMultiverse({ userId = null, personaId = null, buildId = null, paths }) {
   /** Persist paths multiverse results. */
   const id = uuidV4();
   const now = new Date();
@@ -170,7 +168,7 @@ async function upsertPathsMultiverse({ userId = null, personaId = null, buildId 
 }
 
 // PUBLIC_INTERFACE
-async function getLatestPathsMultiverse({ userId = null, personaId = null, buildId = null }) {
+export async function getLatestPathsMultiverse({ userId = null, personaId = null, buildId = null }) {
   /** Get latest paths multiverse row matching buildId/personaId/userId priority. */
   let where = '1=1';
   const params = [];
@@ -211,7 +209,7 @@ async function getLatestPathsMultiverse({ userId = null, personaId = null, build
 }
 
 // PUBLIC_INTERFACE
-async function upsertPlanMilestones({ userId = null, personaId = null, buildId = null, goal, timeframeWeeks, focus = null, milestones }) {
+export async function upsertPlanMilestones({ userId = null, personaId = null, buildId = null, goal, timeframeWeeks, focus = null, milestones }) {
   /** Persist a milestones plan. */
   const id = uuidV4();
   const now = new Date();
@@ -241,7 +239,7 @@ async function upsertPlanMilestones({ userId = null, personaId = null, buildId =
 }
 
 // PUBLIC_INTERFACE
-async function getLatestPlanMilestones({ userId = null, personaId = null, buildId = null }) {
+export async function getLatestPlanMilestones({ userId = null, personaId = null, buildId = null }) {
   /** Get latest milestones plan for build/persona/user priority. */
   let where = '1=1';
   const params = [];
@@ -285,7 +283,7 @@ async function getLatestPlanMilestones({ userId = null, personaId = null, buildI
 }
 
 // PUBLIC_INTERFACE
-async function upsertProfileScoring({ userId = null, personaId = null, buildId = null, scoring }) {
+export async function upsertProfileScoring({ userId = null, personaId = null, buildId = null, scoring }) {
   /** Persist profile scoring JSON (including overrides). */
   const id = uuidV4();
   const now = new Date();
@@ -304,7 +302,7 @@ async function upsertProfileScoring({ userId = null, personaId = null, buildId =
 }
 
 // PUBLIC_INTERFACE
-async function getLatestProfileScoring({ userId = null, personaId = null, buildId = null }) {
+export async function getLatestProfileScoring({ userId = null, personaId = null, buildId = null }) {
   /** Get latest profile scoring row for build/persona/user priority. */
   let where = '1=1';
   const params = [];
@@ -344,7 +342,7 @@ async function getLatestProfileScoring({ userId = null, personaId = null, buildI
   return { ...row, scoring: _jsonParseIfNeeded(row.scoring) || {} };
 }
 
-module.exports = {
+const holisticPersonaRepoMysql = {
   upsertRecommendationsRoles,
   getLatestRecommendationsRoles,
   createRecommendationsCompare,
@@ -356,3 +354,5 @@ module.exports = {
   upsertProfileScoring,
   getLatestProfileScoring
 };
+
+export default holisticPersonaRepoMysql;

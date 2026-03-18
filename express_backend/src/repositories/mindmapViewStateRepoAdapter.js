@@ -1,7 +1,6 @@
-'use strict';
-
-const mysqlRepo = require('./mysql/mindmapViewStateRepo.mysql');
-const memoryRepo = require('./memory/mindmapViewStateMemoryRepo');
+import mysqlRepo from './mysql/mindmapViewStateRepo.mysql.js';
+import memoryRepo from './memory/mindmapViewStateMemoryRepo.js';
+import { getDbEngine, isDbConfigured, isMysqlConfigured } from '../db/connection.js';
 
 /**
  * Mind map view-state persistence adapter.
@@ -16,13 +15,12 @@ const memoryRepo = require('./memory/mindmapViewStateMemoryRepo');
  */
 
 function _isDbOnlineForWrites() {
-  const { getDbEngine, isDbConfigured, isMysqlConfigured } = require('../db/connection');
   const engine = getDbEngine();
   return engine === 'mysql' && isDbConfigured() && isMysqlConfigured();
 }
 
 // PUBLIC_INTERFACE
-async function saveViewState({ userId, mapKey, state }) {
+export async function saveViewState({ userId, mapKey, state }) {
   /** Save (upsert) a user's mind map view state. Falls back to in-memory when DB is unavailable. */
   if (!_isDbOnlineForWrites()) {
     return memoryRepo.saveViewState({ userId, mapKey, state });
@@ -30,14 +28,14 @@ async function saveViewState({ userId, mapKey, state }) {
 
   try {
     return await mysqlRepo.saveViewState({ userId, mapKey, state });
-  } catch (err) {
+  } catch (_) {
     // Graceful fallback on runtime DB failures (network/auth/DDL drift).
     return memoryRepo.saveViewState({ userId, mapKey, state });
   }
 }
 
 // PUBLIC_INTERFACE
-async function loadViewState({ userId, mapKey }) {
+export async function loadViewState({ userId, mapKey }) {
   /** Load the latest saved mind map view state for a user. Falls back to in-memory when DB is unavailable. */
   if (!_isDbOnlineForWrites()) {
     return memoryRepo.loadViewState({ userId, mapKey });
@@ -50,12 +48,12 @@ async function loadViewState({ userId, mapKey }) {
     // If DB returns nothing but memory has something (e.g., DB outage happened mid-session),
     // prefer memory as a best-effort UX improvement.
     return memoryRepo.loadViewState({ userId, mapKey });
-  } catch (err) {
+  } catch (_) {
     return memoryRepo.loadViewState({ userId, mapKey });
   }
 }
 
-module.exports = {
+export default {
   saveViewState,
   loadViewState
 };

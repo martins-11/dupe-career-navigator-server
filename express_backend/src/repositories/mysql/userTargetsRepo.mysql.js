@@ -1,7 +1,5 @@
-'use strict';
-
-const { dbQuery } = require('../../db/connection');
-const { uuidV4 } = require('../../utils/uuid');
+import { dbQuery } from '../../db/connection.js';
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * MySQL repository for user_targets table.
@@ -12,7 +10,7 @@ const { uuidV4 } = require('../../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
+export async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
   /**
    * Insert a new user target role selection.
    *
@@ -38,7 +36,7 @@ async function upsertUserTargetRole({ userId, roleId, timeHorizon }) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestUserTargetRole({ userId }) {
+export async function getLatestUserTargetRole({ userId }) {
   /** Return the latest target role selection for a given user id, or null. */
   const res = await dbQuery(
     `
@@ -61,7 +59,7 @@ async function getLatestUserTargetRole({ userId }) {
 }
 
 // PUBLIC_INTERFACE
-async function upsertUserCurrentRole({ userId, currentRoleTitle, source = 'bedrock' }) {
+export async function upsertUserCurrentRole({ userId, currentRoleTitle, source = 'bedrock' }) {
   /**
    * Insert a new "current role" extraction record for the user.
    * Append-only; latest is most recent.
@@ -88,12 +86,12 @@ async function upsertUserCurrentRole({ userId, currentRoleTitle, source = 'bedro
     currentRoleTitle,
     source,
     createdAt: now.toISOString(),
-    updatedAt: now.toISOString(),
+    updatedAt: now.toISOString()
   };
 }
 
 // PUBLIC_INTERFACE
-async function getLatestUserCurrentRole({ userId }) {
+export async function getLatestUserCurrentRole({ userId }) {
   /** Return the latest current role extraction for a given user id, or null. */
   const res = await dbQuery(
     `
@@ -115,9 +113,11 @@ async function getLatestUserCurrentRole({ userId }) {
   return res.rows?.[0] || null;
 }
 
-module.exports = {
+const userTargetsRepoMysql = {
   upsertUserTargetRole,
   getLatestUserTargetRole,
   upsertUserCurrentRole,
-  getLatestUserCurrentRole,
+  getLatestUserCurrentRole
 };
+
+export default userTargetsRepoMysql;

@@ -1,7 +1,5 @@
-'use strict';
-
-const { dbQuery } = require('../../db/connection');
-const { uuidV4 } = require('../../utils/uuid');
+import { dbQuery } from '../../db/connection.js';
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * MySQL AI runs repository.
@@ -10,7 +8,7 @@ const { uuidV4 } = require('../../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-async function createAiRun(input) {
+export async function createAiRun(input) {
   /** Create an ai_run row in MySQL and return it. */
   const id = uuidV4();
   const now = new Date();
@@ -41,7 +39,7 @@ async function createAiRun(input) {
 }
 
 // PUBLIC_INTERFACE
-async function getAiRunById(aiRunId) {
+export async function getAiRunById(aiRunId) {
   /** Fetch ai_run by id. Returns null if not found. */
   const res = await dbQuery(
     `
@@ -67,7 +65,7 @@ async function getAiRunById(aiRunId) {
 }
 
 // PUBLIC_INTERFACE
-async function updateAiRun(aiRunId, patch) {
+export async function updateAiRun(aiRunId, patch) {
   /** Update mutable fields on an ai_run row. */
   const sets = [];
   const params = [];
@@ -113,7 +111,7 @@ async function updateAiRun(aiRunId, patch) {
 }
 
 // PUBLIC_INTERFACE
-async function listAiRunsByBuildId(buildId) {
+export async function listAiRunsByBuildId(buildId) {
   /** List ai_runs for a build (ascending by created_at). */
   const res = await dbQuery(
     `
@@ -139,9 +137,11 @@ async function listAiRunsByBuildId(buildId) {
   return res.rows;
 }
 
-module.exports = {
+const aiRunsRepoMysql = {
   createAiRun,
   getAiRunById,
   updateAiRun,
   listAiRunsByBuildId
 };
+
+export default aiRunsRepoMysql;

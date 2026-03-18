@@ -1,7 +1,5 @@
-'use strict';
-
-const { dbQuery } = require('../../db/connection');
-const { uuidV4 } = require('../../utils/uuid');
+import { dbQuery } from '../../db/connection.js';
+import { uuidV4 } from '../../utils/uuid.js';
 
 /**
  * MySQL repository for:
@@ -15,7 +13,7 @@ const { uuidV4 } = require('../../utils/uuid');
  */
 
 // PUBLIC_INTERFACE
-async function createDocument(input) {
+export async function createDocument(input) {
   /** Create a document row in MySQL and return the created record. */
   const id = uuidV4();
 
@@ -80,7 +78,7 @@ async function createDocument(input) {
  * @param {number} [options.offset] Offset for pagination (default: 0).
  * @returns {Promise<Array<object>>} Documents list ordered by created_at desc.
  */
-async function listDocuments(options = {}) {
+export async function listDocuments(options = {}) {
   const limitRaw = options.limit ?? 100;
   const offsetRaw = options.offset ?? 0;
 
@@ -114,7 +112,7 @@ async function listDocuments(options = {}) {
 }
 
 // PUBLIC_INTERFACE
-async function getDocumentById(documentId) {
+export async function getDocumentById(documentId) {
   /** Fetch a document by id. Returns null if not found. */
   const res = await dbQuery(
     `
@@ -141,7 +139,7 @@ async function getDocumentById(documentId) {
 }
 
 // PUBLIC_INTERFACE
-async function upsertExtractedText(documentId, input) {
+export async function upsertExtractedText(documentId, input) {
   /**
    * Persist extracted text for a document.
    *
@@ -189,7 +187,7 @@ async function upsertExtractedText(documentId, input) {
 }
 
 // PUBLIC_INTERFACE
-async function getLatestExtractedText(documentId) {
+export async function getLatestExtractedText(documentId) {
   /** Retrieve the latest extracted text blob for a given document. */
   const res = await dbQuery(
     `
@@ -221,7 +219,7 @@ async function getLatestExtractedText(documentId) {
  * @param {string} category canonical category string
  * @returns {Promise<object|null>}
  */
-async function getLatestDocumentForUserByCategory(userId, category) {
+export async function getLatestDocumentForUserByCategory(userId, category) {
   // If userId is null, match NULL user_id documents (useful for anonymous flows).
   const whereUser = userId ? 'user_id = ?' : 'user_id IS NULL';
   const params = userId ? [userId, category] : [category];
@@ -253,7 +251,7 @@ async function getLatestDocumentForUserByCategory(userId, category) {
   return res.rows[0] || null;
 }
 
-module.exports = {
+const documentsRepoMysql = {
   createDocument,
   listDocuments,
   getDocumentById,
@@ -261,3 +259,5 @@ module.exports = {
   getLatestExtractedText,
   getLatestDocumentForUserByCategory
 };
+
+export default documentsRepoMysql;
