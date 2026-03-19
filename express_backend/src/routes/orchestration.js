@@ -121,6 +121,29 @@ router.post('/builds/:id/generate-draft', async (req, res) => {
 });
 
 // PUBLIC_INTERFACE
+router.post('/builds/:id/regenerate-draft', async (req, res) => {
+  /**
+   * Backward-compatible alias for draft regeneration.
+   *
+   * This route exists to support clients that expect an explicit "regenerate draft" endpoint.
+   * Behavior is identical to POST /orchestration/builds/:id/generate-draft, but it defaults:
+   * - createVersion: true (archive previous draft as a version when possible)
+   * - saveDraft: true (persist regenerated draft)
+   */
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const out = await orchestrationService.generatePersonaDraftForBuild(req.params.id, {
+      ...body,
+      saveDraft: body.saveDraft ?? true,
+      createVersion: body.createVersion ?? true
+    });
+    return res.status(200).json(out);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// PUBLIC_INTERFACE
 router.post('/builds/:id/finalize', async (req, res) => {
   /**
    * Finalize persona:
@@ -129,6 +152,59 @@ router.post('/builds/:id/finalize', async (req, res) => {
    */
   try {
     const out = await orchestrationService.finalizePersonaForBuild(req.params.id, req.body || {});
+    return res.status(200).json(out);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// PUBLIC_INTERFACE
+router.post('/finalize', async (req, res) => {
+  /**
+   * Convenience alias: finalize by buildId in the request body.
+   *
+   * Body:
+   * - { buildId: string, ...OrchestrationFinalizeRequest }
+   *
+   * This keeps older clients working if they expect a simplified "/finalize" route.
+   */
+  try {
+    const buildId = String(req.body?.buildId || '').trim();
+    if (!buildId) return res.status(400).json({ error: 'validation_error', message: 'buildId is required.' });
+
+    const { buildId: _omit, ...rest } = req.body || {};
+    const out = await orchestrationService.finalizePersonaForBuild(buildId, rest);
+    return res.status(200).json(out);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+// PUBLIC_INTERFACE
+router.post('/regenerate-draft', async (req, res) => {
+  /**
+   * Convenience alias: regenerate draft by buildId in the request body.
+   *
+   * Body:
+   * - { buildId: string, ...OrchestrationGenerateDraftRequest }
+   *
+   * Defaults:
+   * - saveDraft=true
+   * - createVersion=true
+   */
+  try {
+    const buildId = String(req.body?.buildId || '').trim();
+    if (!buildId) return res.status(400).json({ error: 'validation_error', message: 'buildId is required.' });
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const { buildId: _omit, ...rest } = body;
+
+    const out = await orchestrationService.generatePersonaDraftForBuild(buildId, {
+      ...rest,
+      saveDraft: body.saveDraft ?? true,
+      createVersion: body.createVersion ?? true
+    });
+
     return res.status(200).json(out);
   } catch (err) {
     return sendError(res, err);

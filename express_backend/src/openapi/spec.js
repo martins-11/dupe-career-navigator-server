@@ -209,6 +209,32 @@ const openapiDefinition = {
         required: ['personaId', 'versions']
       },
 
+      PersonaDraftArtifact: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Latest saved persona draft artifact (DB-backed when available; memory fallback otherwise).',
+        properties: {
+          personaId: { type: 'string', format: 'uuid' },
+          draftId: { type: 'string', format: 'uuid', nullable: true },
+          draftJson: { type: 'object', additionalProperties: true },
+          updatedAt: { type: 'string', format: 'date-time' }
+        },
+        required: ['personaId', 'draftJson', 'updatedAt']
+      },
+
+      PersonaFinalArtifact: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Latest saved finalized persona artifact (DB-backed when available; memory fallback otherwise).',
+        properties: {
+          personaId: { type: 'string', format: 'uuid' },
+          finalId: { type: 'string', format: 'uuid', nullable: true },
+          finalJson: { type: 'object', additionalProperties: true },
+          updatedAt: { type: 'string', format: 'date-time' }
+        },
+        required: ['personaId', 'finalJson', 'updatedAt']
+      },
+
       UploadFileResult: {
         type: 'object',
         additionalProperties: false,
@@ -1998,6 +2024,90 @@ const openapiDefinition = {
           },
           503: {
             description: 'DB unavailable (not configured yet)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/personas/{id}/draft/latest': {
+      get: {
+        tags: ['Personas'],
+        summary: 'Get latest saved persona draft artifact',
+        description:
+          'Returns the latest saved draft JSON for the persona (backed by MySQL persona_drafts when configured, otherwise memory).',
+        parameters: [{ $ref: '#/components/parameters/PersonaIdParam' }],
+        responses: {
+          200: {
+            description: 'Latest saved draft artifact',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PersonaDraftArtifact' } } }
+          },
+          404: {
+            description: 'Persona or draft not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable (if configured but unreachable)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      },
+      put: {
+        tags: ['Personas'],
+        summary: 'Save edited persona draft JSON',
+        description:
+          'Persists edited draft JSON for the persona. Request body may be {draftJson: object} or a raw JSON object (draft itself).',
+        parameters: [{ $ref: '#/components/parameters/PersonaIdParam' }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: true
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Saved draft artifact',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PersonaDraftArtifact' } } }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Persona not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable (if configured but unreachable)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/personas/{id}/final/latest': {
+      get: {
+        tags: ['Personas'],
+        summary: 'Get latest finalized persona artifact',
+        description:
+          'Returns the latest finalized persona JSON for the persona (backed by MySQL persona_final when configured, otherwise memory).',
+        parameters: [{ $ref: '#/components/parameters/PersonaIdParam' }],
+        responses: {
+          200: {
+            description: 'Latest finalized persona artifact',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PersonaFinalArtifact' } } }
+          },
+          404: {
+            description: 'Persona or final artifact not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable (if configured but unreachable)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
