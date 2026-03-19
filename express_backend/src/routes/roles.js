@@ -302,17 +302,14 @@ router.get('/search', async (req, res) => {
       personaId: personaId ? String(personaId).trim() : null,
     });
 
-    // Bedrock-only contract: always return a JSON array on success.
+    // Contract: always return a JSON array on success.
     return res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    console.error('[roles.search] Bedrock-driven search failed:', err);
+    // Per workflow spec: this endpoint must "fail safely" to protect the Explore UI.
+    // Return [] with HTTP 200 on internal errors/upstream failures.
+    console.error('[roles.search] Bedrock-driven search failed (returning [] per safe-fail contract):', err);
 
-    // Stop returning HTTP 200 with [] on upstream failures; propagate a useful JSON error.
-    err.details = {
-      ...(err.details && typeof err.details === 'object' ? err.details : {}),
-      bedrockError: buildBedrockErrorMeta(err),
-    };
-    return sendError(res, err);
+    return res.status(200).json([]);
   }
 });
 
