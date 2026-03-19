@@ -64,6 +64,37 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+/**
+ * PUBLIC_INTERFACE
+ * GET /personas/:id/draft/latest
+ *
+ * Returns the latest saved draft blob for a personaId.
+ *
+ * Notes:
+ * - This reads from personasRepo.getDraft(), which is backed by MySQL when configured
+ *   (persona_drafts table) and by memory repo otherwise.
+ * - Returns 404 when persona does not exist OR no draft exists yet.
+ */
+router.get('/:id/draft/latest', async (req, res) => {
+  try {
+    const personaId = String(req.params.id || '').trim();
+    if (!personaId) return res.status(400).json({ error: 'validation_error', message: 'personaId is required.' });
+
+    // Ensure persona exists (consistent with other persona routes).
+    const existing = await personasRepo.getPersonaById(personaId);
+    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+
+    const draft = await personasRepo.getDraft(personaId);
+    if (!draft || !draft.draftJson) {
+      return res.status(404).json({ error: 'draft_not_found', message: 'No saved draft exists for this persona yet.' });
+    }
+
+    return res.json(draft);
+  } catch (err) {
+    return handleRepoError(res, err);
+  }
+});
+
 router.put('/:id', async (req, res) => {
   const parsed = PersonaUpdateRequest.safeParse(req.body);
   if (!parsed.success) {
