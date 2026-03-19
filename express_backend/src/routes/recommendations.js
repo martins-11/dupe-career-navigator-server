@@ -322,30 +322,130 @@ router.post('/direct-trajectory', async (req, res) => {
     const savedTargetRoleTitle =
       req.body?.savedTargetRoleTitle != null ? String(req.body.savedTargetRoleTitle).trim() : null;
 
-    // Load finalized persona from DB (canonical). If DB not configured, surface a clear error.
-    // The orchestrator/user stated .env is configured; we follow existing repo patterns.
-    const final = await holisticPersonaRepo.getLatestPersonaFinalArtifact(personaIdRaw);
+    /**
+     * Additive fast-path (bugfix):
+     * Allow callers (frontend proxy) to pass finalized persona JSON directly.
+     * This avoids 500s when DB is not configured/reachable in preview environments.
+     *
+     * Accepted shapes:
+     * - req.body.finalizedPersonaJson (object)
+     * - req.body.finalPersonaJson (object)
+     * - req.body.finalPersona (object)
+     */
+    const requestProvidedPersona =
+      (req.body?.finalizedPersonaJson && typeof req.body.finalizedPersonaJson === 'object'
+        ? req.body.finalizedPersonaJson
+        : null) ||
+      (req.body?.finalPersonaJson && typeof req.body.finalPersonaJson === 'object' ? req.body.finalPersonaJson : null) ||
+      (req.body?.finalPersona && typeof req.body.finalPersona === 'object' ? req.body.finalPersona : null);
 
-    const finalizedPersonaJson =
-      final && typeof final === 'object'
-        ? final.finalJson && typeof final.finalJson === 'object'
-          ? final.finalJson
-          : final
-        : null;
+    let finalizedPersonaJson = requestProvidedPersona;
 
     if (!finalizedPersonaJson) {
-      const err = new Error('Final persona not found for personaId.');
+      // Canonical behavior: load finalized persona from persistence.
+      const final = await holisticPersonaRepo.getLatestPersonaFinalArtifact(personaIdRaw);
+
+      finalizedPersonaJson =
+        final && typeof final === 'object'
+          ? final.finalJson && typeof final.finalJson === 'object'
+            ? final.finalJson
+            : final
+          : null;
+    }
+
+    if (!finalizedPersonaJson) {
+      const err = new Error(
+        'Final persona not found for personaId. Provide finalizedPersonaJson in the request body or ensure DB is configured.'
+      );
       err.code = 'final_persona_not_found';
       err.httpStatus = 404;
       throw err;
     }
 
-    const result = await generateDirectTrajectoryRecommendations({
-      finalizedPersonaJson,
-      savedTargetRoleTitle,
-    });
+    try {
+      const result = await generateDirectTrajectoryRecommendations({
+        finalizedPersonaJson,
+        savedTargetRoleTitle,
+      });
 
-    return res.json(result);
+      return res.json(result);
+    } catch (err) {
+      /**
+       * Safe-fail fallback:
+       * If Bedrock is not configured (common in preview) or errors, return deterministic recommendations
+       * so the UI does not hard-fail with a 500.
+       */
+      const message = String(err?.message || '');
+      const code = String(err?.code || '');
+
+      const bedrockMisconfig =
+        code === 'missing_aws_region' ||
+        code === 'CredentialsProviderError' ||
+        code === 'UnrecognizedClientException' ||
+        code === 'AccessDeniedException' ||
+        code === 'bedrock_response_not_json' ||
+        code === 'bedrock_no_json_object' ||
+        code === 'bedrock_invalid_extracted_json' ||
+        message.toLowerCase().includes('missing aws region');
+
+      if (!bedrockMisconfig) throw err;
+
+      return res.json({
+        currentRoleTitle: String(finalizedPersonaJson?.profile?.headline || finalizedPersonaJson?.current_role || 'Current role'),
+        recommendedDirectRoles: [
+          {
+            id: 'direct-fallback-1',
+            title: 'Senior Associate / Specialist (Adjacent Domain)',
+            rationale: 'Fallback recommendation (AI unavailable). Chosen as a realistic next step adjacent to current strengths.',
+            whyDirectNow: ['Strong overlap with existing experience; minimal role change required.'],
+            requiredSkills: ['Communication', 'Problem solving', 'Stakeholder management'],
+            keyResponsibilities: ['Own a scoped workstream', 'Collaborate cross-functionally', 'Report outcomes and metrics'],
+            confidence: 45,
+          },
+          {
+            id: 'direct-fallback-2',
+            title: 'Team Lead (Current Discipline)',
+            rationale: 'Fallback recommendation (AI unavailable). A direct next step for growth within the same discipline.',
+            whyDirectNow: ['Builds on existing strengths; adds light leadership responsibilities.'],
+            requiredSkills: ['Mentoring', 'Planning', 'Execution'],
+            keyResponsibilities: ['Guide day-to-day execution', 'Support teammates', 'Improve processes'],
+            confidence: 42,
+          },
+          {
+            id: 'direct-fallback-3',
+            title: 'Project Coordinator / Program Associate',
+            rationale: 'Fallback recommendation (AI unavailable). Often a direct move leveraging organization and delivery skills.',
+            whyDirectNow: ['Transfers well from many roles; limited upskilling needed.'],
+            requiredSkills: ['Project coordination', 'Documentation', 'Time management'],
+            keyResponsibilities: ['Track milestones', 'Coordinate stakeholders', 'Maintain plans and status reports'],
+            confidence: 40,
+          },
+          {
+            id: 'direct-fallback-4',
+            title: 'Operations Analyst',
+            rationale: 'Fallback recommendation (AI unavailable). Direct step focusing on analysis and process improvement.',
+            whyDirectNow: ['Uses structured thinking; incremental skill lift.'],
+            requiredSkills: ['Analysis', 'Excel/Sheets', 'Process improvement'],
+            keyResponsibilities: ['Analyze workflows', 'Recommend improvements', 'Monitor KPIs'],
+            confidence: 38,
+          },
+          {
+            id: 'direct-fallback-5',
+            title: 'Customer/Client Success Specialist',
+            rationale: 'Fallback recommendation (AI unavailable). Direct path where domain knowledge + communication are key.',
+            whyDirectNow: ['Leverages existing knowledge and communication; minimal tooling upskilling.'],
+            requiredSkills: ['Customer communication', 'Issue triage', 'Product/domain knowledge'],
+            keyResponsibilities: ['Support customer goals', 'Resolve issues', 'Identify upsell/renewal risks'],
+            confidence: 36,
+          },
+        ],
+        meta: {
+          modelId: null,
+          bedrockUsedFallback: true,
+          note: 'Returned deterministic fallback because Bedrock is unavailable/misconfigured in this environment.',
+        },
+      });
+    }
   } catch (err) {
     return sendError(res, err);
   }
