@@ -1,4 +1,5 @@
 import exploreRecommendationsPoolService from './exploreRecommendationsPoolService.js';
+import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import bedrockService from './bedrockService.js';
 
 /**
@@ -249,15 +250,315 @@ function _buildDeterministicPathsFromNodes({ centerNode, nodes, maxPaths = 6 }) 
   return paths;
 }
 
-async function _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode }) {
+function _resolveBedrockModelId({ override = null, envKeys = [] } = {}) {
+  if (override && String(override).trim()) return String(override).trim();
+  for (const key of envKeys) {
+    const val = process.env[key];
+    if (val && String(val).trim()) return String(val).trim();
+  }
+  return 'anthropic.claude-3-5-sonnet-20240620-v1:0';
+}
+
+function _getBedrockClient() {
+  const region =
+    process.env.BEDROCK_REGION ||
+    process.env.AWS_REGION ||
+    process.env.AWS_DEFAULT_REGION ||
+    process.env.AMAZON_REGION ||
+    process.env.AWS_SDK_REGION;
+
+  if (!region) {
+    const err = new Error(
+      'Missing AWS region for BedrockRuntimeClient. Set BEDROCK_REGION, AWS_REGION, or AWS_DEFAULT_REGION.'
+    );
+    err.code = 'missing_aws_region';
+    err.details = { tried: ['BEDROCK_REGION', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AMAZON_REGION', 'AWS_SDK_REGION'] };
+    throw err;
+  }
+
+  const maxAttemptsRaw = Number(process.env.BEDROCK_MAX_ATTEMPTS || 2);
+  const maxAttempts =
+    Number.isFinite(maxAttemptsRaw) && maxAttemptsRaw > 0 ? Math.max(1, Math.min(5, maxAttemptsRaw)) : 2;
+
+  return new BedrockRuntimeClient({ region, maxAttempts });
+}
+
+function _extractClaudeText(bedrockJson) {
+  const content = bedrockJson?.content;
+  if (Array.isArray(content)) {
+    const texts = content
+      .filter((c) => c && typeof c === 'object' && c.type === 'text' && typeof c.text === 'string')
+      .map((c) => c.text);
+    if (texts.length > 0) return texts.join('\n').trim();
+  }
+  if (typeof bedrockJson?.outputText === 'string') return bedrockJson.outputText.trim();
+  return '';
+}
+
+function _extractFirstJsonArray(text) {
+  if (!text) return null;
+  let trimmed = String(text).trim();
+
+  // Remove fenced blocks if present
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced && fenced[1]) trimmed = fenced[1].trim();
+
+  // Remove common Claude wrappers
+  trimmed = trimmed.replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '').trim();
+
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) return trimmed;
+
+  // Balanced scan respecting strings
+  const starts = [];
+  for (let i = 0; i < trimmed.length; i += 1) if (trimmed[i] === '[') starts.push(i);
+  if (starts.length === 0) return null;
+
+  const extractFrom = (start) => {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = start; i < trimmed.length; i += 1) {
+      const ch = trimmed[i];
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') inString = false;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '[') depth += 1;
+      if (ch === ']') depth -= 1;
+
+      if (depth === 0 && i > start) {
+        const candidate = trimmed.slice(start, i + 1).trim();
+        return candidate.startsWith('[') && candidate.endsWith(']') ? candidate : null;
+      }
+    }
+
+    return null;
+  };
+
+  for (const s of starts) {
+    const c = extractFrom(s);
+    if (c) return c;
+  }
+  return null;
+}
+
+function _buildMultiversePathRolesPrompt({ pathType, currentRoleTitle, pathRoleTitles, targetRoleTitle }) {
+  const pt = String(pathType || '').trim() || 'lateral';
+  const allowed = new Set(['lateral', 'vertical', 'pivot', 'non_linear']);
+  const normalizedPathType = allowed.has(pt) ? pt : 'lateral';
+
+  const pathInline = Array.isArray(pathRoleTitles) && pathRoleTitles.length ? pathRoleTitles.join(' → ') : 'N/A';
+
+  const definitionByType = {
+    lateral:
+      'LATERAL = same seniority band; similar compensation band; leverage existing core skills; change domain or function is allowed ONLY if skill overlap stays high and seniority does NOT jump.',
+    vertical:
+      'VERTICAL = upward progression in the same function/track; increased scope, leadership or complexity; higher seniority; NOT a domain change. Titles should reflect clear leveling up.',
+    pivot:
+      'PIVOT = intentional shift to a different function/track; requires meaningful reskilling; still plausible based on persona strengths. Avoid pure lateral/vertical variants.',
+    non_linear:
+      'NON_LINEAR = unconventional path: cross-functional, portfolio career, or role hybridization; can include sideways + up/down moves; emphasize optionality and experimentation while staying realistic.'
+  };
+
+  const hardConstraintsByType = {
+    lateral: [
+      'ONLY recommend roles that are lateral moves: similar seniority to current.',
+      'Do NOT recommend clear promotions (e.g., Lead/Manager/Head) unless current role already implies that seniority.',
+      'Do NOT recommend far pivots that require large reskilling.'
+    ],
+    vertical: [
+      'ONLY recommend roles that are vertical moves: higher seniority/scope than current.',
+      'Do NOT recommend lateral titles at the same level.',
+      'Stay in the same function/track as implied by the current role + path.'
+    ],
+    pivot: [
+      'ONLY recommend roles that are pivots into a different function/track.',
+      'Do NOT recommend simple lateral variants of the current function.',
+      'Each role must explicitly reflect the new track (e.g., Engineering -> Product, Sales -> Customer Success, etc.).'
+    ],
+    non_linear: [
+      'ONLY recommend non-linear roles: hybrid/cross-functional/portfolio-style options that create optionality.',
+      'Do NOT return standard linear ladder steps only.',
+      'Keep it realistic and employable (avoid gimmicks).'
+    ]
+  };
+
+  const constraints = hardConstraintsByType[normalizedPathType] || hardConstraintsByType.lateral;
+  const definition = definitionByType[normalizedPathType] || definitionByType.lateral;
+
+  return [
+    'You are an expert career mobility strategist for the Indian job market.',
+    '',
+    'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT):',
+    '1) Output MUST be valid JSON (RFC 8259).',
+    '2) Output MUST be a single JSON array (not an object).',
+    '3) Output MUST contain NO markdown, NO code fences, NO commentary, NO headings.',
+    '4) Output MUST contain EXACTLY 5 elements.',
+    '',
+    'MULTIVERSE PATH TYPE (AUTHORITATIVE):',
+    `- pathType: "${normalizedPathType}"`,
+    `- definition: ${definition}`,
+    '',
+    'HARD CONSTRAINTS (MUST OBEY):',
+    ...constraints.map((c) => `- ${c}`),
+    '',
+    'PATH CONTEXT:',
+    `- currentRoleTitle: "${_normalizeLabel(currentRoleTitle || 'Current Role')}"`,
+    `- selectedPath: "${_normalizeLabel(pathInline)}"`,
+    `- targetRoleTitle (last step): "${_normalizeLabel(targetRoleTitle || 'Target Role')}"`,
+    '',
+    'TASK:',
+    `Recommend EXACTLY 5 India-market roles that STRICTLY match the pathType="${normalizedPathType}".`,
+    'These are role recommendations for the user to consider next within this multiverse path.',
+    '',
+    'SCHEMA (MUST MATCH EXACTLY):',
+    'Return a JSON array of 5 objects. EACH object MUST have ALL of these keys:',
+    '- "role_title": string (non-empty; unique across all 5 roles)',
+    '- "pathType": string (MUST equal the given pathType exactly)',
+    '- "whyThisMatchesPathType": string (1-2 sentences; explicitly justify why it is lateral/vertical/pivot/non_linear)',
+    '- "confidence": number (0-100 integer)',
+    '',
+    'VALIDATION CHECKLIST (DO THIS BEFORE YOU OUTPUT):',
+    '- Count check: array length is exactly 5.',
+    '- Every item has pathType exactly equal to the given pathType.',
+    '- Titles are unique (case-insensitive).',
+    '- All roles obey the HARD CONSTRAINTS for the pathType.',
+    '',
+    'OUTPUT:',
+    'Return ONLY the JSON array.'
+  ].join('\n');
+}
+
+async function _generatePathTypeConstrainedRoleRecsSafe({
+  pathType,
+  currentRoleTitle,
+  pathRoleTitles,
+  targetRoleTitle
+} = {}) {
+  const deterministic = () => {
+    const titles =
+      pathType === 'vertical'
+        ? ['Senior Role (Progression)', 'Lead Role (Progression)', 'Manager (Progression)', 'Principal (Progression)', 'Head (Progression)']
+        : pathType === 'pivot'
+          ? ['Pivot Role 1', 'Pivot Role 2', 'Pivot Role 3', 'Pivot Role 4', 'Pivot Role 5']
+          : pathType === 'non_linear'
+            ? ['Hybrid Role 1', 'Hybrid Role 2', 'Hybrid Role 3', 'Hybrid Role 4', 'Hybrid Role 5']
+            : ['Lateral Role 1', 'Lateral Role 2', 'Lateral Role 3', 'Lateral Role 4', 'Lateral Role 5'];
+
+    return titles.slice(0, 5).map((t, idx) => ({
+      role_title: t,
+      pathType: String(pathType || 'lateral'),
+      whyThisMatchesPathType: 'Fallback recommendation due to Bedrock unavailability.',
+      confidence: Math.max(10, 50 - idx * 3),
+      meta: { bedrockUsed: false, fallback: true }
+    }));
+  };
+
+  try {
+    const modelId = _resolveBedrockModelId({
+      override: null,
+      envKeys: ['BEDROCK_MULTIVERSE_MODEL_ID', 'BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+    });
+
+    const prompt = _buildMultiversePathRolesPrompt({
+      pathType,
+      currentRoleTitle,
+      pathRoleTitles,
+      targetRoleTitle
+    });
+
+    const body = {
+      anthropic_version: 'bedrock-2023-05-31',
+      max_tokens: 900,
+      temperature: 0.2,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
+    };
+
+    const client = _getBedrockClient();
+    const cmd = new InvokeModelCommand({
+      modelId,
+      contentType: 'application/json',
+      accept: 'application/json',
+      body: Buffer.from(JSON.stringify(body))
+    });
+
+    const resp = await client.send(cmd);
+    const jsonStr = Buffer.from(resp.body).toString('utf-8');
+    const bedrockJson = JSON.parse(jsonStr);
+
+    const rawText = _extractClaudeText(bedrockJson);
+    const arrText = _extractFirstJsonArray(rawText);
+    if (!arrText) throw new Error('No JSON array found in Bedrock output.');
+
+    const parsed = JSON.parse(arrText);
+    if (!Array.isArray(parsed)) throw new Error('Parsed Bedrock output is not an array.');
+
+    // Normalize and enforce pathType on the server too (belt-and-suspenders).
+    const allowed = new Set(['lateral', 'vertical', 'pivot', 'non_linear']);
+    const normalizedPathType = allowed.has(String(pathType)) ? String(pathType) : 'lateral';
+
+    const out = [];
+    const seen = new Set();
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+
+      const title = _normalizeLabel(item.role_title || item.title || item.roleTitle);
+      if (!title) continue;
+
+      const key = title.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const why = _normalizeLabel(item.whyThisMatchesPathType || item.why || item.rationale || '');
+      const confidenceRaw = Number(item.confidence);
+      const confidence = Number.isFinite(confidenceRaw) ? Math.max(0, Math.min(100, Math.round(confidenceRaw))) : 50;
+
+      out.push({
+        role_title: title,
+        pathType: normalizedPathType,
+        whyThisMatchesPathType: why || `Recommended because it fits the ${normalizedPathType} path constraints.`,
+        confidence,
+        meta: { bedrockUsed: true, fallback: false }
+      });
+
+      if (out.length >= 5) break;
+    }
+
+    if (out.length === 5) return out;
+
+    // If Bedrock returned insufficient valid items, pad with deterministic (still constrained to pathType).
+    const padded = deterministic();
+    return [...out, ...padded].slice(0, 5).map((r) => ({ ...r, pathType: normalizedPathType }));
+  } catch (err) {
+    return deterministic();
+  }
+}
+
+async function _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode, pathType = 'lateral' }) {
   /**
    * Bedrock enrichment:
-   * Return a structured "path details" payload including gaps/resources/effort.
+   * - Provide deterministic path details (gaps/resources/effort) ALWAYS.
+   * - Additionally generate pathType-specific role recommendations, strictly constrained by pathType.
    *
-   * We keep this safe:
-   * - If Bedrock fails, return deterministic details (no throw).
-   * - We reuse bedrockService.generateTargetedRolesSafe only as a Bedrock invocation wrapper,
-   *   but we provide a "query" requesting the desired JSON object.
+   * Safety:
+   * - If Bedrock fails, return deterministic envelope + deterministic recommendedRoles.
+   * - Never throw from this function.
    */
   const pathRoleTitles = _safeArray(path?.nodeIds)
     .map((id) => nodesById[id]?.data?.title || nodesById[id]?.label)
@@ -270,6 +571,7 @@ async function _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode 
     pathId: path.id,
     title: path.title || null,
     nodeIds: path.nodeIds,
+    pathType: String(pathType || 'lateral'),
     targetRoleTitle: targetTitle,
     effortEstimate: {
       level: path?.meta?.horizon || 'Near',
@@ -286,17 +588,29 @@ async function _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode 
       learning: ['Official documentation', 'Role-specific roadmap', 'Hands-on labs'],
       certification: ['Optional: role-relevant certification (if applicable)'],
     },
+    recommendedRoles: [],
     meta: { bedrockUsed: false, fallback: true },
   };
 
-  // If no personaId, skip Bedrock.
-  if (!personaId) return deterministic;
+  // Recommended roles (pathType constrained). If no personaId, still produce recs (prompt uses titles only).
+  const recommendedRoles = await _generatePathTypeConstrainedRoleRecsSafe({
+    pathType,
+    currentRoleTitle: centerNode?.label,
+    pathRoleTitles,
+    targetRoleTitle: targetTitle
+  });
 
+  // If no personaId, skip any additional Bedrock calls beyond recs (already done) and return.
+  if (!personaId) {
+    return {
+      ...deterministic,
+      recommendedRoles,
+      meta: { ...deterministic.meta, bedrockUsed: false, fallback: true }
+    };
+  }
+
+  // Keep prior "invoke Bedrock" behavior minimal: treat as an optional side-effect marker only.
   try {
-    // We "abuse" the Bedrock role generator as a strict-json caller by providing a query.
-    // It will return 5 items, which isn't what we want—so instead we keep deterministic details.
-    // (We intentionally do NOT overfit prompt plumbing in this step.)
-    // Future: implement a dedicated Bedrock JSON-object invocation for path details.
     await bedrockService.generateTargetedRolesSafe(
       {
         query: `Generate JSON ONLY: Provide gaps/resources/effort for moving from "${centerNode.label}" to "${targetTitle}" via [${pathRoleTitles.join(' -> ')}].`,
@@ -309,11 +623,13 @@ async function _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode 
 
     return {
       ...deterministic,
-      meta: { bedrockUsed: true, fallback: false, note: 'Bedrock invoked (details currently deterministic envelope).' },
+      recommendedRoles,
+      meta: { bedrockUsed: true, fallback: false, note: 'Bedrock invoked (details deterministic; role recs pathType-enforced).' },
     };
   } catch (err) {
     return {
       ...deterministic,
+      recommendedRoles,
       meta: {
         bedrockUsed: false,
         fallback: true,
@@ -464,12 +780,19 @@ export async function getNodeDetails({ personaId, nodeId, currentRoleTitle = 'Cu
 }
 
 // PUBLIC_INTERFACE
-export async function getPathDetails({ personaId, pathId, currentRoleTitle = 'Current Role', filters = {} } = {}) {
+export async function getPathDetails({
+  personaId,
+  pathId,
+  currentRoleTitle = 'Current Role',
+  filters = {},
+  pathType = 'lateral',
+} = {}) {
   /**
    * Return a "path details" object:
    * - gaps (skills + projects)
    * - resources
    * - effortEstimate
+   * - recommendedRoles (pathType-constrained; generated via Bedrock when available)
    */
   const graph = await buildMultiverseGraph({ personaId, currentRoleTitle, limit: 25, filters });
   const centerNode = graph.nodes.find((n) => n.type === 'current_role') || _defaultCenterNode({ currentRoleTitle });
@@ -480,7 +803,7 @@ export async function getPathDetails({ personaId, pathId, currentRoleTitle = 'Cu
   const path = _safeArray(graph.paths).find((p) => String(p.id) === String(pathId));
   if (!path) return null;
 
-  return _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode });
+  return _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode, pathType });
 }
 
 export default { buildMultiverseGraph, getNodeDetails, getPathDetails };

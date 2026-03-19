@@ -179,11 +179,16 @@ router.get('/paths/:id', async (req, res) => {
       timeHorizon: req.query?.timeHorizon ? String(req.query.timeHorizon) : undefined,
     };
 
+    // Multiverse prompt control: enforce the selected multiverse path type.
+    // Allowed: lateral | vertical | pivot | non_linear
+    const pathType = req.query?.pathType ? String(req.query.pathType).trim() : 'lateral';
+
     const details = await multiverseExplorerService.getPathDetails({
       personaId,
       pathId,
       currentRoleTitle,
       filters,
+      pathType,
     });
 
     if (!details) {
