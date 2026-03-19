@@ -283,7 +283,15 @@ export async function getOrCreateExploreRecommendationsPool({
     const hasTimeBudget = Number.isFinite(timeBudgetMs) && timeBudgetMs > 0;
 
     try {
-      const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
+      /**
+       * IMPORTANT (bugfix):
+       * Even if downstream Bedrock helpers accept a `timeBudgetMs`, we still enforce a hard timeout here.
+       * Otherwise, the multiverse graph endpoint can exceed its time budget and return skeleton-only output.
+       *
+       * We also attach a catch handler to the underlying Bedrock promise to prevent unhandled rejections
+       * if we time out and stop awaiting it.
+       */
+      const bedrockPromise = generateInitialRecommendationsPersonaDrivenBedrockOnly({
         finalPersona,
         personaId: pid,
         options: {
@@ -295,6 +303,18 @@ export async function getOrCreateExploreRecommendationsPool({
           minCount: 5,
         },
       });
+
+      // Prevent unhandled rejection if we time out.
+      void bedrockPromise.catch(() => null);
+
+      const hardTimeoutMs = hasTimeBudget ? Math.max(150, Math.floor(timeBudgetMs * 0.85)) : 0;
+      const result = await _withTimeout(bedrockPromise, hardTimeoutMs);
+
+      if (!result) {
+        const err = new Error('Bedrock recommendations exceeded time budget.');
+        err.code = 'time_budget_exceeded';
+        throw err;
+      }
 
       const roles = Array.isArray(result?.roles) ? result.roles : [];
 

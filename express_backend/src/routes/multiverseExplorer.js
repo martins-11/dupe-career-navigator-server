@@ -28,6 +28,11 @@ const GraphQuerySchema = z
     personaId: z.string().min(1).optional(),
     currentRoleTitle: z.string().min(1).optional(),
 
+    // Salary filter (USD thousands, canonical)
+    minSalaryUsdK: z.coerce.number().optional(),
+    maxSalaryUsdK: z.coerce.number().optional(),
+
+    // Legacy aliases
     minSalaryLpa: z.coerce.number().optional(),
     maxSalaryLpa: z.coerce.number().optional(),
     minSkillSimilarity: z.coerce.number().min(0).max(100).optional(),
@@ -76,8 +81,8 @@ function _graphCacheKey(q) {
     personaId: q.personaId ? String(q.personaId) : null,
     currentRoleTitle: q.currentRoleTitle ? String(q.currentRoleTitle) : 'Current Role',
     filters: {
-      minSalaryLpa: q.minSalaryLpa ?? null,
-      maxSalaryLpa: q.maxSalaryLpa ?? null,
+      minSalaryUsdK: (q.minSalaryUsdK ?? q.minSalaryLpa) ?? null,
+      maxSalaryUsdK: (q.maxSalaryUsdK ?? q.maxSalaryLpa) ?? null,
       minSkillSimilarity: q.minSkillSimilarity ?? null,
       timeHorizon: q.timeHorizon ?? null,
     },
@@ -172,8 +177,8 @@ router.get('/graph', async (req, res) => {
     const personaId = q.personaId ? String(q.personaId) : null;
     const currentRoleTitle = q.currentRoleTitle ? String(q.currentRoleTitle) : 'Current Role';
     const filters = {
-      minSalaryLpa: q.minSalaryLpa,
-      maxSalaryLpa: q.maxSalaryLpa,
+      minSalaryUsdK: q.minSalaryUsdK ?? q.minSalaryLpa,
+      maxSalaryUsdK: q.maxSalaryUsdK ?? q.maxSalaryLpa,
       minSkillSimilarity: q.minSkillSimilarity,
       timeHorizon: q.timeHorizon,
     };
@@ -209,8 +214,8 @@ router.get('/graph', async (req, res) => {
         personaId,
         currentRoleTitle,
         filtersApplied: {
-          minSalaryLpa: filters.minSalaryLpa ?? null,
-          maxSalaryLpa: filters.maxSalaryLpa ?? null,
+          minSalaryUsdK: (filters.minSalaryUsdK ?? filters.minSalaryLpa) ?? null,
+          maxSalaryUsdK: (filters.maxSalaryUsdK ?? filters.maxSalaryLpa) ?? null,
           minSkillSimilarity: filters.minSkillSimilarity ?? null,
           timeHorizon: filters.timeHorizon ?? null,
           limit: Math.max(3, Math.min(100, Number(limit) || 18)),
@@ -243,8 +248,8 @@ router.get('/graph', async (req, res) => {
         personaId,
         currentRoleTitle,
         filtersApplied: {
-          minSalaryLpa: data.minSalaryLpa ?? null,
-          maxSalaryLpa: data.maxSalaryLpa ?? null,
+          minSalaryUsdK: (data.minSalaryUsdK ?? data.minSalaryLpa) ?? null,
+          maxSalaryUsdK: (data.maxSalaryUsdK ?? data.maxSalaryLpa) ?? null,
           minSkillSimilarity: data.minSkillSimilarity ?? null,
           timeHorizon: data.timeHorizon ?? null,
           limit: Math.max(3, Math.min(100, Number(data.limit) || 18)),

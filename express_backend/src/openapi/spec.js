@@ -2726,18 +2726,18 @@ const openapiDefinition = {
             description: 'Current role title to display as the center node.'
           },
           {
-            name: 'minSalaryLpa',
+            name: 'minSalaryUsdK',
             in: 'query',
             required: false,
             schema: { type: 'number' },
-            description: 'Minimum salary (LPA) filter.'
+            description: 'Minimum salary filter in USD thousands (k USD). Example: 120 means $120k.'
           },
           {
-            name: 'maxSalaryLpa',
+            name: 'maxSalaryUsdK',
             in: 'query',
             required: false,
             schema: { type: 'number' },
-            description: 'Maximum salary (LPA) filter.'
+            description: 'Maximum salary filter in USD thousands (k USD). Example: 220 means $220k.'
           },
           {
             name: 'minSkillSimilarity',
@@ -2825,8 +2825,8 @@ const openapiDefinition = {
         parameters: [
           { name: 'personaId', in: 'query', required: false, schema: { type: 'string' } },
           { name: 'currentRoleTitle', in: 'query', required: false, schema: { type: 'string' } },
-          { name: 'minSalaryLpa', in: 'query', required: false, schema: { type: 'number' } },
-          { name: 'maxSalaryLpa', in: 'query', required: false, schema: { type: 'number' } },
+          { name: 'minSalaryUsdK', in: 'query', required: false, schema: { type: 'number' } },
+          { name: 'maxSalaryUsdK', in: 'query', required: false, schema: { type: 'number' } },
           { name: 'minSkillSimilarity', in: 'query', required: false, schema: { type: 'number', minimum: 0, maximum: 100 } },
           { name: 'timeHorizon', in: 'query', required: false, schema: { type: 'string', enum: ['Near', 'Mid', 'Far'] } },
           { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 3, maximum: 100 } }

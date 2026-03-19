@@ -31,46 +31,45 @@ function _safeArray(v) {
   return Array.isArray(v) ? v : [];
 }
 
-function _parseSalaryRangeToLpaMidpoint(salaryRange) {
+function _parseSalaryRangeToUsdKMidpoint(salaryRange) {
   /**
-   * Parses a salary string into an approximate midpoint LPA number.
+   * Parses a salary string into an approximate midpoint in USD thousands (k USD).
    *
    * Supported examples:
-   * - "₹18–₹30 LPA"
-   * - "18-30 LPA"
-   * - "$130k-$210k" (best-effort -> converts to LPA assuming USD_TO_INR)
+   * - "$130k–$210k"
+   * - "$130000-$210000"
+   * - "USD 130k to 210k"
+   *
+   * Legacy India formats (₹ / LPA) are treated as unparseable here (return null),
+   * because this endpoint's filter semantics are USD $k.
    *
    * Returns null if cannot parse.
    */
   if (!salaryRange) return null;
   const s = String(salaryRange).trim();
 
-  // INR LPA-like formats: capture two numbers.
-  const inrMatch = s.match(/(\d+(?:\.\d+)?)\s*(?:–|-|to)\s*(\d+(?:\.\d+)?).*(?:LPA|lpa)/);
-  if (inrMatch) {
-    const a = Number(inrMatch[1]);
-    const b = Number(inrMatch[2]);
-    if (Number.isFinite(a) && Number.isFinite(b)) return (a + b) / 2;
-  }
+  // Legacy India formats: do not convert (we do not want mixed-unit filtering).
+  if (/(₹|inr|lpa|lakhs)/i.test(s)) return null;
 
-  // USD k-range formats: "$130k-$210k" (approx -> INR -> LPA)
-  const usdMatch = s.match(/\$?\s*(\d+(?:\.\d+)?)\s*k?\s*(?:–|-|to)\s*\$?\s*(\d+(?:\.\d+)?)\s*k/i);
-  if (usdMatch) {
-    const aK = Number(usdMatch[1]);
-    const bK = Number(usdMatch[2]);
-    if (!Number.isFinite(aK) || !Number.isFinite(bK)) return null;
+  const m = s.match(/\$?\s*(\d+(?:\.\d+)?)\s*([kmb])?\s*(?:–|-|to)\s*\$?\s*(\d+(?:\.\d+)?)\s*([kmb])?/i);
+  if (!m) return null;
 
-    const midUsd = ((aK + bK) / 2) * 1000;
-    const usdToInrRaw = Number(process.env.USD_TO_INR || 83);
-    const usdToInr = Number.isFinite(usdToInrRaw) && usdToInrRaw > 0 ? usdToInrRaw : 83;
+  const a = Number(m[1]);
+  const b = Number(m[3]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
 
-    // USD -> INR -> LPA (1 LPA = 100,000 INR)
-    const midInr = midUsd * usdToInr;
-    const midLpa = midInr / 100000;
-    return Number.isFinite(midLpa) ? midLpa : null;
-  }
+  const mult = (suffix) => {
+    const t = String(suffix || '').toLowerCase();
+    if (t === 'k') return 1;
+    if (t === 'm') return 1000;
+    if (t === 'b') return 1000000;
+    return 1;
+  };
 
-  return null;
+  const aK = a * mult(m[2]);
+  const bK = b * mult(m[4]);
+
+  return (aK + bK) / 2;
 }
 
 function _roleToNode(role, { isCenter = false, level = 1, score = null } = {}) {
@@ -99,8 +98,8 @@ function _roleToNode(role, { isCenter = false, level = 1, score = null } = {}) {
       requiredSkills,
       salaryRange,
       experienceRange,
-      // This is an approximate computed field used for filtering/sorting.
-      salaryLpaMid: _parseSalaryRangeToLpaMidpoint(salaryRange),
+      // This is an approximate computed field used for filtering/sorting (USD thousands).
+      salaryUsdKMid: _parseSalaryRangeToUsdKMidpoint(salaryRange),
       // Compatibility / similarity-like score (0-100) if we have it.
       skillSimilarity: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : null
     }
@@ -155,16 +154,19 @@ async function _loadExploreRecommendationsPoolRoles(personaId) {
   }
 }
 
-function _applyFiltersToNodes(nodes, { minSalaryLpa = null, maxSalaryLpa = null, minSkillSimilarity = null } = {}) {
-  const minS = minSalaryLpa != null ? Number(minSalaryLpa) : null;
-  const maxS = maxSalaryLpa != null ? Number(maxSalaryLpa) : null;
+function _applyFiltersToNodes(
+  nodes,
+  { minSalaryUsdK = null, maxSalaryUsdK = null, minSkillSimilarity = null } = {}
+) {
+  const minS = minSalaryUsdK != null ? Number(minSalaryUsdK) : null;
+  const maxS = maxSalaryUsdK != null ? Number(maxSalaryUsdK) : null;
   const minSim = minSkillSimilarity != null ? Number(minSkillSimilarity) : null;
 
   return nodes.filter((n) => {
     // Never filter out center node.
     if (n?.type === 'current_role') return true;
 
-    const mid = n?.data?.salaryLpaMid;
+    const mid = n?.data?.salaryUsdKMid;
     if (Number.isFinite(minS) && Number.isFinite(mid) && mid < minS) return false;
     if (Number.isFinite(maxS) && Number.isFinite(mid) && mid > maxS) return false;
 
@@ -204,9 +206,9 @@ function _buildDetailsForNode(node, { centerNode }) {
   else transitionTimeline = '24–48 months';
 
   // Average salary: use midpoint if available, otherwise pass through the range.
-  const salaryMid = node?.data?.salaryLpaMid;
+  const salaryMid = node?.data?.salaryUsdKMid;
   const averageSalary = Number.isFinite(salaryMid)
-    ? `~₹${Math.round(salaryMid)} LPA (midpoint)`
+    ? `~$${Math.round(salaryMid)}k (midpoint)`
     : node?.data?.salaryRange || null;
 
   return {
@@ -246,7 +248,11 @@ const GraphQuerySchema = z
     persona_id: z.string().min(1).optional(),
 
     currentRoleTitle: z.string().min(1).optional(),
-    // Optional filters
+    // Optional filters (USD thousands, canonical)
+    minSalaryUsdK: z.coerce.number().optional(),
+    maxSalaryUsdK: z.coerce.number().optional(),
+
+    // Legacy aliases (kept for backward compatibility)
     minSalaryLpa: z.coerce.number().optional(),
     maxSalaryLpa: z.coerce.number().optional(),
     minSkillSimilarity: z.coerce.number().min(0).max(100).optional(),
@@ -343,9 +349,13 @@ async function _buildMindmapGraph(q) {
     .filter((n) => n?.id && n?.label);
 
   // Apply node-level filters (salary/similarity) early.
+  // Normalize salary filter aliases (USD thousands is canonical).
+  const minSalaryUsdK = q.minSalaryUsdK ?? q.minSalaryLpa;
+  const maxSalaryUsdK = q.maxSalaryUsdK ?? q.maxSalaryLpa;
+
   const filteredCandidates = _applyFiltersToNodes([centerNode, ...allCandidateNodes], {
-    minSalaryLpa: q.minSalaryLpa,
-    maxSalaryLpa: q.maxSalaryLpa,
+    minSalaryUsdK,
+    maxSalaryUsdK,
     minSkillSimilarity: q.minSkillSimilarity
   }).filter((n) => n.type !== 'current_role');
 
@@ -462,8 +472,8 @@ async function _buildMindmapGraph(q) {
     meta: {
       center: { id: centerNode.id, label: centerNode.label },
       filtersApplied: {
-        minSalaryLpa: q.minSalaryLpa ?? null,
-        maxSalaryLpa: q.maxSalaryLpa ?? null,
+        minSalaryUsdK: (q.minSalaryUsdK ?? q.minSalaryLpa) ?? null,
+        maxSalaryUsdK: (q.maxSalaryUsdK ?? q.maxSalaryLpa) ?? null,
         minSkillSimilarity: q.minSkillSimilarity ?? null,
         timeHorizon: q.timeHorizon ?? null,
         limit
@@ -553,8 +563,11 @@ router.post('/graph', async (req, res) => {
       userId: String(userId),
       personaId: personaId ? String(personaId) : undefined,
       currentRoleTitle: currentRoleTitle ? String(currentRoleTitle) : undefined,
-      minSalaryLpa: Number.isFinite(filters?.salaryMin) ? filters.salaryMin : undefined,
-      maxSalaryLpa: Number.isFinite(filters?.salaryMax) ? filters.salaryMax : undefined,
+
+      // Frontend sends salaryMin/salaryMax as USD $k values.
+      minSalaryUsdK: Number.isFinite(filters?.salaryMin) ? filters.salaryMin : undefined,
+      maxSalaryUsdK: Number.isFinite(filters?.salaryMax) ? filters.salaryMax : undefined,
+
       minSkillSimilarity: Number.isFinite(filters?.skillSimilarityMin) ? filters.skillSimilarityMin : undefined,
       timeHorizon
     };

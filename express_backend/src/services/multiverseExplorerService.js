@@ -135,9 +135,10 @@ function _buildEdge({ from, to, label = null, timeHorizon = null }) {
   };
 }
 
-function _applyFiltersToNodes(nodes, { minSalaryLpa, maxSalaryLpa, minSkillSimilarity } = {}) {
-  const minS = minSalaryLpa != null ? Number(minSalaryLpa) : null;
-  const maxS = maxSalaryLpa != null ? Number(maxSalaryLpa) : null;
+function _applyFiltersToNodes(nodes, { minSalaryUsdK, maxSalaryUsdK, minSalaryLpa, maxSalaryLpa, minSkillSimilarity } = {}) {
+  // Canonical: USD thousands (k). Legacy aliases are accepted.
+  const minS = (minSalaryUsdK ?? minSalaryLpa) != null ? Number(minSalaryUsdK ?? minSalaryLpa) : null;
+  const maxS = (maxSalaryUsdK ?? maxSalaryLpa) != null ? Number(maxSalaryUsdK ?? maxSalaryLpa) : null;
   const minSim = minSkillSimilarity != null ? Number(minSkillSimilarity) : null;
 
   return nodes.filter((n) => {
@@ -685,6 +686,8 @@ export async function buildMultiverseGraph({
 
   // Apply filters.
   const filtered = _applyFiltersToNodes([centerNode, ...candidates], {
+    minSalaryUsdK: filters?.minSalaryUsdK,
+    maxSalaryUsdK: filters?.maxSalaryUsdK,
     minSalaryLpa: filters?.minSalaryLpa,
     maxSalaryLpa: filters?.maxSalaryLpa,
     minSkillSimilarity: filters?.minSkillSimilarity,
@@ -766,8 +769,8 @@ export async function buildMultiverseGraph({
       personaId: personaId || null,
       center: { id: centerNode.id, label: centerNode.label },
       filtersApplied: {
-        minSalaryLpa: filters?.minSalaryLpa ?? null,
-        maxSalaryLpa: filters?.maxSalaryLpa ?? null,
+        minSalaryUsdK: (filters?.minSalaryUsdK ?? filters?.minSalaryLpa) ?? null,
+        maxSalaryUsdK: (filters?.maxSalaryUsdK ?? filters?.maxSalaryLpa) ?? null,
         minSkillSimilarity: filters?.minSkillSimilarity ?? null,
         timeHorizon: timeHorizon ?? null,
         limit: maxNodes,
