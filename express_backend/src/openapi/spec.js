@@ -209,6 +209,32 @@ const openapiDefinition = {
         required: ['personaId', 'versions']
       },
 
+      PersonaDraftArtifact: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Latest saved persona draft artifact (DB-backed when available; memory fallback otherwise).',
+        properties: {
+          personaId: { type: 'string', format: 'uuid' },
+          draftId: { type: 'string', format: 'uuid', nullable: true },
+          draftJson: { type: 'object', additionalProperties: true },
+          updatedAt: { type: 'string', format: 'date-time' }
+        },
+        required: ['personaId', 'draftJson', 'updatedAt']
+      },
+
+      PersonaFinalArtifact: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Latest saved finalized persona artifact (DB-backed when available; memory fallback otherwise).',
+        properties: {
+          personaId: { type: 'string', format: 'uuid' },
+          finalId: { type: 'string', format: 'uuid', nullable: true },
+          finalJson: { type: 'object', additionalProperties: true },
+          updatedAt: { type: 'string', format: 'date-time' }
+        },
+        required: ['personaId', 'finalJson', 'updatedAt']
+      },
+
       UploadFileResult: {
         type: 'object',
         additionalProperties: false,
@@ -2004,6 +2030,90 @@ const openapiDefinition = {
       }
     },
 
+    '/personas/{id}/draft/latest': {
+      get: {
+        tags: ['Personas'],
+        summary: 'Get latest saved persona draft artifact',
+        description:
+          'Returns the latest saved draft JSON for the persona (backed by MySQL persona_drafts when configured, otherwise memory).',
+        parameters: [{ $ref: '#/components/parameters/PersonaIdParam' }],
+        responses: {
+          200: {
+            description: 'Latest saved draft artifact',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PersonaDraftArtifact' } } }
+          },
+          404: {
+            description: 'Persona or draft not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable (if configured but unreachable)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      },
+      put: {
+        tags: ['Personas'],
+        summary: 'Save edited persona draft JSON',
+        description:
+          'Persists edited draft JSON for the persona. Request body may be {draftJson: object} or a raw JSON object (draft itself).',
+        parameters: [{ $ref: '#/components/parameters/PersonaIdParam' }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: true
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Saved draft artifact',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PersonaDraftArtifact' } } }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Persona not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable (if configured but unreachable)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/personas/{id}/final/latest': {
+      get: {
+        tags: ['Personas'],
+        summary: 'Get latest finalized persona artifact',
+        description:
+          'Returns the latest finalized persona JSON for the persona (backed by MySQL persona_final when configured, otherwise memory).',
+        parameters: [{ $ref: '#/components/parameters/PersonaIdParam' }],
+        responses: {
+          200: {
+            description: 'Latest finalized persona artifact',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/PersonaFinalArtifact' } } }
+          },
+          404: {
+            description: 'Persona or final artifact not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'DB unavailable (if configured but unreachable)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
     // ----------------------------
     // Career Navigator /api routes
     // ----------------------------
@@ -2252,25 +2362,36 @@ const openapiDefinition = {
     '/api/roles/search': {
       get: {
         tags: ['Roles'],
-        summary: 'Search roles catalog',
+        summary: 'Search roles catalog (safe-fail)',
         description:
-          'Search roles by query string and optional filters (industry, salary_range). Returns [] with 200 when no roles match.',
+          'Search roles by query string and optional persona context. IMPORTANT: This endpoint is designed to fail safely by returning an empty array (HTTP 200) on internal errors/upstream failures, to protect the Explore UI.',
         parameters: [
           { name: 'q', in: 'query', required: false, schema: { type: 'string' } },
+          {
+            name: 'personaId',
+            in: 'query',
+            required: false,
+            schema: { type: 'string' },
+            description: 'Optional persona identifier used for persona-driven exploration search.'
+          },
+          {
+            name: 'persona_id',
+            in: 'query',
+            required: false,
+            schema: { type: 'string' },
+            description: 'Legacy alias of personaId.'
+          },
           { name: 'industry', in: 'query', required: false, schema: { type: 'string' } },
           { name: 'salary_range', in: 'query', required: false, schema: { type: 'string' } },
           { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200 } }
         ],
         responses: {
           200: {
-            description: 'Roles search results',
+            description:
+              'Roles search results (array). Note: on internal errors this endpoint returns [] with HTTP 200 (safe-fail contract).',
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/RolesSearchResponse' } }
             }
-          },
-          500: {
-            description: 'Internal error',
-            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
       }
@@ -2281,26 +2402,18 @@ const openapiDefinition = {
         tags: ['Roles'],
         summary: 'List distinct industries for role filtering',
         description:
-          'Returns distinct industry values derived from the currently available roles catalog (DB when available, otherwise seed catalog).',
+          'Returns distinct industry values derived from the currently available roles catalog (DB when available, otherwise seed catalog). IMPORTANT: always returns a JSON array of strings (and returns [] with HTTP 200 on error).',
         responses: {
           200: {
-            description: 'Industries list',
+            description: 'Industries list (array of strings)',
             content: {
               'application/json': {
                 schema: {
-                  type: 'object',
-                  additionalProperties: false,
-                  properties: {
-                    industries: { type: 'array', items: { type: 'string' } }
-                  },
-                  required: ['industries']
+                  type: 'array',
+                  items: { type: 'string' }
                 }
               }
             }
-          },
-          500: {
-            description: 'Internal error',
-            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
       }
@@ -2311,26 +2424,40 @@ const openapiDefinition = {
         tags: ['Roles'],
         summary: 'List distinct skills for role filtering',
         description:
-          'Returns distinct skill values derived from the currently available roles catalog (DB when available, otherwise seed catalog).',
+          'Returns distinct skill values derived from the currently available roles catalog (DB when available, otherwise seed catalog). IMPORTANT: always returns a JSON array of strings (and returns [] with HTTP 200 on error).',
         responses: {
           200: {
-            description: 'Skills list',
+            description: 'Skills list (array of strings)',
             content: {
               'application/json': {
                 schema: {
-                  type: 'object',
-                  additionalProperties: false,
-                  properties: {
-                    skills: { type: 'array', items: { type: 'string' } }
-                  },
-                  required: ['skills']
+                  type: 'array',
+                  items: { type: 'string' }
                 }
               }
             }
-          },
-          500: {
-            description: 'Internal error',
-            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/roles/titles': {
+      get: {
+        tags: ['Roles'],
+        summary: 'List distinct role titles for role filtering',
+        description:
+          'Canonical titles endpoint for the Explore UI. IMPORTANT: always returns a JSON array of strings (and returns [] with HTTP 200 on error).',
+        responses: {
+          200: {
+            description: 'Role titles list (array of strings)',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'array',
+                  items: { type: 'string' }
+                }
+              }
+            }
           }
         }
       }
@@ -2339,9 +2466,9 @@ const openapiDefinition = {
     '/api/roles/job-titles': {
       get: {
         tags: ['Roles'],
-        summary: 'List distinct job titles for role filtering (optional)',
+        summary: 'List distinct job titles for role filtering (legacy envelope)',
         description:
-          'Returns distinct job title values derived from the currently available roles catalog (DB when available, otherwise seed catalog).',
+          'Backward-compatible legacy endpoint. Returns an object envelope { jobTitles: string[] }. Prefer /api/roles/titles for the canonical array response.',
         responses: {
           200: {
             description: 'Job titles list',

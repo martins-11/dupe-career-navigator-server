@@ -64,6 +64,112 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+/**
+ * PUBLIC_INTERFACE
+ * GET /personas/:id/draft/latest
+ *
+ * Returns the latest saved draft blob for a personaId.
+ *
+ * Notes:
+ * - This reads from personasRepo.getDraft(), which is backed by MySQL when configured
+ *   (persona_drafts table) and by memory repo otherwise.
+ * - Returns 404 when persona does not exist OR no draft exists yet.
+ */
+router.get('/:id/draft/latest', async (req, res) => {
+  try {
+    const personaId = String(req.params.id || '').trim();
+    if (!personaId) return res.status(400).json({ error: 'validation_error', message: 'personaId is required.' });
+
+    // Ensure persona exists (consistent with other persona routes).
+    const existing = await personasRepo.getPersonaById(personaId);
+    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+
+    const draft = await personasRepo.getDraft(personaId);
+    if (!draft || !draft.draftJson) {
+      return res.status(404).json({ error: 'draft_not_found', message: 'No saved draft exists for this persona yet.' });
+    }
+
+    return res.json(draft);
+  } catch (err) {
+    return handleRepoError(res, err);
+  }
+});
+
+/**
+ * PUBLIC_INTERFACE
+ * PUT /personas/:id/draft/latest
+ *
+ * Persists edited draft JSON for the persona.
+ *
+ * Request body:
+ * - Accepts either:
+ *   - { draftJson: <object> }
+ *   - or a raw JSON object representing the draft itself (backward-compatible convenience)
+ *
+ * Response:
+ * - { personaId, draftId?, draftJson, updatedAt }
+ */
+router.put('/:id/draft/latest', async (req, res) => {
+  try {
+    const personaId = String(req.params.id || '').trim();
+    if (!personaId) return res.status(400).json({ error: 'validation_error', message: 'personaId is required.' });
+
+    // Ensure persona exists (consistent with other persona routes).
+    const existing = await personasRepo.getPersonaById(personaId);
+    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+
+    const body = req.body ?? {};
+    const draftJson =
+      body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'draftJson')
+        ? body.draftJson
+        : body;
+
+    if (!draftJson || typeof draftJson !== 'object' || Array.isArray(draftJson)) {
+      return res.status(400).json({
+        error: 'validation_error',
+        message: 'draftJson must be a JSON object.'
+      });
+    }
+
+    const saved = await personasRepo.saveDraft(personaId, draftJson);
+    if (!saved) return res.status(500).json({ error: 'internal_server_error', message: 'Failed to save draft.' });
+
+    return res.status(200).json(saved);
+  } catch (err) {
+    return handleRepoError(res, err);
+  }
+});
+
+/**
+ * PUBLIC_INTERFACE
+ * GET /personas/:id/final/latest
+ *
+ * Returns the latest saved finalized persona artifact for a personaId.
+ * This is backed by MySQL `persona_final` when configured, and by memory otherwise.
+ */
+router.get('/:id/final/latest', async (req, res) => {
+  try {
+    const personaId = String(req.params.id || '').trim();
+    if (!personaId) return res.status(400).json({ error: 'validation_error', message: 'personaId is required.' });
+
+    // Ensure persona exists (consistent with other persona routes).
+    const existing = await personasRepo.getPersonaById(personaId);
+    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+
+    const finalBlob = await personasRepo.getFinal(personaId);
+    if (!finalBlob || !finalBlob.finalJson) {
+      return res.status(404).json({
+        error: 'final_not_found',
+        message: 'No finalized persona exists for this persona yet.'
+      });
+    }
+
+    return res.json(finalBlob);
+  } catch (err) {
+    return handleRepoError(res, err);
+  }
+});
+
 router.put('/:id', async (req, res) => {
   const parsed = PersonaUpdateRequest.safeParse(req.body);
   if (!parsed.success) {
@@ -93,6 +199,22 @@ router.put('/:id', async (req, res) => {
       createdVersion = await personasRepo.createPersonaVersion(req.params.id, {
         personaJson: parsed.data.personaJson
       });
+
+      /**
+       * Draft persistence alignment:
+       * The updated Draft Persona UI saves edits via PUT /api/personas/:id.
+       * To ensure GET /personas/:id/draft/latest reflects those edits (without relying on localStorage),
+       * we also persist the same JSON into the draft store (best-effort).
+       *
+       * IMPORTANT: do not fail the request if draft persistence fails; version persistence remains
+       * the authoritative history for edits.
+       */
+      try {
+        await personasRepo.saveDraft(req.params.id, parsed.data.personaJson);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[personas][PUT] saveDraft best-effort failed:', e);
+      }
     }
 
     return res.json({ persona: updated, createdVersion });
