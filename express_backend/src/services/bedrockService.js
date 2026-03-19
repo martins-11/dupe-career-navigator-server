@@ -17,13 +17,17 @@ import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedroc
  * Notes:
  * - This service is designed to return STRICT JSON only.
  * - We defensively parse and validate returned content because LLMs can still hallucinate wrappers.
+ *
+ * Currency policy (app-wide):
+ * - Prompts and deterministic fallbacks are USD-based.
+ * - We do NOT attempt to convert legacy INR/LPA strings; we preserve them if encountered.
  */
 
 /**
  * Default model id (per user_input_ref):
  * - Prefer Claude 3.5 Sonnet base model id.
  * - Can be overridden via BEDROCK_ROLE_MODEL_ID to use a region-specific inference profile ARN/ID
- *   (e.g., a regional Claude 3 Haiku ARN) depending on Bedrock account/region configuration.
+ *   depending on Bedrock account/region configuration.
  */
 const DEFAULT_MODEL_ID = 'anthropic.claude-3-5-sonnet-20240620-v1:0';
 
@@ -162,9 +166,7 @@ function _extractJsonArrayFromText(text) {
    * Strip common Claude "XML-ish" wrappers (Bedrock/Anthropic sometimes emits these even when asked not to).
    * We keep this conservative: remove only known tags, leaving inner content intact.
    */
-  trimmed = trimmed
-    .replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '')
-    .trim();
+  trimmed = trimmed.replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '').trim();
 
   // Try parsing the whole payload as JSON.
   try {
@@ -181,7 +183,7 @@ function _extractJsonArrayFromText(text) {
           return {
             array: parsed[k],
             extractedText: JSON.stringify(parsed[k]),
-            parseError: null
+            parseError: null,
           };
         }
       }
@@ -210,8 +212,8 @@ function _extractJsonArrayFromText(text) {
  *
  * Why this exists:
  * - Claude may return an array of role objects that CONTAINS nested arrays like `key_responsibilities`.
- * - A naive "first balanced [...]" extraction can accidentally select the nested string[] instead
- *   of the top-level object[].
+ * - A naive "first balanced [...]" extraction can accidentally select the nested string[]
+ *   instead of the top-level object[].
  *
  * Strategy:
  * - Enumerate all balanced JSON array substrings in the cleaned response.
@@ -232,9 +234,7 @@ function _extractRolesJsonArrayFromText(text) {
     trimmed = fenced[1].trim();
   }
 
-  trimmed = trimmed
-    .replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '')
-    .trim();
+  trimmed = trimmed.replace(/<\/?(thinking|analysis|answer|final|output|response)\b[^>]*>/gi, '').trim();
 
   // If the whole payload is parseable JSON, prefer that.
   try {
@@ -291,7 +291,7 @@ function _extractRolesJsonArrayFromText(text) {
           escape = false;
           continue;
         }
-        if (ch === '\\\\') {
+        if (ch === '\\') {
           escape = true;
           continue;
         }
@@ -339,9 +339,13 @@ function _extractRolesJsonArrayFromText(text) {
         if (!isArrayOfObjects) return null;
 
         // Additional guard: at least one element should have role-like keys.
-        const roleLikeKeys = ['title', 'role_title', 'industry', 'salary_lpa_range', 'salary_range', 'required_skills'];
-        const looksRoleLike = parsed.some((o) =>
-          roleLikeKeys.reduce((n, k) => (Object.prototype.hasOwnProperty.call(o, k) ? n + 1 : n), 0) >= 2
+        const roleLikeKeys = ['title', 'role_title', 'industry', 'salary_range', 'required_skills'];
+        const looksRoleLike = parsed.some(
+          (o) =>
+            roleLikeKeys.reduce(
+              (n, k) => (Object.prototype.hasOwnProperty.call(o, k) ? n + 1 : n),
+              0
+            ) >= 2
         );
 
         if (looksRoleLike) return { parsed, text: synthesized };
@@ -406,7 +410,6 @@ function _extractRolesJsonArrayFromText(text) {
     'role_title',
     'roleTitle',
     'industry',
-    'salary_lpa_range',
     'salary_range',
     'salaryRange',
     'experience_range',
@@ -416,7 +419,7 @@ function _extractRolesJsonArrayFromText(text) {
     'skillsRequired',
     'key_responsibilities',
     'keyResponsibilities',
-    'description'
+    'description',
   ]);
 
   const scoreArrayCandidate = (arr) => {
@@ -443,25 +446,13 @@ function _extractRolesJsonArrayFromText(text) {
       }
     }
 
-    /**
-     * Prefer the top-level array-of-role-objects.
-     *
-     * Authoritative failure mode:
-     * - Substring scanning finds *balanced* nested arrays like key_responsibilities (string[])
-     * - If scoring isn't decisive enough, we can still pick the nested array
-     *
-     * Hardening:
-     * - If the sample is mostly strings and contains no objects, treat as a nested list and
-     *   massively penalize it.
-     * - Strongly reward arrays where most elements look like role objects.
-     */
+    // If it's clearly a string[] (nested responsibilities/skills), avoid selecting it.
+    if (objectCount === 0 && stringCount > 0) return -100000;
+
     const sampleSize = sample.length || 1;
     const objectRatio = objectCount / sampleSize;
     const roleLikeRatio = roleLikeObjectCount / sampleSize;
     const stringRatio = stringCount / sampleSize;
-
-    // If it's clearly a string[] (nested responsibilities/skills), avoid selecting it.
-    if (objectCount === 0 && stringCount > 0) return -100000;
 
     let score = 0;
 
@@ -555,11 +546,11 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
   /**
    * Normalize into a stable API shape used by /api/roles/search.
    *
-   * Day 3 required per user_input_ref:
+   * Required fields:
    * - description: 2-sentence summary
    * - key_responsibilities: exactly 3 tasks
    * - experience_range: realistic string (e.g., "3-5 years")
-   * - salary_range: localized, realistic market data (based on persona industry if possible)
+   * - salary_range: realistic USD range (e.g., "$120k–$180k")
    * - required_skills: 5-8 skills (mix of technical + soft)
    */
   const out = [];
@@ -576,7 +567,7 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
     const keyResponsibilities = _asStringArray(r.key_responsibilities);
     const requiredSkills = _asStringArray(r.required_skills);
 
-    // Minimum validation to keep UI stable; we allow some fields to be empty but try hard to enforce Day 3.
+    // Minimum validation to keep UI stable; we allow some fields to be empty but try hard to enforce contract.
     if (!title || !industry || !salaryRange) continue;
     if (requiredSkills.length < 5 || requiredSkills.length > 10) continue;
 
@@ -604,7 +595,7 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
       skills_required: requiredSkills,
       salary_range: salaryRange,
       match_metadata: { source: 'bedrock' },
-      is_targetable: true
+      is_targetable: true,
     });
   }
 
@@ -614,7 +605,14 @@ function _validateAndNormalizeGeneratedRoles(parsed) {
 function _extractPersonaProficiencies(finalizedPersona) {
   // Supports common shapes for "FinalizedPersona skills + proficiencies".
   const p = finalizedPersona && typeof finalizedPersona === 'object' ? finalizedPersona : {};
-  const candidates = [p.skills_with_proficiency, p.skillsWithProficiency, p.user_skills, p.userSkills, p.skills, p.proficiencies];
+  const candidates = [
+    p.skills_with_proficiency,
+    p.skillsWithProficiency,
+    p.user_skills,
+    p.userSkills,
+    p.skills,
+    p.proficiencies,
+  ];
 
   const out = [];
   for (const c of candidates) {
@@ -639,10 +637,7 @@ function _extractPersonaProficiencies(finalizedPersona) {
 }
 
 /**
- * Build a strict-JSON prompt per Day 3 acceptance criteria.
- * - "Global Recruitment Expert" system behavior
- * - inject FinalizedPersona (skills + proficiencies) for better targeting
- * - request new schema fields for the Explore UI
+ * Build a strict-JSON prompt for targeted role generation (USD).
  */
 function _buildStrictJsonPrompt(userPersona) {
   const up = userPersona && typeof userPersona === 'object' ? userPersona : {};
@@ -703,7 +698,9 @@ function _buildStrictJsonPrompt(userPersona) {
     .map((s) => {
       if (!s || typeof s !== 'object') return null;
       const name = _normStr(s.name || s.skill || s.skill_name || s.skillName || '');
-      const prof = Number(s.proficiency ?? s.proficiency_percent ?? s.proficiencyPercent ?? s.percent ?? s.score);
+      const prof = Number(
+        s.proficiency ?? s.proficiency_percent ?? s.proficiencyPercent ?? s.percent ?? s.score
+      );
       if (!name || !Number.isFinite(prof)) return null;
       return { name, proficiency: Math.max(0, Math.min(100, Math.round(prof))) };
     })
@@ -720,19 +717,14 @@ function _buildStrictJsonPrompt(userPersona) {
       : 'N/A';
 
   const personaIndustry =
-    _normStr(
-      personaObj?.industry ||
-        personaObj?.profile?.industry ||
-        up.industry ||
-        up.personaIndustry ||
-        ''
-    ) || 'N/A';
+    _normStr(personaObj?.industry || personaObj?.profile?.industry || up.industry || up.personaIndustry || '') ||
+    'N/A';
 
   const queryLine = query ? `"${query}"` : 'N/A';
 
   return [
-    'You are a Global Recruitment Expert for the Indian job market.',
-    'You know realistic job titles, responsibilities, required skills, and compensation bands in ₹ LPA.',
+    'You are a Global Recruitment Expert.',
+    'You know realistic job titles, responsibilities, required skills, and compensation bands in USD.',
     '',
     'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT):',
     '1) Output MUST be valid JSON (RFC 8259).',
@@ -751,7 +743,7 @@ function _buildStrictJsonPrompt(userPersona) {
     '',
     'TASK:',
     requestType === 'suggested'
-      ? 'Generate EXACTLY 5 realistic job roles that fit this persona and are common in India today.'
+      ? 'Generate EXACTLY 5 realistic job roles that fit this persona and are common in the US today.'
       : 'Generate EXACTLY 5 realistic job roles that match BOTH the persona and the search query intent.',
     '',
     'SCHEMA (MUST MATCH EXACTLY):',
@@ -761,7 +753,7 @@ function _buildStrictJsonPrompt(userPersona) {
     '- "description": string (EXACTLY 2 sentences; role-specific; no bullet lists)',
     '- "key_responsibilities": string[] (EXACTLY 3 items; each item is 8–20 words; no trailing punctuation-only)',
     '- "experience_range": string (realistic; e.g., "2-4 years" or "5-8 years")',
-    '- "salary_range": string (MUST include ₹ and "LPA"; realistic; e.g., "₹18–₹30 LPA")',
+    '- "salary_range": string (MUST be in USD; include "$"; realistic; e.g., "$120k–$180k")',
     '- "required_skills": string[] (6–8 UNIQUE items; concrete skills; mix technical + soft; no duplicates)',
     '',
     'UNIQUENESS RULES (CRITICAL):',
@@ -773,11 +765,11 @@ function _buildStrictJsonPrompt(userPersona) {
     '- Each object has ALL required keys and values are non-empty strings/arrays.',
     '- key_responsibilities length is exactly 3 for every role.',
     '- required_skills length is between 6 and 8 for every role.',
-    '- salary_range contains both ₹ and LPA for every role.',
+    '- salary_range contains $ for every role.',
     '- Titles are unique (case-insensitive).',
     '',
     'OUTPUT:',
-    'Return ONLY the JSON array.'
+    'Return ONLY the JSON array.',
   ].join('\n');
 }
 
@@ -812,7 +804,7 @@ function _getBedrockClient() {
     );
     err.code = 'missing_aws_region';
     err.details = {
-      tried: ['BEDROCK_REGION', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AMAZON_REGION', 'AWS_SDK_REGION']
+      tried: ['BEDROCK_REGION', 'AWS_REGION', 'AWS_DEFAULT_REGION', 'AMAZON_REGION', 'AWS_SDK_REGION'],
     };
     throw err;
   }
@@ -825,10 +817,9 @@ function _getBedrockClient() {
 }
 
 /**
- * Fallback generator: returns exactly 5 hardcoded roles in the Bedrock JSON shape:
- * [{ title, industry, salary_range, required_skills }]
+ * Fallback generator: returns exactly 5 hardcoded roles in the Bedrock JSON shape.
  *
- * This is required as a safety net for Bedrock throughput errors so Day 3 UI can be verified.
+ * This is required as a safety net for Bedrock throughput errors so UI can be verified.
  */
 function _fallbackBedrockJsonRoles() {
   return [
@@ -840,11 +831,11 @@ function _fallbackBedrockJsonRoles() {
       key_responsibilities: [
         'Deliver full-stack features from design to production',
         'Design and integrate APIs and data models',
-        'Improve performance, testing, and developer tooling'
+        'Improve performance, testing, and developer tooling',
       ],
       experience_range: '3-5 years',
-      salary_range: '₹99.6–₹141.1 LPA',
-      required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git', 'Communication']
+      salary_range: '$120k–$170k',
+      required_skills: ['JavaScript', 'React', 'Node.js', 'REST APIs', 'SQL', 'Git', 'Communication'],
     },
     {
       title: 'Backend Engineer (Node.js)',
@@ -854,19 +845,11 @@ function _fallbackBedrockJsonRoles() {
       key_responsibilities: [
         'Build and maintain high-throughput APIs',
         'Optimize database queries and service performance',
-        'Implement monitoring, logging, and on-call readiness'
+        'Implement monitoring, logging, and on-call readiness',
       ],
       experience_range: '3-6 years',
-      salary_range: '₹107.9–₹153.6 LPA',
-      required_skills: [
-        'Node.js',
-        'Express',
-        'SQL',
-        'API Design',
-        'Performance Tuning',
-        'Observability',
-        'Collaboration'
-      ]
+      salary_range: '$130k–$185k',
+      required_skills: ['Node.js', 'Express', 'SQL', 'API Design', 'Performance Tuning', 'Observability', 'Collaboration'],
     },
     {
       title: 'Data Analyst',
@@ -876,18 +859,11 @@ function _fallbackBedrockJsonRoles() {
       key_responsibilities: [
         'Define metrics and build dashboards for stakeholders',
         'Analyze trends and root causes using SQL',
-        'Communicate insights and recommendations clearly'
+        'Communicate insights and recommendations clearly',
       ],
       experience_range: '2-4 years',
-      salary_range: '₹66.4–₹99.6 LPA',
-      required_skills: [
-        'SQL',
-        'Excel',
-        'Data Visualization',
-        'Statistics',
-        'Dashboards',
-        'Stakeholder Management'
-      ]
+      salary_range: '$80k–$120k',
+      required_skills: ['SQL', 'Excel', 'Data Visualization', 'Statistics', 'Dashboards', 'Stakeholder Management'],
     },
     {
       title: 'Product Manager (Technical)',
@@ -897,18 +873,11 @@ function _fallbackBedrockJsonRoles() {
       key_responsibilities: [
         'Own roadmap and prioritize tradeoffs',
         'Write clear requirements and align stakeholders',
-        'Measure impact via experimentation and analytics'
+        'Measure impact via experimentation and analytics',
       ],
       experience_range: '4-7 years',
-      salary_range: '₹107.9–₹174.3 LPA',
-      required_skills: [
-        'Roadmapping',
-        'Prioritization',
-        'User Research',
-        'Analytics',
-        'Communication',
-        'Stakeholder Management'
-      ]
+      salary_range: '$135k–$205k',
+      required_skills: ['Roadmapping', 'Prioritization', 'User Research', 'Analytics', 'Communication', 'Stakeholder Management'],
     },
     {
       title: 'DevOps Engineer',
@@ -918,26 +887,18 @@ function _fallbackBedrockJsonRoles() {
       key_responsibilities: [
         'Build CI/CD pipelines and deployment automation',
         'Manage cloud infrastructure and incident response',
-        'Implement monitoring, security, and reliability best practices'
+        'Implement monitoring, security, and reliability best practices',
       ],
       experience_range: '3-6 years',
-      salary_range: '₹107.9–₹170.2 LPA',
-      required_skills: [
-        'AWS',
-        'Docker',
-        'Kubernetes',
-        'CI/CD',
-        'Monitoring',
-        'Infrastructure as Code',
-        'Incident Management'
-      ]
-    }
+      salary_range: '$130k–$200k',
+      required_skills: ['AWS', 'Docker', 'Kubernetes', 'CI/CD', 'Monitoring', 'Infrastructure as Code', 'Incident Management'],
+    },
   ];
 }
 
 /**
  * PUBLIC_INTERFACE
- * Generate targeted roles from a user persona using Amazon Bedrock (Claude 3 Haiku).
+ * Generate targeted roles from a user persona using Amazon Bedrock.
  *
  * @param {object} userPersona - Persona object containing at least skills/validated_skills/user_skills.
  * @param {object} [options]
@@ -948,7 +909,7 @@ function _fallbackBedrockJsonRoles() {
 async function generateTargetedRoles(userPersona, options = {}) {
   const modelId = _resolveModelId({
     override: options.modelId,
-    envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+    envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID'],
   });
 
   const prompt = _buildStrictJsonPrompt(userPersona);
@@ -961,9 +922,9 @@ async function generateTargetedRoles(userPersona, options = {}) {
     messages: [
       {
         role: 'user',
-        content: [{ type: 'text', text: prompt }]
-      }
-    ]
+        content: [{ type: 'text', text: prompt }],
+      },
+    ],
   };
 
   const client = _getBedrockClient();
@@ -972,7 +933,7 @@ async function generateTargetedRoles(userPersona, options = {}) {
     modelId,
     contentType: 'application/json',
     accept: 'application/json',
-    body: Buffer.from(JSON.stringify(body))
+    body: Buffer.from(JSON.stringify(body)),
   });
 
   const resp = await client.send(cmd);
@@ -999,7 +960,7 @@ async function generateTargetedRoles(userPersona, options = {}) {
     err.code = 'bedrock_no_json_array';
     err.details = {
       rawText: rawText.slice(0, 5000),
-      extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
+      extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null,
     };
     throw err;
   }
@@ -1022,7 +983,7 @@ async function generateTargetedRoles(userPersona, options = {}) {
     err.details = {
       validCount: roles.length,
       rawText: rawText.slice(0, 5000),
-      extractedArrayPreview: Array.isArray(extracted.array) ? extracted.array.slice(0, 5) : null
+      extractedArrayPreview: Array.isArray(extracted.array) ? extracted.array.slice(0, 5) : null,
     };
     throw err;
   }
@@ -1066,7 +1027,7 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
         bedrockJsonRoles: null,
         usedFallback: false,
         modelId: result.modelId,
-        prompt: result.prompt
+        prompt: result.prompt,
       };
     }
 
@@ -1084,8 +1045,8 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
         prompt: result.prompt,
         error: {
           code: 'BEDROCK_INSUFFICIENT_ROLES',
-          message: `Bedrock returned ${Array.isArray(result.roles) ? result.roles.length : 0} roles; falling back to deterministic roles.`
-        }
+          message: `Bedrock returned ${Array.isArray(result.roles) ? result.roles.length : 0} roles; falling back to deterministic roles.`,
+        },
       };
     }
 
@@ -1094,7 +1055,7 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
       bedrockJsonRoles: null,
       usedFallback: false,
       modelId: result.modelId,
-      prompt: result.prompt
+      prompt: result.prompt,
     };
   } catch (err) {
     // Strict mode: do not fallback; surface empty result to caller so route can return [].
@@ -1105,10 +1066,10 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
         usedFallback: false,
         modelId: _resolveModelId({
           override: options.modelId,
-          envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+          envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID'],
         }),
         prompt: _buildStrictJsonPrompt(userPersona),
-        error: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) }
+        error: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) },
       };
     }
 
@@ -1123,52 +1084,29 @@ async function generateTargetedRolesSafe(userPersona, options = {}) {
       usedFallback: true,
       modelId: _resolveModelId({
         override: options.modelId,
-        envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+        envKeys: ['BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID'],
       }),
       prompt: _buildStrictJsonPrompt(userPersona),
-      error: { code: errorCode, message: err?.message || String(err) }
+      error: { code: errorCode, message: err?.message || String(err) },
     };
   }
 }
 
 /**
- * Convert a salary range string into a UI-friendly "₹xx–₹yy LPA" string when possible.
- * If it is already an INR/LPA string, return as-is.
+ * Normalize a salary range into a UI-friendly USD string where possible.
+ *
+ * - If already USD-ish (contains $ or USD), return as-is.
+ * - If legacy INR/LPA is encountered, keep as-is (do NOT convert/guess).
+ * - Otherwise return the original string (best-effort, non-destructive).
  */
-function _normalizeToIndiaLpaRange(salaryRange) {
+function _normalizeToUsdRange(salaryRange) {
   const s = _normStr(salaryRange);
   if (!s) return '';
 
-  // If already INR/LPA-ish, keep it.
+  if (/(\$|usd)/i.test(s)) return s;
   if (/(₹|inr|lpa|lakhs)/i.test(s)) return s;
 
-  // Common "$130k-$210k" style: approximate conversion to LPA.
-  // NOTE: This is best-effort; prompt asks Bedrock to output INR LPA directly.
-  const tokens = s.toLowerCase().match(/(\d+(\.\d+)?)(\s*[kmb])?/g) || [];
-  const vals = tokens
-    .map((t) => {
-      const m = String(t)
-        .trim()
-        .match(/^(\d+(\.\d+)?)(\s*[kmb])?$/);
-      if (!m) return null;
-      const num = Number(m[1]);
-      if (!Number.isFinite(num)) return null;
-      const suffix = (m[3] || '').trim();
-      const mult = suffix === 'k' ? 1000 : suffix === 'm' ? 1000000 : suffix === 'b' ? 1000000000 : 1;
-      return num * mult;
-    })
-    .filter((v) => Number.isFinite(v));
-
-  if (vals.length === 0) return s;
-
-  // USD -> INR -> LPA (very rough).
-  const usdToInrRaw = Number(process.env.USD_TO_INR || 83);
-  const usdToInr = Number.isFinite(usdToInrRaw) && usdToInrRaw > 0 ? usdToInrRaw : 83;
-
-  const toLpa = (usd) => Math.max(1, Math.round(((usd * usdToInr) / 100000) * 10) / 10); // 1 decimal
-  const min = toLpa(Math.min(...vals));
-  const max = toLpa(Math.max(...vals));
-  return `₹${min}–₹${max} LPA`;
+  return s;
 }
 
 function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } = {}) {
@@ -1183,11 +1121,10 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
    * The initial recommendations pipeline historically had two possible upstream shapes:
    * 1) "Bedrock prompt schema" (preferred):
    *    { title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }
-   * 2) "API role card schema" (observed in the attached authoritative failing response):
+   * 2) "API role card schema":
    *    { role_id, role_title, industry, salary_lpa_range, experience_range, description, key_responsibilities, required_skills }
    *
-   * This validator must accept BOTH. Otherwise Bedrock may succeed but we incorrectly drop
-   * everything to 0 valid roles and trigger `bedrock_insufficient_roles`.
+   * This validator must accept BOTH.
    */
 
   const out = [];
@@ -1202,7 +1139,7 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
     // reason -> count
     rejectedReasons: {},
     // include first few rejects to make debugging fast (env-gated)
-    rejectedSamples: []
+    rejectedSamples: [],
   };
 
   const reject = (reason, sample) => {
@@ -1222,7 +1159,7 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
     const title = _normStr(r.title || r.role_title || r.roleTitle || r.role_title || r.name);
     const industry = _normStr(r.industry);
 
-    // Salary can arrive as salary_lpa_range (prompt schema / user_input_ref) OR salary_range (common model variant).
+    // Salary can arrive as salary_lpa_range OR salary_range (common model variant).
     const salaryRaw = _normStr(
       r.salary_lpa_range ||
         r.salary_range ||
@@ -1239,15 +1176,13 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
     const keyResponsibilities = _asStringArray(r.key_responsibilities || r.keyResponsibilities);
 
     // Skills can arrive as required_skills or skills_required (sometimes as objects, handled by _asStringArray).
-    const requiredSkills = _asStringArray(
-      r.required_skills || r.skills_required || r.skillsRequired || r.requiredSkills
-    );
+    const requiredSkills = _asStringArray(r.required_skills || r.skills_required || r.skillsRequired || r.requiredSkills);
 
     if (!title) {
       reject('missing_title', {
         role_id: r.role_id,
         role_title: r.role_title,
-        title: r.title
+        title: r.title,
       });
       continue;
     }
@@ -1273,8 +1208,7 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
     const skills = requiredSkills.slice(0, 8);
 
     // Enforce the "exactly 3 responsibilities" rule (truncate if longer).
-    const responsibilities =
-      keyResponsibilities.length >= 3 ? keyResponsibilities.slice(0, 3) : keyResponsibilities;
+    const responsibilities = keyResponsibilities.length >= 3 ? keyResponsibilities.slice(0, 3) : keyResponsibilities;
 
     const key = title.toLowerCase();
     if (seen.has(key)) {
@@ -1296,12 +1230,12 @@ function _validateAndNormalizeInitialRecommendations(parsed, { debug = false } =
       role_id: roleId,
       role_title: title,
       industry,
-      salary_lpa_range: _normalizeToIndiaLpaRange(salaryRaw),
+      salary_lpa_range: _normalizeToUsdRange(salaryRaw),
       experience_range: experienceRange,
       description,
       key_responsibilities: responsibilities,
       required_skills: skills,
-      match_metadata: { source: 'bedrock_initial_recommendations' }
+      match_metadata: { source: 'bedrock_initial_recommendations' },
     });
   }
 
@@ -1322,16 +1256,10 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
 
   const profs = _extractPersonaProficiencies(personaObj);
   const profInline =
-    profs.length > 0
-      ? profs
-          .slice(0, 24)
-          .map((s) => `${s.name}:${s.proficiency}%`)
-          .join(', ')
-      : 'N/A';
+    profs.length > 0 ? profs.slice(0, 24).map((s) => `${s.name}:${s.proficiency}%`).join(', ') : 'N/A';
 
   // Important: validated skills are often string[], but could also be objects.
-  const validatedSkillsRaw =
-    personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || [];
+  const validatedSkillsRaw = personaObj?.validated_skills || personaObj?.validatedSkills || personaObj?.skills || [];
   const validatedSkills = _asStringArray(
     Array.isArray(validatedSkillsRaw)
       ? validatedSkillsRaw.map((s) => (typeof s === 'string' ? s : s?.name || s?.skill || s?.skill_name || s?.label))
@@ -1340,9 +1268,7 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
 
   const validatedInline = validatedSkills.length ? validatedSkills.join(', ') : 'N/A';
 
-  const personaIndustry =
-    _normStr(personaObj?.industry || personaObj?.profile?.industry || personaObj?.domain || '') ||
-    'N/A';
+  const personaIndustry = _normStr(personaObj?.industry || personaObj?.profile?.industry || personaObj?.domain || '') || 'N/A';
   const personaHeadline =
     _normStr(
       personaObj?.profile?.headline ||
@@ -1363,7 +1289,6 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
 
   const onetGrounding = options?.context?.onetGrounding || null;
 
-  // We pass both skill grounding and (best-effort) task grounding into the model prompt.
   const onetSnippet =
     onetGrounding && typeof onetGrounding === 'object'
       ? [
@@ -1378,9 +1303,7 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
               : 'N/A'
           }`,
           `- groundingSkills: [${
-            Array.isArray(onetGrounding.groundingSkills)
-              ? onetGrounding.groundingSkills.slice(0, 30).join(', ')
-              : 'N/A'
+            Array.isArray(onetGrounding.groundingSkills) ? onetGrounding.groundingSkills.slice(0, 30).join(', ') : 'N/A'
           }]`,
           `- occupationTasksSample: ${
             Array.isArray(onetGrounding.occupations)
@@ -1394,13 +1317,13 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
           'GROUNDING RULES (IMPORTANT):',
           '- Prefer role responsibilities and required skills that are supported by O*NET groundingSkills and tasks.',
           '- Do not invent rare/niche titles that are not aligned to the occupation families above.',
-          '- Keep titles market-realistic and common in India.'
+          '- Keep titles market-realistic and common in the US.',
         ].join('\n')
       : '';
 
   return [
-    'You are a Market Intelligence Expert for the Indian job market.',
-    'You deeply understand in-demand roles in India, realistic compensation bands in ₹ LPA, and technical responsibilities.',
+    'You are a Market Intelligence Expert for the US job market.',
+    'You deeply understand in-demand roles in the US, realistic compensation bands in USD, and technical responsibilities.',
     '',
     'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT)',
     '1) Output MUST be valid JSON (RFC 8259).',
@@ -1419,24 +1342,24 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
     '',
     onetSnippet,
     'TASK:',
-    `Return EXACTLY ${count} realistic India-market job roles that best fit this persona today.`,
+    `Return EXACTLY ${count} realistic US-market job roles that best fit this persona today.`,
     '',
     'OUTPUT FORMAT:',
     'Return ONLY a valid JSON array (no markdown, no backticks, no commentary).',
     'Each element MUST be an object with EXACTLY these keys:',
     '- "title": string',
     '- "industry": string',
-    '- "salary_lpa_range": string (REALISTIC for India; use ₹ and LPA, e.g., "₹18–₹30 LPA")',
+    '- "salary_lpa_range": string (REALISTIC for the US; use USD; include "$" and "k" where appropriate, e.g., "$120k–$180k")',
     '- "experience_range": string (e.g., "3–5 years")',
     '- "description": string (2–3 sentences, specific and technical)',
     '- "key_responsibilities": array of strings (EXACTLY 3 items; specific and technical)',
     '- "required_skills": array of strings (5–8 items; concrete skills that can be compared to persona skills)',
     '',
     'QUALITY RULES:',
-    '- Compensation MUST be realistic for India in ₹ LPA.',
+    '- Compensation MUST be realistic for the US in USD.',
     '- Responsibilities must be specific (systems, tools, outcomes), not generic filler.',
     '- Avoid duplicates and avoid overly niche titles.',
-    '- Ensure required_skills overlap with the persona validated skills when reasonable.'
+    '- Ensure required_skills overlap with the persona validated skills when reasonable.',
   ]
     .filter(Boolean)
     .join('\n');
@@ -1444,9 +1367,7 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
 
 /**
  * PUBLIC_INTERFACE
- * Generate initial post-persona recommendations (exactly 5 India-market roles).
- *
- * This is used immediately after the "Finalized Persona" step to render the RecommendationGrid.
+ * Generate initial post-persona recommendations.
  *
  * @param {object} finalPersona - Final persona JSON (or wrapper object that contains finalJson).
  * @param {object} [options]
@@ -1454,19 +1375,18 @@ function _buildInitialRecommendationsPrompt(finalPersona, options = {}) {
  * @returns {Promise<{ roles: Array, usedFallback: boolean, modelId: string, prompt: string, error?: object }>}
  */
 async function getInitialRecommendations(finalPersona, options = {}) {
-  // Allow a dedicated model override for initial recommendations (often configured as an inference profile ARN/ID).
+  // Allow a dedicated model override for initial recommendations.
   const modelId = _resolveModelId({
     override: options.modelId,
-    envKeys: ['BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+    envKeys: ['BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID'],
   });
 
   const rawCount = Number(options?.count);
-  // Support requesting/storing >5 roles; cap at 20 to keep responses bounded.
   const count = Number.isFinite(rawCount) ? Math.max(1, Math.min(20, Math.floor(rawCount))) : 5;
 
   const prompt = _buildInitialRecommendationsPrompt(finalPersona, {
     context: options?.context || null,
-    count
+    count,
   });
 
   // Scale token budget when requesting more roles (avoid truncation for >10 roles).
@@ -1479,9 +1399,9 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     messages: [
       {
         role: 'user',
-        content: [{ type: 'text', text: prompt }]
-      }
-    ]
+        content: [{ type: 'text', text: prompt }],
+      },
+    ],
   };
 
   /**
@@ -1491,10 +1411,8 @@ async function getInitialRecommendations(finalPersona, options = {}) {
    */
   const allowFallback = options?.allowFallback !== false;
 
-  // Minimal retry for transient Bedrock issues (common after restarts / brief throttling).
-  const retries = Number.isFinite(Number(options?.retries))
-    ? Math.max(0, Math.min(2, Number(options.retries)))
-    : 1;
+  // Minimal retry for transient Bedrock issues.
+  const retries = Number.isFinite(Number(options?.retries)) ? Math.max(0, Math.min(2, Number(options.retries))) : 1;
 
   const retryDelayMs = Number.isFinite(Number(options?.retryDelayMs))
     ? Math.max(0, Math.min(2000, Number(options.retryDelayMs)))
@@ -1503,7 +1421,6 @@ async function getInitialRecommendations(finalPersona, options = {}) {
   // ENV-gated diagnostics (do NOT enable by default in production).
   const debugRaw = String(process.env.BEDROCK_DEBUG_RAW_OUTPUT || '').toLowerCase() === 'true';
 
-  // These will be populated only when available, and only attached to thrown errors when debugRaw=true.
   let debugRawText = null;
   let debugExtractedText = null;
   let debugExtractedArrayPreview = null;
@@ -1514,43 +1431,24 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       modelId,
       contentType: 'application/json',
       accept: 'application/json',
-      body: Buffer.from(JSON.stringify(body))
+      body: Buffer.from(JSON.stringify(body)),
     });
 
-    /**
-     * Bedrock call timeout hardening (IMPORTANT):
-     * - We MUST return before the outer Express request timeout.
-     * - Use a route-provided time budget (options.timeBudgetMs) when available so we
-     *   don't start/continue a Bedrock call if the HTTP request is about to time out.
-     *
-     * Environment/config precedence:
-     * 1) options.timeBudgetMs (route-calculated remaining time)
-     * 2) BEDROCK_TIMEOUT_MS (default 40000)
-     *
-     * Additionally cap the timeout to BEDROCK_TIMEOUT_CAP_MS (default 45000).
-     *
-     * NOTE:
-     * Previously the cap defaulted to 12000ms which caused premature `bedrock_timeout`
-     * for /api/recommendations/initial even when the endpoint is allowed to run longer.
-     */
     const bedrockTimeoutMsRaw = Number(process.env.BEDROCK_TIMEOUT_MS || 55000);
     const bedrockTimeoutDefault =
       Number.isFinite(bedrockTimeoutMsRaw) && bedrockTimeoutMsRaw > 0 ? bedrockTimeoutMsRaw : 55000;
 
     const capRaw = Number(process.env.BEDROCK_TIMEOUT_CAP_MS || 60000);
-    const bedrockTimeoutCap =
-      Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 60000;
+    const bedrockTimeoutCap = Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 60000;
 
     const budgetRaw = Number(options?.timeBudgetMs);
     const timeBudgetMs = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : null;
 
-    // Choose timeout = min(default, cap, budget) (budget only if provided).
     const candidates = [bedrockTimeoutDefault, bedrockTimeoutCap].filter((n) => Number.isFinite(n) && n > 0);
     if (timeBudgetMs != null) candidates.push(timeBudgetMs);
 
     const bedrockTimeoutMs = Math.max(1, Math.min(...candidates));
 
-    // If the caller tells us we have essentially no time, fail fast rather than invoking Bedrock.
     if (timeBudgetMs != null && timeBudgetMs < 250) {
       const err = new Error(`Bedrock skipped: insufficient time budget (${timeBudgetMs}ms)`);
       err.code = 'bedrock_timeout';
@@ -1565,7 +1463,6 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     try {
       resp = await client.send(cmd, { abortSignal: controller.signal });
     } catch (e) {
-      // Normalize abort errors into a consistent bedrock_* code so sendError maps to 502/504 appropriately.
       const isAbort =
         e?.name === 'AbortError' ||
         e?.code === 'ABORT_ERR' ||
@@ -1586,10 +1483,6 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const bedrockJson = JSON.parse(jsonStr);
 
     const rawText = _extractClaudeText(bedrockJson);
-
-    // IMPORTANT:
-    // Initial recommendations must select the TOP-LEVEL array of role objects.
-    // A generic "first array" extractor can accidentally select nested arrays like key_responsibilities (string[]).
     const extracted = _extractRolesJsonArrayFromText(rawText);
 
     if (debugRaw) {
@@ -1603,7 +1496,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       err.code = 'bedrock_no_json_array';
       err.details = {
         rawText: rawText.slice(0, 5000),
-        extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null
+        extractedText: extracted.extractedText ? extracted.extractedText.slice(0, 5000) : null,
       };
       throw err;
     }
@@ -1621,13 +1514,6 @@ async function getInitialRecommendations(finalPersona, options = {}) {
     const roles = Array.isArray(validated?.roles) ? validated.roles : [];
     const validationStats = validated?.stats && typeof validated.stats === 'object' ? validated.stats : null;
 
-    /**
-     * IMPORTANT (bugfix):
-     * Initial recommendations must succeed when Bedrock returns fewer than 5 *valid* roles.
-     * The endpoint contract for /api/recommendations/initial is "1–5 roles", and strict mode
-     * (allowFallback=false) should only throw when Bedrock fails entirely (timeout, invalid JSON, etc),
-     * not when it returns 1–4 good items.
-     */
     if (roles.length < 1) {
       const err = new Error('Bedrock returned 0 valid initial recommendations.');
       err.code = 'bedrock_insufficient_roles';
@@ -1640,13 +1526,12 @@ async function getInitialRecommendations(finalPersona, options = {}) {
           extractedArrayPreview: debugExtractedArrayPreview,
           validationStats,
           validatedCount: roles.length,
-          extractedCount: Array.isArray(extracted.array) ? extracted.array.length : null
+          extractedCount: Array.isArray(extracted.array) ? extracted.array.length : null,
         };
       }
       throw err;
     }
 
-    // Return up to requested count; do not error if fewer than 5 are valid.
     return { roles: roles.slice(0, count), usedFallback: false, modelId, prompt };
   };
 
@@ -1659,32 +1544,24 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       } catch (err) {
         if (attempt >= retries) throw err;
         attempt += 1;
-        // Small deterministic backoff.
         await new Promise((r) => setTimeout(r, retryDelayMs));
       }
     }
   } catch (err) {
-    // Attach env-gated diagnostics for upstream meta/error surfacing.
     if (debugRaw && err && typeof err === 'object') {
       err.details = {
         ...(err.details && typeof err.details === 'object' ? err.details : {}),
         modelId,
         rawText: debugRawText,
         extractedText: debugExtractedText,
-        extractedArrayPreview: debugExtractedArrayPreview
+        extractedArrayPreview: debugExtractedArrayPreview,
       };
     }
 
-    // Strict mode: DO NOT fallback; surface the real failure.
     if (!allowFallback) {
       throw err;
     }
 
-    /**
-     * Non-strict mode: return deterministic fallback roles (stable contract).
-     * This avoids the prior bug where allowFallback=true caused an implicit undefined return,
-     * which downstream treated as "0 roles" and surfaced as intermittent 502s.
-     */
     const fallbackRoles = _fallbackBedrockJsonRoles();
     const validatedFallback = _validateAndNormalizeInitialRecommendations(fallbackRoles, { debug: false });
 
@@ -1693,7 +1570,7 @@ async function getInitialRecommendations(finalPersona, options = {}) {
       usedFallback: true,
       modelId,
       prompt,
-      error: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) }
+      error: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) },
     };
   }
 }
@@ -1835,10 +1712,6 @@ async function extractNameAndCurrentRoleFromText({ text, hints = {}, options = {
   /**
    * Extract a user's full name and current role title from ingested documents text using Bedrock.
    *
-   * IMPORTANT:
-   * - This is intended to be *authoritative* when called from ingestion (uploads).
-   * - It returns null values when unknown; callers decide whether/how to persist fallbacks.
-   *
    * @param {{text: string, hints?: {name?: string, industry?: string}, options?: {modelId?: string}}}
    * @returns {Promise<{ fullName: string|null, currentRoleTitle: string|null, confidence: string, evidence: string, rawText: string, prompt: string, modelId: string }>}
    */
@@ -1891,8 +1764,7 @@ async function extractNameAndCurrentRoleFromText({ text, hints = {}, options = {
   const fullName = typeof fullNameRaw === 'string' && fullNameRaw.trim() ? fullNameRaw.trim().slice(0, 80) : null;
 
   const titleRaw = parsed?.currentRoleTitle;
-  const currentRoleTitle =
-    typeof titleRaw === 'string' && titleRaw.trim() ? titleRaw.trim().slice(0, 80) : null;
+  const currentRoleTitle = typeof titleRaw === 'string' && titleRaw.trim() ? titleRaw.trim().slice(0, 80) : null;
 
   const confidence = _normStr(parsed?.confidence || 'low') || 'low';
   const evidence = _normStr(parsed?.evidence || '');
@@ -1954,8 +1826,7 @@ async function extractCurrentRoleFromText({ text, hints = {}, options = {} }) {
   }
 
   const titleRaw = parsed?.currentRoleTitle;
-  const currentRoleTitle =
-    typeof titleRaw === 'string' && titleRaw.trim() ? titleRaw.trim().slice(0, 80) : null;
+  const currentRoleTitle = typeof titleRaw === 'string' && titleRaw.trim() ? titleRaw.trim().slice(0, 80) : null;
 
   const confidence = _normStr(parsed?.confidence || 'low') || 'low';
   const evidence = _normStr(parsed?.evidence || '');
@@ -1968,7 +1839,7 @@ export {
   generateTargetedRolesSafe,
   getInitialRecommendations,
   extractNameAndCurrentRoleFromText,
-  extractCurrentRoleFromText
+  extractCurrentRoleFromText,
 };
 
 export default {
@@ -1976,5 +1847,5 @@ export default {
   generateTargetedRolesSafe,
   getInitialRecommendations,
   extractNameAndCurrentRoleFromText,
-  extractCurrentRoleFromText
+  extractCurrentRoleFromText,
 };

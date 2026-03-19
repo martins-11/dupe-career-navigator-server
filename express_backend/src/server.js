@@ -164,8 +164,18 @@ app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
 app.use('/api/roles', rolesRouter);
 
-// Multiverse Explorer (graph + details + bookmarking persistence)
+/**
+ * Multiverse Explorer (graph + details + bookmarking persistence)
+ *
+ * Compatibility:
+ * - Canonical: /api/multiverse/*
+ * - Alias:     /multiverse/*
+ *
+ * Some preview/proxy configurations forward /multiverse/* but not /api/multiverse/* (or vice versa).
+ * Mounting both eliminates 404s caused by base-path mismatch while keeping handlers identical.
+ */
 app.use('/api/multiverse', multiverseExplorerRouter);
+app.use('/multiverse', multiverseExplorerRouter);
 
 if (mindmapRouter) {
   app.use('/api/mindmap', mindmapRouter);

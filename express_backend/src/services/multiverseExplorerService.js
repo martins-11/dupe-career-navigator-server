@@ -26,32 +26,42 @@ function _safeArray(v) {
   return Array.isArray(v) ? v : [];
 }
 
-function _parseSalaryRangeToLpaMidpoint(salaryRange) {
+function _parseSalaryRangeToUsdKMidpoint(salaryRange) {
+  /**
+   * Parse salary range to a numeric midpoint in *thousands USD* (k USD).
+   *
+   * Supports:
+   * - "$120k–$180k"
+   * - "$120000-$180000"
+   * - "USD 120k to 180k"
+   *
+   * If an INR/LPA string is encountered (legacy data), return null to avoid mixing units.
+   */
   if (!salaryRange) return null;
   const s = String(salaryRange).trim();
 
-  const inrMatch = s.match(/(\d+(?:\.\d+)?)\s*(?:–|-|to)\s*(\d+(?:\.\d+)?).*(?:LPA|lpa)/);
-  if (inrMatch) {
-    const a = Number(inrMatch[1]);
-    const b = Number(inrMatch[2]);
-    if (Number.isFinite(a) && Number.isFinite(b)) return (a + b) / 2;
-  }
+  // Legacy India formats (do not attempt to convert).
+  if (/(₹|inr|lpa|lakhs)/i.test(s)) return null;
 
-  const usdMatch = s.match(/\$?\s*(\d+(?:\.\d+)?)\s*k?\s*(?:–|-|to)\s*\$?\s*(\d+(?:\.\d+)?)\s*k/i);
-  if (usdMatch) {
-    const aK = Number(usdMatch[1]);
-    const bK = Number(usdMatch[2]);
-    if (!Number.isFinite(aK) || !Number.isFinite(bK)) return null;
+  const m = s.match(/\$?\s*(\d+(?:\.\d+)?)\s*([kmb])?\s*(?:–|-|to)\s*\$?\s*(\d+(?:\.\d+)?)\s*([kmb])?/i);
+  if (!m) return null;
 
-    const midUsd = ((aK + bK) / 2) * 1000;
-    const usdToInrRaw = Number(process.env.USD_TO_INR || 83);
-    const usdToInr = Number.isFinite(usdToInrRaw) && usdToInrRaw > 0 ? usdToInrRaw : 83;
-    const midInr = midUsd * usdToInr;
-    const midLpa = midInr / 100000;
-    return Number.isFinite(midLpa) ? midLpa : null;
-  }
+  const a = Number(m[1]);
+  const b = Number(m[3]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
 
-  return null;
+  const mult = (suffix) => {
+    const t = String(suffix || '').toLowerCase();
+    if (t === 'k') return 1;
+    if (t === 'm') return 1000;
+    if (t === 'b') return 1000000;
+    return 1; // assume already in k if no suffix and values look like k; caller accepts rough parsing
+  };
+
+  const aK = a * mult(m[2]);
+  const bK = b * mult(m[4]);
+
+  return (aK + bK) / 2;
 }
 
 function _roleIdFromPoolRole(r) {
@@ -108,7 +118,7 @@ function _roleToNode(role, { level = 1, isCenter = false } = {}) {
       requiredSkills,
       salaryRange,
       experienceRange,
-      salaryLpaMid: _parseSalaryRangeToLpaMidpoint(salaryRange),
+      salaryUsdKMid: _parseSalaryRangeToUsdKMidpoint(salaryRange),
       skillSimilarity,
     },
   };
@@ -133,7 +143,7 @@ function _applyFiltersToNodes(nodes, { minSalaryLpa, maxSalaryLpa, minSkillSimil
   return nodes.filter((n) => {
     if (n?.type === 'current_role') return true;
 
-    const mid = n?.data?.salaryLpaMid;
+    const mid = n?.data?.salaryUsdKMid;
     if (Number.isFinite(minS) && Number.isFinite(mid) && mid < minS) return false;
     if (Number.isFinite(maxS) && Number.isFinite(mid) && mid > maxS) return false;
 
@@ -161,9 +171,9 @@ function _detailsForNode(node, centerNode) {
   else if (level === 2) transitionTimeline = '12–24 months';
   else transitionTimeline = '24–48 months';
 
-  const salaryMid = node?.data?.salaryLpaMid;
+  const salaryMid = node?.data?.salaryUsdKMid;
   const averageSalary = Number.isFinite(salaryMid)
-    ? `~₹${Math.round(salaryMid)} LPA (midpoint)`
+    ? `~$${Math.round(salaryMid)}k (midpoint)`
     : node?.data?.salaryRange || null;
 
   return {
