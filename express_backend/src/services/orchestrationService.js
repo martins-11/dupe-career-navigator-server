@@ -962,7 +962,7 @@ async function runAllOrchestration(input) {
     const useLatestCategoryDocs = parsed.useLatestCategoryDocs ?? true;
 
     if (parsed.uploadLink) {
-      orch = linkUploadToBuild(build.id, parsed.uploadLink);
+      orch = await linkUploadToBuild(build.id, parsed.uploadLink);
     } else if (parsed.documentIds?.length) {
       orch = _touch(orch, { documentIds: parsed.documentIds });
       await _bestEffortPersistBuildDocumentsLink(build.id, parsed.documentIds);
