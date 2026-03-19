@@ -757,6 +757,42 @@ const openapiDefinition = {
         },
         required: ['roles']
       },
+
+      DirectRoleRecommendation: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1, description: 'Stable role identifier (slug-like).' },
+          title: { type: 'string', minLength: 1 },
+          rationale: { type: 'string', minLength: 1, description: '1-2 lines explaining why this is a direct move.' },
+          whyDirectNow: {
+            type: 'array',
+            items: { type: 'string' },
+            minItems: 1,
+            description: 'Concrete bullets explaining why the move is direct now.'
+          },
+          requiredSkills: { type: 'array', items: { type: 'string' }, minItems: 1 },
+          keyResponsibilities: { type: 'array', items: { type: 'string' }, minItems: 1 },
+          confidence: { type: 'integer', minimum: 0, maximum: 100 }
+        },
+        required: ['id', 'title', 'rationale', 'whyDirectNow', 'requiredSkills', 'keyResponsibilities', 'confidence']
+      },
+
+      DirectTrajectoryRecommendationsResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          currentRoleTitle: { type: 'string', minLength: 1 },
+          recommendedDirectRoles: {
+            type: 'array',
+            minItems: 5,
+            maxItems: 5,
+            items: { $ref: '#/components/schemas/DirectRoleRecommendation' }
+          },
+          meta: { type: 'object', nullable: true, additionalProperties: true }
+        },
+        required: ['currentRoleTitle', 'recommendedDirectRoles']
+      },
       RoleCompareRequest: {
         type: 'object',
         additionalProperties: false,
@@ -2265,6 +2301,59 @@ const openapiDefinition = {
             content: {
               'application/json': { schema: { $ref: '#/components/schemas/RecommendationsRolesResponse' } }
             }
+          }
+        }
+      }
+    },
+
+    '/api/recommendations/direct-trajectory': {
+      post: {
+        tags: ['Recommendations'],
+        summary: 'Direct Trajectory recommended direct roles (Bedrock/Claude)',
+        description:
+          'Loads the latest finalized persona by personaId and generates EXACTLY 5 direct next-step role recommendations via AWS Bedrock (Anthropic Claude).',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  personaId: { type: 'string', minLength: 1, description: 'Persona identifier.' },
+                  savedTargetRoleTitle: {
+                    type: 'string',
+                    nullable: true,
+                    description: 'Optional previously saved target role title to pin (if direct).'
+                  }
+                },
+                required: ['personaId']
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Direct Trajectory recommendations',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/DirectTrajectoryRecommendationsResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          404: {
+            description: 'Final persona not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          502: {
+            description: 'Upstream AI failure',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          503: {
+            description: 'Service unavailable',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
           }
         }
       }

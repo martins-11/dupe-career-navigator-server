@@ -5,6 +5,7 @@ import holisticPersonaRepo from '../repositories/holisticPersonaRepoAdapter.js';
 
 import recommendationsService from '../services/recommendationsService.js';
 import exploreRecommendationsPoolService from '../services/exploreRecommendationsPoolService.js';
+import { generateDirectTrajectoryRecommendations } from '../services/directTrajectoryRecommendationsService.js';
 
 import {
   parseWithZod,
@@ -284,6 +285,87 @@ router.get('/pool', handleRecommendationsPool);
  * GET /api/recommendations/pool (defensive alias)
  */
 router.get('/recommendations/pool', handleRecommendationsPool);
+
+/**
+ * PUBLIC_INTERFACE
+ * POST /api/recommendations/direct-trajectory
+ *
+ * Generates Direct Trajectory recommendations via Bedrock/Claude.
+ *
+ * Body:
+ * {
+ *   "personaId": string, (REQUIRED)
+ *   "savedTargetRoleTitle"?: string | null (optional)
+ * }
+ *
+ * Response:
+ * {
+ *   "currentRoleTitle": string,
+ *   "recommendedDirectRoles": [
+ *      { id, title, rationale, whyDirectNow, requiredSkills, keyResponsibilities, confidence }
+ *   ],
+ *   "meta": { modelId, bedrockUsedFallback }
+ * }
+ */
+router.post('/direct-trajectory', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+
+    const personaIdRaw = req.body?.personaId ? String(req.body.personaId).trim() : '';
+    if (!personaIdRaw) {
+      const err = new Error('personaId is required.');
+      err.code = 'missing_persona_id';
+      err.httpStatus = 400;
+      throw err;
+    }
+
+    const savedTargetRoleTitle =
+      req.body?.savedTargetRoleTitle != null ? String(req.body.savedTargetRoleTitle).trim() : null;
+
+    // Load finalized persona from DB (canonical). If DB not configured, surface a clear error.
+    // The orchestrator/user stated .env is configured; we follow existing repo patterns.
+    const final = await holisticPersonaRepo.getLatestPersonaFinalArtifact(personaIdRaw);
+
+    const finalizedPersonaJson =
+      final && typeof final === 'object'
+        ? final.finalJson && typeof final.finalJson === 'object'
+          ? final.finalJson
+          : final
+        : null;
+
+    if (!finalizedPersonaJson) {
+      const err = new Error('Final persona not found for personaId.');
+      err.code = 'final_persona_not_found';
+      err.httpStatus = 404;
+      throw err;
+    }
+
+    const result = await generateDirectTrajectoryRecommendations({
+      finalizedPersonaJson,
+      savedTargetRoleTitle,
+    });
+
+    return res.json(result);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
+
+/**
+ * PUBLIC_INTERFACE
+ * POST /api/recommendations/direct-trajectory (defensive alias)
+ */
+router.post('/recommendations/direct-trajectory', async (req, res) => {
+  // If mounted at /api instead of /api/recommendations, preserve reachability.
+  // Delegate to the canonical handler path by calling next router match.
+  // Easiest safe behavior: just run the same logic by forwarding to the same handler.
+  try {
+    req.url = '/direct-trajectory';
+    return router.handle(req, res);
+  } catch (err) {
+    return sendError(res, err);
+  }
+});
 
 // PUBLIC_INTERFACE
 router.get('/roles', async (req, res) => {
