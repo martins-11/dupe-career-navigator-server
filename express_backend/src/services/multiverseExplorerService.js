@@ -655,6 +655,7 @@ export async function buildMultiverseGraph({
   currentRoleTitle = 'Current Role',
   filters = {},
   limit = 18,
+  timeBudgetMs = undefined,
 } = {}) {
   /**
    * Build the Multiverse Explorer graph.
@@ -672,7 +673,7 @@ export async function buildMultiverseGraph({
     ? await exploreRecommendationsPoolService.getOrCreateExploreRecommendationsPool({
         personaId: String(personaId).trim(),
         finalPersonaOverride: null,
-        options: { storeCount: 12 },
+        options: { storeCount: 12, timeBudgetMs },
       })
     : { roles: [], meta: { cacheHit: false, personaId: null } };
 

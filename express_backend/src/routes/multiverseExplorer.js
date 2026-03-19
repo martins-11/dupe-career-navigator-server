@@ -53,12 +53,103 @@ const GraphPostBodySchema = z
   .passthrough();
 
 /**
+ * Small in-process cache for the multiverse graph.
+ *
+ * Why:
+ * - /api/multiverse/graph is called on Explore Multiverse page load and must respond quickly.
+ * - Graph construction may cascade into DB reads and/or Bedrock-backed recommendation generation
+ *   via exploreRecommendationsPoolService, which can exceed proxy timeouts in preview.
+ *
+ * This cache provides:
+ * - short TTL caching for repeated UI calls (filters/limit toggles)
+ * - stale-while-fallback behavior if the live build exceeds a time budget
+ *
+ * NOTE: This is process-local (no cross-instance sharing). That is intentional for minimal risk.
+ */
+const _graphCache = new Map(); // key -> { value, expiresAtMs }
+
+/**
+ * Build a stable cache key from validated query params.
+ */
+function _graphCacheKey(q) {
+  return JSON.stringify({
+    personaId: q.personaId ? String(q.personaId) : null,
+    currentRoleTitle: q.currentRoleTitle ? String(q.currentRoleTitle) : 'Current Role',
+    filters: {
+      minSalaryLpa: q.minSalaryLpa ?? null,
+      maxSalaryLpa: q.maxSalaryLpa ?? null,
+      minSkillSimilarity: q.minSkillSimilarity ?? null,
+      timeHorizon: q.timeHorizon ?? null,
+    },
+    limit: q.limit ?? null,
+  });
+}
+
+function _getCachedGraph(key) {
+  const hit = _graphCache.get(key);
+  if (!hit) return null;
+  if (Date.now() >= hit.expiresAtMs) {
+    _graphCache.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+function _setCachedGraph(key, value, ttlMs) {
+  const ms = Number.isFinite(ttlMs) ? Math.max(250, ttlMs) : 8000;
+  _graphCache.set(key, { value, expiresAtMs: Date.now() + ms });
+}
+
+/**
+ * Deterministic minimal skeleton graph (safe fallback).
+ * Keeps the Explore UI alive even when upstream work is slow/unavailable.
+ */
+function _skeletonGraph({ personaId, currentRoleTitle, filtersApplied, reason }) {
+  const centerLabel = currentRoleTitle || 'Current Role';
+  return {
+    meta: {
+      personaId: personaId || null,
+      center: { id: 'current', label: centerLabel },
+      filtersApplied: { ...(filtersApplied || {}) },
+      poolMeta: { fallback: true, reason: reason || 'timeout_or_error' },
+    },
+    nodes: [
+      {
+        id: 'current',
+        type: 'current_role',
+        label: centerLabel,
+        level: 0,
+        data: { title: centerLabel, industry: null, requiredSkills: [], salaryRange: null, experienceRange: null },
+      },
+    ],
+    edges: [],
+    detailsByNodeId: {
+      current: {
+        id: 'current',
+        title: centerLabel,
+        industry: null,
+        requiredSkills: [],
+        averageSalary: null,
+        transitionTimeline: null,
+        skillGap: { missingSkills: [], matchingSkills: [], similarityScore: null },
+      },
+    },
+    paths: [],
+  };
+}
+
+/**
  * PUBLIC_INTERFACE
  * GET /api/multiverse/graph
  */
 router.get('/graph', async (req, res) => {
   try {
-    res.setHeader('Cache-Control', 'no-store');
+    /**
+     * Cache guidance:
+     * - allow short-lived caching in browsers/proxies
+     * - stale-while-revalidate helps hide brief spikes
+     */
+    res.setHeader('Cache-Control', 'public, max-age=5, stale-while-revalidate=30');
 
     const parsed = GraphQuerySchema.safeParse(req.query || {});
     if (!parsed.success) {
@@ -70,21 +161,101 @@ router.get('/graph', async (req, res) => {
     }
 
     const q = parsed.data;
-    const graph = await multiverseExplorerService.buildMultiverseGraph({
-      personaId: q.personaId ? String(q.personaId) : null,
-      currentRoleTitle: q.currentRoleTitle ? String(q.currentRoleTitle) : 'Current Role',
-      filters: {
-        minSalaryLpa: q.minSalaryLpa,
-        maxSalaryLpa: q.maxSalaryLpa,
-        minSkillSimilarity: q.minSkillSimilarity,
-        timeHorizon: q.timeHorizon,
-      },
-      limit: q.limit,
+    const key = _graphCacheKey(q);
+
+    // 1) Fast path: return cached graph if available.
+    const cached = _getCachedGraph(key);
+    if (cached) {
+      return res.json({ ...cached, meta: { ...(cached.meta || {}), cacheHit: true } });
+    }
+
+    const personaId = q.personaId ? String(q.personaId) : null;
+    const currentRoleTitle = q.currentRoleTitle ? String(q.currentRoleTitle) : 'Current Role';
+    const filters = {
+      minSalaryLpa: q.minSalaryLpa,
+      maxSalaryLpa: q.maxSalaryLpa,
+      minSkillSimilarity: q.minSkillSimilarity,
+      timeHorizon: q.timeHorizon,
+    };
+    const limit = q.limit;
+
+    // 2) Enforce a strict time budget to avoid upstream 504s.
+    const timeBudgetMsRaw = Number(process.env.MULTIVERSE_GRAPH_TIME_BUDGET_MS || 1200);
+    const timeBudgetMs =
+      Number.isFinite(timeBudgetMsRaw) && timeBudgetMsRaw > 0 ? Math.max(250, Math.min(5000, timeBudgetMsRaw)) : 1200;
+
+    const buildPromise = multiverseExplorerService.buildMultiverseGraph({
+      personaId,
+      currentRoleTitle,
+      filters,
+      limit,
+      /**
+       * Forward a best-effort time budget down to the pool generator (if it honors it).
+       * This is additive safety; the hard budget is enforced here via Promise.race.
+       */
+      timeBudgetMs,
     });
+
+    const graph = await Promise.race([
+      buildPromise,
+      new Promise((resolve) => setTimeout(() => resolve(null), timeBudgetMs)),
+    ]);
+
+    // 3) If build exceeded budget, serve a safe fallback quickly.
+    if (!graph) {
+      // If we have ANY prior cached value (even expired), prefer it as a stale fallback.
+      // (We do not keep expired entries; so this is effectively “no prior value”.)
+      const fallback = _skeletonGraph({
+        personaId,
+        currentRoleTitle,
+        filtersApplied: {
+          minSalaryLpa: filters.minSalaryLpa ?? null,
+          maxSalaryLpa: filters.maxSalaryLpa ?? null,
+          minSkillSimilarity: filters.minSkillSimilarity ?? null,
+          timeHorizon: filters.timeHorizon ?? null,
+          limit: Math.max(3, Math.min(100, Number(limit) || 18)),
+        },
+        reason: 'time_budget_exceeded',
+      });
+
+      // Cache the skeleton briefly to avoid request storms.
+      _setCachedGraph(key, fallback, 1500);
+
+      return res.json(fallback);
+    }
+
+    // Cache the successful response.
+    _setCachedGraph(key, graph, Number(process.env.MULTIVERSE_GRAPH_CACHE_TTL_MS || 8000));
 
     return res.json(graph);
   } catch (err) {
-    return sendError(res, err);
+    /**
+     * Safe-fail behavior: the Explore Multiverse UI should not hard-fail on backend slowness.
+     * Instead of returning a 5xx (which can surface as 504 upstream), return a minimal graph.
+     */
+    try {
+      const q = GraphQuerySchema.safeParse(req.query || {});
+      const data = q.success ? q.data : {};
+      const personaId = data.personaId ? String(data.personaId) : null;
+      const currentRoleTitle = data.currentRoleTitle ? String(data.currentRoleTitle) : 'Current Role';
+
+      const fallback = _skeletonGraph({
+        personaId,
+        currentRoleTitle,
+        filtersApplied: {
+          minSalaryLpa: data.minSalaryLpa ?? null,
+          maxSalaryLpa: data.maxSalaryLpa ?? null,
+          minSkillSimilarity: data.minSkillSimilarity ?? null,
+          timeHorizon: data.timeHorizon ?? null,
+          limit: Math.max(3, Math.min(100, Number(data.limit) || 18)),
+        },
+        reason: err?.code || err?.name || 'error',
+      });
+
+      return res.json(fallback);
+    } catch (_) {
+      return sendError(res, err);
+    }
   }
 });
 
