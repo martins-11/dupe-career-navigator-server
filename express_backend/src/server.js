@@ -35,6 +35,7 @@ import pathsRouter from './routes/paths.js';
 import planRouter from './routes/plan.js';
 import profileRouter from './routes/profile.js';
 import rolesRouter from './routes/roles.js';
+import multiverseExplorerRouter from './routes/multiverseExplorer.js';
 
 import { ensureMysqlSchemaCompatible } from './db/schemaSelfHeal.js';
 
@@ -162,6 +163,9 @@ app.use('/api/paths', pathsRouter);
 app.use('/api/plan', planRouter);
 app.use('/api/profile', profileRouter);
 app.use('/api/roles', rolesRouter);
+
+// Multiverse Explorer (graph + details + bookmarking persistence)
+app.use('/api/multiverse', multiverseExplorerRouter);
 
 if (mindmapRouter) {
   app.use('/api/mindmap', mindmapRouter);

@@ -14,6 +14,7 @@ import { getMigrationSql as getMysqlHolisticPersonaApiSql } from './migrations/0
 import { getMigrationSql as getMysqlRolesCatalogSql } from './migrations/007_roles_catalog.mysql.sql.js';
 import { getMigrationSql as getMysqlUserTargetsSql } from './migrations/008_user_targets.mysql.sql.js';
 import { getMigrationSql as getMysqlMindmapViewStateSql } from './migrations/009_mindmap_view_state.mysql.sql.js';
+import { getMigrationSql as getMysqlMultiverseBookmarksSql } from './migrations/010_multiverse_bookmarks.mysql.sql.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,7 +92,8 @@ export async function runMigrations() {
         { name: '006_holistic_persona_api', sql: getMysqlHolisticPersonaApiSql() },
         { name: '007_roles_catalog', sql: getMysqlRolesCatalogSql() },
         { name: '008_user_targets', sql: getMysqlUserTargetsSql() },
-        { name: '009_mindmap_view_state', sql: getMysqlMindmapViewStateSql() }
+        { name: '009_mindmap_view_state', sql: getMysqlMindmapViewStateSql() },
+        { name: '010_multiverse_bookmarks', sql: getMysqlMultiverseBookmarksSql() }
       ];
 
       for (const m of migrations) {

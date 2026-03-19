@@ -45,7 +45,8 @@ const openapiDefinition = {
     { name: 'Plan', description: 'Planning/milestones endpoints (placeholder endpoints).' },
     { name: 'Profile', description: 'Profile scoring endpoints (placeholder endpoints).' },
     { name: 'Roles', description: 'Roles catalog search and selection endpoints.' },
-    { name: 'MindMap', description: 'Mind map graph endpoints for interactive career path exploration.' }
+    { name: 'MindMap', description: 'Mind map graph endpoints for interactive career path exploration.' },
+    { name: 'Multiverse', description: 'Multiverse Explorer endpoints (graph + path/node details + bookmarking).' }
   ],
   servers: [
     {
@@ -988,6 +989,61 @@ const openapiDefinition = {
           detailsByNodeId: { type: 'object', additionalProperties: { $ref: '#/components/schemas/MindMapNodeDetails' } }
         },
         required: ['meta', 'nodes', 'edges', 'detailsByNodeId']
+      },
+
+      MultiversePath: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', minLength: 1 },
+          title: { type: 'string', nullable: true },
+          nodeIds: { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 2 },
+          meta: { type: 'object', nullable: true, additionalProperties: true }
+        },
+        required: ['id', 'nodeIds']
+      },
+
+      MultiverseGraphResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          meta: { type: 'object', additionalProperties: true },
+          nodes: { type: 'array', items: { $ref: '#/components/schemas/MindMapNode' } },
+          edges: { type: 'array', items: { $ref: '#/components/schemas/MindMapEdge' } },
+          detailsByNodeId: { type: 'object', additionalProperties: { $ref: '#/components/schemas/MindMapNodeDetails' } },
+          paths: { type: 'array', items: { $ref: '#/components/schemas/MultiversePath' } }
+        },
+        required: ['meta', 'nodes', 'edges', 'detailsByNodeId', 'paths']
+      },
+
+      MultiversePathDetails: {
+        type: 'object',
+        additionalProperties: true,
+        description:
+          'Path details drill-down payload (gaps/resources/effort). Shape may evolve; contract is an envelope for UI.'
+      },
+
+      MultiverseBookmark: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          userId: { type: 'string', minLength: 1 },
+          bookmarkType: { type: 'string', enum: ['node', 'path'] },
+          bookmarkKey: { type: 'string', minLength: 1 },
+          payload: { type: 'object', nullable: true, additionalProperties: true },
+          createdAt: { type: 'string', nullable: true, format: 'date-time' },
+          updatedAt: { type: 'string', nullable: true, format: 'date-time' }
+        },
+        required: ['userId', 'bookmarkType', 'bookmarkKey']
+      },
+
+      MultiverseBookmarksListResponse: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          bookmarks: { type: 'array', items: { $ref: '#/components/schemas/MultiverseBookmark' } }
+        },
+        required: ['bookmarks']
       }
     },
     parameters: {
@@ -2755,6 +2811,229 @@ const openapiDefinition = {
           500: {
             description: 'Internal error',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/multiverse/graph': {
+      get: {
+        tags: ['Multiverse'],
+        summary: 'Get Multiverse Explorer graph (nodes/edges + details + paths)',
+        description:
+          'Returns a multiverse graph built from the persona Explore recommendations pool. Supports filter inputs similar to MindMap.',
+        parameters: [
+          { name: 'personaId', in: 'query', required: false, schema: { type: 'string' } },
+          { name: 'currentRoleTitle', in: 'query', required: false, schema: { type: 'string' } },
+          { name: 'minSalaryLpa', in: 'query', required: false, schema: { type: 'number' } },
+          { name: 'maxSalaryLpa', in: 'query', required: false, schema: { type: 'number' } },
+          { name: 'minSkillSimilarity', in: 'query', required: false, schema: { type: 'number', minimum: 0, maximum: 100 } },
+          { name: 'timeHorizon', in: 'query', required: false, schema: { type: 'string', enum: ['Near', 'Mid', 'Far'] } },
+          { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 3, maximum: 100 } }
+        ],
+        responses: {
+          200: {
+            description: 'Multiverse graph',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/MultiverseGraphResponse' } } }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      },
+      post: {
+        tags: ['Multiverse'],
+        summary: 'Build Multiverse Explorer graph (POST)',
+        description:
+          'POST variant for frontend usage; accepts personaId + filters in JSON body and returns the same response as GET.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  personaId: { type: 'string', minLength: 1 },
+                  currentRoleTitle: { type: 'string', nullable: true },
+                  filters: { type: 'object', nullable: true, additionalProperties: true },
+                  limit: { type: 'integer', nullable: true, minimum: 3, maximum: 100 }
+                },
+                required: ['personaId']
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Multiverse graph',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/MultiverseGraphResponse' } } }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          },
+          500: {
+            description: 'Internal error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/multiverse/nodes/{id}': {
+      get: {
+        tags: ['Multiverse'],
+        summary: 'Get Multiverse Explorer node details',
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'personaId', in: 'query', required: false, schema: { type: 'string' } },
+          { name: 'currentRoleTitle', in: 'query', required: false, schema: { type: 'string' } }
+        ],
+        responses: {
+          200: {
+            description: 'Node details',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/MindMapNodeDetails' } } }
+          },
+          404: {
+            description: 'Node not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/multiverse/paths/{id}': {
+      get: {
+        tags: ['Multiverse'],
+        summary: 'Get Multiverse Explorer path details',
+        description: 'Returns path drill-down details (gaps/resources/effort).',
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'personaId', in: 'query', required: false, schema: { type: 'string' } },
+          { name: 'currentRoleTitle', in: 'query', required: false, schema: { type: 'string' } },
+          { name: 'minSalaryLpa', in: 'query', required: false, schema: { type: 'number' } },
+          { name: 'maxSalaryLpa', in: 'query', required: false, schema: { type: 'number' } },
+          { name: 'minSkillSimilarity', in: 'query', required: false, schema: { type: 'number', minimum: 0, maximum: 100 } },
+          { name: 'timeHorizon', in: 'query', required: false, schema: { type: 'string', enum: ['Near', 'Mid', 'Far'] } }
+        ],
+        responses: {
+          200: {
+            description: 'Path details',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/MultiversePathDetails' } } }
+          },
+          404: {
+            description: 'Path not found',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      }
+    },
+
+    '/api/multiverse/bookmarks': {
+      get: {
+        tags: ['Multiverse'],
+        summary: 'List Multiverse Explorer bookmarks',
+        parameters: [
+          { name: 'userId', in: 'query', required: true, schema: { type: 'string', minLength: 1 } },
+          { name: 'bookmarkType', in: 'query', required: false, schema: { type: 'string', enum: ['node', 'path'] } },
+          { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 0, maximum: 1000 } },
+          { name: 'offset', in: 'query', required: false, schema: { type: 'integer', minimum: 0 } }
+        ],
+        responses: {
+          200: {
+            description: 'Bookmarks list',
+            content: {
+              'application/json': { schema: { $ref: '#/components/schemas/MultiverseBookmarksListResponse' } }
+            }
+          },
+          400: {
+            description: 'Validation error',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+          }
+        }
+      },
+      put: {
+        tags: ['Multiverse'],
+        summary: 'Upsert a Multiverse Explorer bookmark',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  userId: { type: 'string', minLength: 1 },
+                  bookmarkType: { type: 'string', enum: ['node', 'path'] },
+                  bookmarkKey: { type: 'string', minLength: 1 },
+                  payload: { type: 'object', nullable: true, additionalProperties: true }
+                },
+                required: ['userId', 'bookmarkType', 'bookmarkKey']
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Bookmark upserted',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    status: { type: 'string', example: 'ok' },
+                    bookmark: { $ref: '#/components/schemas/MultiverseBookmark' }
+                  },
+                  required: ['status', 'bookmark']
+                }
+              }
+            }
+          }
+        }
+      },
+      delete: {
+        tags: ['Multiverse'],
+        summary: 'Delete a Multiverse Explorer bookmark',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  userId: { type: 'string', minLength: 1 },
+                  bookmarkType: { type: 'string', enum: ['node', 'path'] },
+                  bookmarkKey: { type: 'string', minLength: 1 }
+                },
+                required: ['userId', 'bookmarkType', 'bookmarkKey']
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Bookmark deleted (idempotent)',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: true,
+                  properties: {
+                    status: { type: 'string', example: 'ok' },
+                    deleted: { type: 'boolean' }
+                  },
+                  required: ['status', 'deleted']
+                }
+              }
+            }
           }
         }
       }
