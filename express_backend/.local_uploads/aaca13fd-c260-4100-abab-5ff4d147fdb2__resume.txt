@@ -1,0 +1,8 @@
+Alex Rivera
+Senior Backend Engineer
+
+SUMMARY
+Backend engineer with Node.js/Express experience.
+
+SKILLS
+Node.js, Express, MySQL, AWS

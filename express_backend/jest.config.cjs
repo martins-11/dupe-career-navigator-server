@@ -18,8 +18,9 @@ module.exports = {
      * Some tests do `jest.doMock('../../src/services/bedrockService', ...)` (no extension),
      * while production code imports `./bedrockService.js` (with extension).
      *
-     * Mapping BOTH forms to the same physical file ensures `jest.doMock()` intercepts
-     * the import consistently across suites.
+     * We normalize both forms to the same underlying file:
+     * - ".../bedrockService.js" stays ".../bedrockService.js"
+     * - ".../bedrockService" becomes ".../bedrockService.js"
      */
     '^(.*?/src/services/bedrockService)\\.js$': '$1.js',
     '^(.*?/src/services/bedrockService)$': '$1.js',

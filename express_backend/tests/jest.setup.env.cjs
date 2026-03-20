@@ -36,6 +36,15 @@ delete process.env.MYSQL_PASSWORD;
 
 // Prevent accidental real Bedrock usage in tests unless explicitly configured.
 process.env.BEDROCK_DISABLE = process.env.BEDROCK_DISABLE || 'true';
+
+/**
+ * Bedrock test normalization:
+ * - Default: Bedrock remains disabled (safer, avoids credential resolution/hangs).
+ * - Opt-in: Set BEDROCK_MOCK_MODE=true (in a specific test) to allow a deterministic
+ *   in-process mock client instead of throwing bedrock_disabled.
+ */
+process.env.BEDROCK_MOCK_MODE = process.env.BEDROCK_MOCK_MODE || 'false';
+
 delete process.env.BEDROCK_MODEL_ID;
 delete process.env.BEDROCK_ROLE_MODEL_ID;
 
