@@ -2,6 +2,7 @@ import express from 'express';
 import { getZod } from '../utils/zod.js';
 import buildsService from '../services/buildsService.js';
 import { getDbEngine } from '../db/connection.js';
+import { sendError } from '../utils/errors.js';
 
 const router = express.Router();
 
@@ -108,9 +109,7 @@ router.get('/:id', async (req, res) => {
     if (!build) return res.status(404).json({ error: 'not_found' });
     return res.json(build);
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[GET /builds/:id] error:', err);
-    return res.status(500).json({ error: 'internal_server_error' });
+    return sendError(res, err);
   }
 });
 
@@ -120,9 +119,7 @@ router.get('/:id/status', async (req, res) => {
     if (!status) return res.status(404).json({ error: 'not_found' });
     return res.json(status);
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[GET /builds/:id/status] error:', err);
-    return res.status(500).json({ error: 'internal_server_error' });
+    return sendError(res, err);
   }
 });
 
@@ -132,9 +129,7 @@ router.post('/:id/cancel', async (req, res) => {
     if (!status) return res.status(404).json({ error: 'not_found' });
     return res.json(status);
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[POST /builds/:id/cancel] error:', err);
-    return res.status(500).json({ error: 'internal_server_error' });
+    return sendError(res, err);
   }
 });
 

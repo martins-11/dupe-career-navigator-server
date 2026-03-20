@@ -16,7 +16,10 @@ function _nowIso() {
 }
 
 function _makeBuild(input) {
-  const id = uuidV4();
+  // IMPORTANT:
+  // The workflow layer generates the canonical id; memory repo must honor a caller-provided id
+  // so that buildId used by /builds/* and /orchestration/* is stable and debuggable.
+  const id = input?.id || uuidV4();
   const now = _nowIso();
 
   return {
@@ -69,5 +72,30 @@ export async function updateBuild(buildId, patch) {
   return updated;
 }
 
-const buildsMemoryRepo = { createBuild, getBuildById, updateBuild };
+/**
+ * PUBLIC_INTERFACE
+ * Best-effort build-document linking in memory.
+ *
+ * In memory mode we don't need persistence for linking (orchestration stores it),
+ * but exposing these methods keeps interfaces consistent across repo adapters.
+ */
+export async function linkDocumentToBuild(_buildId, _documentId) {
+  return { linked: false };
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * Best-effort build-documents linking in memory.
+ */
+export async function linkDocumentsToBuild(_buildId, _documentIds) {
+  return { linked: false, count: Array.isArray(_documentIds) ? _documentIds.length : 0 };
+}
+
+const buildsMemoryRepo = {
+  createBuild,
+  getBuildById,
+  updateBuild,
+  linkDocumentToBuild,
+  linkDocumentsToBuild
+};
 export default buildsMemoryRepo;

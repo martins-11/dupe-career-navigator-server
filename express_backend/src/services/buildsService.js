@@ -38,17 +38,37 @@ function _defaultSteps() {
 async function _syncFromWorkflow(buildId) {
   /**
    * Internal helper: best-effort sync from workflow state -> build repo record.
-   * This keeps repo state coherent even if workflowService is the primary driver.
+   *
+   * Hardening goals:
+   * - Never regress progress (avoid UI flicker across polling)
+   * - Keep step sequencing stable (steps array must be present)
+   * - Keep status consistent with workflow state machine
    */
   const wf = workflowService.getWorkflow(buildId);
   if (!wf) return null;
 
+  const existing = await buildsRepo.getBuildById(buildId);
+
+  // If persistence doesn't have the record yet (rare race), don't create it here; caller will handle.
+  if (!existing) {
+    const patch = {
+      status: wf.status,
+      progress: wf.progress,
+      message: wf.message ?? null,
+      currentStep: wf.currentStep ?? null,
+      steps: wf.steps ?? _defaultSteps()
+    };
+    return buildsRepo.updateBuild(buildId, patch);
+  }
+
+  const nextProgress = Math.max(Number(existing.progress || 0), Number(wf.progress || 0));
+
   const patch = {
     status: wf.status,
-    progress: wf.progress,
-    message: wf.message ?? null,
-    currentStep: wf.currentStep ?? null,
-    steps: wf.steps ?? _defaultSteps()
+    progress: Number.isFinite(nextProgress) ? nextProgress : wf.progress,
+    message: wf.message ?? existing.message ?? null,
+    currentStep: wf.currentStep ?? existing.currentStep ?? null,
+    steps: Array.isArray(wf.steps) && wf.steps.length ? wf.steps : existing.steps ?? _defaultSteps()
   };
 
   return buildsRepo.updateBuild(buildId, patch);

@@ -893,24 +893,39 @@ async function finalizePersonaForBuild(buildId, input) {
 
 function _updateWorkflowProgress(buildId, patch) {
   /**
-   * Best-effort workflow progress updater.
+   * Best-effort workflow progress updater (hardening).
    *
-   * The system already exposes /builds/{id}/status which reads from workflowService.
-   * Existing workflowService.startWorkflow simulates progress; for the "run all" endpoint
-   * we additionally update status to reflect real orchestration completion.
+   * /builds/{id}/status reads from workflowService, so orchestration should update it deterministically:
+   * - progress/message/currentStep patched monotonically
+   * - terminal states set via succeedWorkflow/failWorkflow (state machine enforced)
    *
-   * Note: workflowService does not currently expose a public "setStatus" method; we
-   * carefully fall back to no-op if workflow is missing. For now, we rely on the
-   * orchestration record + build polling as a combined picture, and keep updates minimal.
+   * @param {string} buildId
+   * @param {{ status?: 'running'|'succeeded'|'failed'|'cancelled', progress?: number, message?: string|null, currentStep?: string|null, failure?: object }} patch
    */
-  const wf = workflowService.getWorkflow(buildId);
+  const wf = workflowService.getWorkflowUnsafeRead
+    ? workflowService.getWorkflowUnsafeRead(buildId)
+    : workflowService.getWorkflow(buildId);
+
   if (!wf) return null;
 
-  // Mutate-by-replace: workflowService stores objects; we can replace by re-creating through internal map
-  // only if service provides a setter. It doesn't, so we approximate by updating orchestration only.
-  // To still improve polling, we set "message/progress/currentStep" in orchestration and let the simulated
-  // build progress keep moving. This preserves existing contracts and avoids introducing a new workflow API.
-  return { ...wf, ...patch };
+  // If caller is trying to set a terminal status, use the explicit APIs.
+  if (patch && patch.status === 'failed') {
+    return workflowService.failWorkflow(buildId, patch.message || 'Build failed.', patch.failure || null);
+  }
+  if (patch && patch.status === 'succeeded') {
+    return workflowService.succeedWorkflow(buildId, patch.message || 'Build complete.');
+  }
+
+  // For non-terminal status updates, patch safe fields.
+  if (workflowService.patchWorkflow) {
+    return workflowService.patchWorkflow(buildId, {
+      progress: patch.progress,
+      message: patch.message,
+      currentStep: patch.currentStep
+    });
+  }
+
+  return wf;
 }
 
 // PUBLIC_INTERFACE
@@ -955,9 +970,34 @@ async function runAllOrchestration(input) {
 
   // 2) Link upload/document IDs OR auto-select
   try {
+    // Ensure workflow shows "running" immediately (queued -> running transition is enforced by simulator,
+    // but we patch message/progress deterministically).
+    _updateWorkflowProgress(build.id, {
+      status: 'running',
+      progress: 10,
+      currentStep: 'validate_inputs',
+      message: 'Orchestration running…'
+    });
+
+    const assertNotCancelled = () => {
+      const wf = workflowService.getWorkflowStatus(build.id);
+      if (wf?.status === 'cancelled') {
+        const e = new Error('Build was cancelled.');
+        e.code = 'BUILD_CANCELLED';
+        e.httpStatus = 422;
+        throw e;
+      }
+    };
+
     orch = _touch(orch, {
       runAll: { ...orch.runAll, progress: 15, step: 'link', message: 'Linking documents…' }
     });
+    _updateWorkflowProgress(build.id, {
+      progress: 15,
+      currentStep: 'validate_inputs',
+      message: 'Linking documents…'
+    });
+    assertNotCancelled();
 
     const useLatestCategoryDocs = parsed.useLatestCategoryDocs ?? true;
 
@@ -967,19 +1007,18 @@ async function runAllOrchestration(input) {
       orch = _touch(orch, { documentIds: parsed.documentIds });
       await _bestEffortPersistBuildDocumentsLink(build.id, parsed.documentIds);
     } else if (useLatestCategoryDocs) {
-      // Additive MVP path: auto-select the latest docs by category.
-      //
-      // IMPORTANT:
-      // - The system supports anonymous usage (userId omitted/null) in memory mode.
-      // - The documents repository adapter supports `userId=null` to mean "anonymous".
-      // - Therefore, do NOT hard-require userId here; fall back to null.
       const effectiveUserId = parsed.userId ?? null;
 
       orch = _touch(orch, {
         runAll: { ...orch.runAll, progress: 20, step: 'auto_select', message: 'Selecting latest uploaded docs…' }
       });
+      _updateWorkflowProgress(build.id, {
+        progress: 20,
+        currentStep: 'validate_inputs',
+        message: 'Selecting latest uploaded docs…'
+      });
+      assertNotCancelled();
 
-      // Fetch latest docs for each category.
       const latestResume = await documentsRepo.getLatestDocumentForUserByCategory(
         effectiveUserId,
         DOCUMENT_CATEGORIES.RESUME
@@ -993,9 +1032,6 @@ async function runAllOrchestration(input) {
         DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW
       );
 
-      // CHANGE (per requirements):
-      // Categories are OPTIONAL. We proceed with whatever categorized docs exist.
-      // We only fail if we can't find ANY documents at all.
       const missing = [];
       if (!latestResume) missing.push(DOCUMENT_CATEGORIES.RESUME);
       if (!latestJd) missing.push(DOCUMENT_CATEGORIES.JOB_DESCRIPTION);
@@ -1029,6 +1065,7 @@ async function runAllOrchestration(input) {
     } else {
       const err = new Error('Either uploadLink or documentIds must be provided (or enable useLatestCategoryDocs).');
       err.code = 'MISSING_INPUTS';
+      err.httpStatus = 422;
       throw err;
     }
 
@@ -1036,6 +1073,12 @@ async function runAllOrchestration(input) {
     orch = _touch(orch, {
       runAll: { ...orch.runAll, progress: 40, step: 'extract_normalize', message: 'Extracting and normalizing…' }
     });
+    _updateWorkflowProgress(build.id, {
+      progress: 40,
+      currentStep: 'extract_text',
+      message: 'Extracting and normalizing…'
+    });
+    assertNotCancelled();
 
     const extractResp = await extractAndNormalizeForBuild(build.id, parsed.extract || {});
     orch = extractResp.orchestration;
@@ -1044,6 +1087,12 @@ async function runAllOrchestration(input) {
     orch = _touch(orch, {
       runAll: { ...orch.runAll, progress: 75, step: 'generate_draft', message: 'Generating draft persona…' }
     });
+    _updateWorkflowProgress(build.id, {
+      progress: 75,
+      currentStep: 'generate_persona_draft',
+      message: 'Generating draft persona…'
+    });
+    assertNotCancelled();
 
     const genResp = await generatePersonaDraftForBuild(build.id, parsed.generate || {});
     orch = genResp.orchestration;
@@ -1054,6 +1103,12 @@ async function runAllOrchestration(input) {
       orch = _touch(orch, {
         runAll: { ...orch.runAll, progress: 90, step: 'finalize', message: 'Finalizing persona…' }
       });
+      _updateWorkflowProgress(build.id, {
+        progress: 90,
+        currentStep: 'finalize',
+        message: 'Finalizing persona…'
+      });
+      assertNotCancelled();
 
       finalizeResp = await finalizePersonaForBuild(build.id, parsed.finalize || {});
       orch = finalizeResp.orchestration;
@@ -1071,17 +1126,11 @@ async function runAllOrchestration(input) {
       }
     });
 
-    // Best-effort: touch workflow (does not change store; see comment).
     _updateWorkflowProgress(build.id, { status: 'succeeded', progress: 100, message: 'Build complete.' });
 
     return {
-      // Keep the existing contract: build object is returned and includes build.id.
       build,
-
-      // Add a stable top-level buildId for clients/scripts that only want the identifier.
-      // This keeps contracts consistent across endpoints and helps smoke scripts poll status.
       buildId: build.id,
-
       orchestration: orch,
       results: {
         extract: {
@@ -1091,9 +1140,7 @@ async function runAllOrchestration(input) {
         generate: {
           personaId: genResp.personaId
         },
-        finalize: finalizeResp
-          ? { personaId: finalizeResp.personaId }
-          : null
+        finalize: finalizeResp ? { personaId: finalizeResp.personaId } : null
       }
     };
   } catch (err) {
@@ -1108,7 +1155,11 @@ async function runAllOrchestration(input) {
       }
     });
 
-    _updateWorkflowProgress(build.id, { status: 'failed', message: 'Build failed.' });
+    _updateWorkflowProgress(build.id, {
+      status: 'failed',
+      message: err?.message || 'Build failed.',
+      failure: err?.details || { code: err?.code || 'ORCHESTRATION_FAILED' }
+    });
     throw err;
   }
 }

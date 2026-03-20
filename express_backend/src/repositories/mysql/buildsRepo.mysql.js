@@ -112,10 +112,70 @@ export async function updateBuild(buildId, patch) {
   return await getBuildById(buildId);
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Link a single document to a build (best-effort).
+ *
+ * Expected table (when present):
+ * - build_documents(build_id, document_id, created_at)
+ *
+ * Hardening behavior:
+ * - If the table does not exist yet (older schema), this is a no-op (does not throw),
+ *   so orchestration remains usable.
+ */
+export async function linkDocumentToBuild(buildId, documentId) {
+  try {
+    await dbQuery(
+      `
+      INSERT INTO build_documents (build_id, document_id, created_at)
+      VALUES (?,?,?)
+      `,
+      [buildId, documentId, new Date()]
+    );
+    return { linked: true };
+  } catch (err) {
+    // Table missing or constraint violations should not break MVP flows.
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '').toUpperCase();
+
+    // Common MySQL “table doesn't exist” patterns:
+    if (code === 'ER_NO_SUCH_TABLE' || msg.includes("doesn't exist") || msg.includes('no such table')) {
+      return { linked: false, reason: 'TABLE_MISSING' };
+    }
+
+    // Duplicate link is fine; treat as linked.
+    if (code === 'ER_DUP_ENTRY' || msg.includes('duplicate')) {
+      return { linked: true, deduped: true };
+    }
+
+    // Any other error: still no-op to preserve DB-optional behavior.
+    return { linked: false, reason: 'LINK_FAILED' };
+  }
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * Link multiple documents to a build (best-effort).
+ */
+export async function linkDocumentsToBuild(buildId, documentIds) {
+  const ids = Array.isArray(documentIds) ? documentIds.filter(Boolean) : [];
+  let linkedCount = 0;
+
+  // eslint-disable-next-line no-await-in-loop
+  for (const documentId of ids) {
+    const res = await linkDocumentToBuild(buildId, documentId);
+    if (res && res.linked) linkedCount += 1;
+  }
+
+  return { linked: linkedCount > 0, count: linkedCount };
+}
+
 const buildsRepoMysql = {
   createBuild,
   getBuildById,
-  updateBuild
+  updateBuild,
+  linkDocumentToBuild,
+  linkDocumentsToBuild
 };
 
 export default buildsRepoMysql;
