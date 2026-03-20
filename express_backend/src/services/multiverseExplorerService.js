@@ -1,6 +1,8 @@
 import exploreRecommendationsPoolService from './exploreRecommendationsPoolService.js';
+import personasRepo from '../repositories/personasRepoAdapter.js';
+import { buildThreeTwoReport, scoreRoleCompatibility } from './scoringEngine.js';
+
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
-import bedrockService from './bedrockService.js';
 
 /**
  * Multiverse Explorer service layer.
@@ -10,11 +12,17 @@ import bedrockService from './bedrockService.js';
  * - Apply server-side filters (salary, similarity, time horizon) to keep payload bounded.
  * - Provide node details and path details drill-down payloads.
  *
- * NOTE:
- * - This implementation is designed to be robust in DB-optional environments:
- *   - Explore pool service already persists to MySQL or memory via holisticPersonaRepoAdapter.
- * - Bedrock is used to enrich path details when available, but the API always returns
- *   a deterministic fallback details object if Bedrock is unavailable.
+ * Multiverse path details enrichment:
+ * - For the selected pathType (lateral|vertical|pivot|non_linear), generate EXACTLY 5 role-card
+ *   recommendations constrained to that pathType.
+ * - These role cards are persona-personalized using the finalized persona (when available).
+ * - Role cards include enough detail to power the frontend "RoleCard" drill-down:
+ *   salary/experience/skills/responsibilities + compatibility score.
+ *
+ * Resilience:
+ * - If Bedrock is unavailable or times out, return deterministic fallback role cards (still pathType-labeled).
+ * - If a client uses a legacy path id (e.g., passing a role title instead of "path_1"), we attempt
+ *   to resolve it to a real path to avoid infinite 404/refetch loops.
  */
 
 function _normalizeLabel(v) {
@@ -24,6 +32,13 @@ function _normalizeLabel(v) {
 
 function _safeArray(v) {
   return Array.isArray(v) ? v : [];
+}
+
+function _slugify(v) {
+  return _normalizeLabel(v)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
 }
 
 function _parseSalaryRangeToUsdKMidpoint(salaryRange) {
@@ -55,7 +70,7 @@ function _parseSalaryRangeToUsdKMidpoint(salaryRange) {
     if (t === 'k') return 1;
     if (t === 'm') return 1000;
     if (t === 'b') return 1000000;
-    return 1; // assume already in k if no suffix and values look like k; caller accepts rough parsing
+    return 1;
   };
 
   const aK = a * mult(m[2]);
@@ -218,7 +233,7 @@ function _buildDeterministicPathsFromNodes({ centerNode, nodes, maxPaths = 6 }) 
   const lvl2 = roleNodes.filter((n) => n.level === 2);
   const lvl3 = roleNodes.filter((n) => n.level === 3);
 
-  const byScoreDesc = (a, b) => (Number(b?.data?.skillSimilarity || 0) - Number(a?.data?.skillSimilarity || 0));
+  const byScoreDesc = (a, b) => Number(b?.data?.skillSimilarity || 0) - Number(a?.data?.skillSimilarity || 0);
 
   lvl1.sort(byScoreDesc);
   lvl2.sort(byScoreDesc);
@@ -369,7 +384,148 @@ function _extractFirstJsonArray(text) {
   return null;
 }
 
-function _buildMultiversePathRolesPrompt({ pathType, currentRoleTitle, pathRoleTitles, targetRoleTitle }) {
+function _extractPersonaSkillProficiencies(finalPersonaObj) {
+  /**
+   * Extract proficiency-bearing skills from a Final Persona (best-effort).
+   * Returns: [{ name, proficiency }]
+   */
+  const p = finalPersonaObj && typeof finalPersonaObj === 'object' && !Array.isArray(finalPersonaObj) ? finalPersonaObj : {};
+
+  const candidates = [
+    p.skills_with_proficiency,
+    p.skillsWithProficiency,
+    p.user_skills,
+    p.userSkills,
+    p.skillProficiencies,
+    p.proficiencies,
+    // sometimes "skills" are objects with proficiency
+    p.skills,
+  ];
+
+  for (const arr of candidates) {
+    if (!Array.isArray(arr) || !arr.length) continue;
+
+    const out = [];
+    for (const row of arr) {
+      if (!row) continue;
+      if (typeof row === 'string') continue;
+      if (typeof row !== 'object' || Array.isArray(row)) continue;
+
+      const name = _normalizeLabel(row.name || row.skill || row.skill_name || row.skillName || row.label || row.title || '');
+      const rawProf =
+        row.proficiency ??
+        row.proficiencyPercent ??
+        row.proficiency_percent ??
+        row.percent ??
+        row.score ??
+        row.level_percent ??
+        row.levelPercent ??
+        row.value ??
+        null;
+
+      const n = Number(rawProf);
+      if (!name || !Number.isFinite(n)) continue;
+      out.push({ name, proficiency: Math.max(0, Math.min(100, Math.round(n))) });
+    }
+
+    if (out.length) return out;
+  }
+
+  return [];
+}
+
+function _extractPersonaContextForPrompt(finalPersonaObj) {
+  /**
+   * Build a small, stable persona context to personalize Claude output.
+   * Keep it compact to avoid token blow-ups.
+   */
+  const p = finalPersonaObj && typeof finalPersonaObj === 'object' && !Array.isArray(finalPersonaObj) ? finalPersonaObj : {};
+
+  const industry =
+    _normalizeLabel(p.industry || p.profile?.industry || p.domain || p.profile?.domain || '') || 'N/A';
+
+  const seniority =
+    _normalizeLabel(p.seniority_level || p.seniorityLevel || p.seniority || p.profile?.seniority || '') || 'N/A';
+
+  const headline =
+    _normalizeLabel(p.profile?.headline || p.current_role || p.currentRole || p.title || p.professional_title || '') ||
+    'N/A';
+
+  const validatedSkillsRaw = p.validated_skills || p.validatedSkills || p.skills || [];
+  const validatedSkills = _safeArray(validatedSkillsRaw)
+    .map((s) => (typeof s === 'string' ? _normalizeLabel(s) : _normalizeLabel(s?.name || s?.skill || s?.label || '')))
+    .filter(Boolean)
+    .slice(0, 28);
+
+  const profs = _extractPersonaSkillProficiencies(p).slice(0, 18);
+  const profInline = profs.length ? profs.map((s) => `${s.name}:${s.proficiency}%`).join(', ') : 'N/A';
+
+  return {
+    industry,
+    seniority,
+    headline,
+    validatedSkills,
+    profInline,
+  };
+}
+
+async function _loadFinalPersonaObjSafe(personaId) {
+  /**
+   * Best-effort final persona load:
+   * - final -> latest version -> draft
+   * Returns {} if not found / invalid.
+   */
+  const pid = String(personaId || '').trim();
+  if (!pid) return {};
+
+  const coerce = (value) => {
+    if (!value) return null;
+    let v = value;
+    if (typeof v === 'string') {
+      try {
+        v = JSON.parse(v);
+      } catch (_) {
+        return null;
+      }
+    }
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    return v.finalJson || v.personaJson || v.final || v.persona || v.draftJson || v.draft || v;
+  };
+
+  try {
+    const finalWrap = await personasRepo.getFinal(pid);
+    const finalObj = coerce(finalWrap?.finalJson || finalWrap);
+    if (finalObj) return finalObj;
+  } catch (_) {
+    // ignore
+  }
+
+  try {
+    const latest = await personasRepo.getLatestPersonaVersion(pid);
+    const latestObj = coerce(latest?.personaJson || latest);
+    if (latestObj) return latestObj;
+  } catch (_) {
+    // ignore
+  }
+
+  try {
+    const draftWrap = await personasRepo.getDraft(pid);
+    const draftObj = coerce(draftWrap?.draftJson || draftWrap);
+    if (draftObj) return draftObj;
+  } catch (_) {
+    // ignore
+  }
+
+  return {};
+}
+
+function _buildMultiversePathRolesPrompt({
+  pathType,
+  currentRoleTitle,
+  pathRoleTitles,
+  targetRoleTitle,
+  personaContext,
+}) {
   const pt = String(pathType || '').trim() || 'lateral';
   const allowed = new Set(['lateral', 'vertical', 'pivot', 'non_linear']);
   const normalizedPathType = allowed.has(pt) ? pt : 'lateral';
@@ -384,37 +540,41 @@ function _buildMultiversePathRolesPrompt({ pathType, currentRoleTitle, pathRoleT
     pivot:
       'PIVOT = intentional shift to a different function/track; requires meaningful reskilling; still plausible based on persona strengths. Avoid pure lateral/vertical variants.',
     non_linear:
-      'NON_LINEAR = unconventional path: cross-functional, portfolio career, or role hybridization; can include sideways + up/down moves; emphasize optionality and experimentation while staying realistic.'
+      'NON_LINEAR = unconventional path: cross-functional, portfolio career, or role hybridization; can include sideways + up/down moves; emphasize optionality and experimentation while staying realistic.',
   };
 
   const hardConstraintsByType = {
     lateral: [
       'ONLY recommend roles that are lateral moves: similar seniority to current.',
       'Do NOT recommend clear promotions (e.g., Lead/Manager/Head) unless current role already implies that seniority.',
-      'Do NOT recommend far pivots that require large reskilling.'
+      'Do NOT recommend far pivots that require large reskilling.',
     ],
     vertical: [
       'ONLY recommend roles that are vertical moves: higher seniority/scope than current.',
       'Do NOT recommend lateral titles at the same level.',
-      'Stay in the same function/track as implied by the current role + path.'
+      'Stay in the same function/track as implied by the current role + path.',
     ],
     pivot: [
       'ONLY recommend roles that are pivots into a different function/track.',
       'Do NOT recommend simple lateral variants of the current function.',
-      'Each role must explicitly reflect the new track (e.g., Engineering -> Product, Sales -> Customer Success, etc.).'
+      'Each role must explicitly reflect the new track (e.g., Engineering -> Product, Sales -> Customer Success, etc.).',
     ],
     non_linear: [
       'ONLY recommend non-linear roles: hybrid/cross-functional/portfolio-style options that create optionality.',
       'Do NOT return standard linear ladder steps only.',
-      'Keep it realistic and employable (avoid gimmicks).'
-    ]
+      'Keep it realistic and employable (avoid gimmicks).',
+    ],
   };
 
   const constraints = hardConstraintsByType[normalizedPathType] || hardConstraintsByType.lateral;
   const definition = definitionByType[normalizedPathType] || definitionByType.lateral;
 
+  const ctx = personaContext && typeof personaContext === 'object' ? personaContext : {};
+  const validatedSkillsInline = Array.isArray(ctx.validatedSkills) && ctx.validatedSkills.length ? ctx.validatedSkills.join(', ') : 'N/A';
+
   return [
-    'You are an expert career mobility strategist for the Indian job market.',
+    'You are an expert career mobility strategist for the US job market.',
+    'You must return role cards that are detailed enough for a frontend drill-down UI.',
     '',
     'ABSOLUTE OUTPUT RULES (JSON-ONLY; ZERO EXTRA TEXT):',
     '1) Output MUST be valid JSON (RFC 8259).',
@@ -429,76 +589,173 @@ function _buildMultiversePathRolesPrompt({ pathType, currentRoleTitle, pathRoleT
     'HARD CONSTRAINTS (MUST OBEY):',
     ...constraints.map((c) => `- ${c}`),
     '',
+    'PERSONA CONTEXT (AUTHORITATIVE):',
+    `- headline/current role signal: "${_normalizeLabel(ctx.headline || 'N/A')}"`,
+    `- industry: "${_normalizeLabel(ctx.industry || 'N/A')}"`,
+    `- seniority: "${_normalizeLabel(ctx.seniority || 'N/A')}"`,
+    `- validated skills: [${validatedSkillsInline}]`,
+    `- skill proficiencies (name:percent): [${_normalizeLabel(ctx.profInline || 'N/A')}]`,
+    '',
     'PATH CONTEXT:',
     `- currentRoleTitle: "${_normalizeLabel(currentRoleTitle || 'Current Role')}"`,
     `- selectedPath: "${_normalizeLabel(pathInline)}"`,
     `- targetRoleTitle (last step): "${_normalizeLabel(targetRoleTitle || 'Target Role')}"`,
     '',
     'TASK:',
-    `Recommend EXACTLY 5 India-market roles that STRICTLY match the pathType="${normalizedPathType}".`,
-    'These are role recommendations for the user to consider next within this multiverse path.',
+    `Recommend EXACTLY 5 US-market roles that STRICTLY match the pathType="${normalizedPathType}" AND fit the PERSONA CONTEXT.`,
     '',
     'SCHEMA (MUST MATCH EXACTLY):',
     'Return a JSON array of 5 objects. EACH object MUST have ALL of these keys:',
+    '- "role_id": string (stable id; MUST start with "bedrock-rec-")',
     '- "role_title": string (non-empty; unique across all 5 roles)',
+    '- "industry": string (non-empty)',
+    '- "salary_range": string (USD only; include "$"; realistic; e.g., "$120k–$180k")',
+    '- "experience_range": string (e.g., "3–5 years")',
+    '- "description": string (2–3 sentences; role-specific; no bullet lists)',
+    '- "key_responsibilities": string[] (EXACTLY 3 items; 8–20 words each)',
+    '- "required_skills": string[] (6–8 UNIQUE items; concrete skills; mix technical + soft)',
     '- "pathType": string (MUST equal the given pathType exactly)',
-    '- "whyThisMatchesPathType": string (1-2 sentences; explicitly justify why it is lateral/vertical/pivot/non_linear)',
-    '- "confidence": number (0-100 integer)',
+    '- "whyThisMatchesPathType": string (1–2 sentences; explicitly justify why it matches the chosen pathType)',
+    '- "confidence": number (0–100 integer)',
     '',
     'VALIDATION CHECKLIST (DO THIS BEFORE YOU OUTPUT):',
     '- Count check: array length is exactly 5.',
     '- Every item has pathType exactly equal to the given pathType.',
     '- Titles are unique (case-insensitive).',
-    '- All roles obey the HARD CONSTRAINTS for the pathType.',
+    '- key_responsibilities length is exactly 3 for every item.',
+    '- required_skills length is 6–8 for every item and contains no duplicates.',
+    '- salary_range contains "$" for every item.',
     '',
     'OUTPUT:',
-    'Return ONLY the JSON array.'
+    'Return ONLY the JSON array.',
   ].join('\n');
+}
+
+function _normalizeMultiverseRecommendedRole(raw, { pathType, idx }) {
+  const title = _normalizeLabel(raw?.role_title || raw?.title || raw?.roleTitle || '');
+  if (!title) return null;
+
+  const normalizedPathType = ['lateral', 'vertical', 'pivot', 'non_linear'].includes(String(pathType)) ? String(pathType) : 'lateral';
+  const slug = _slugify(title) || `role-${idx + 1}`;
+
+  const roleIdRaw = _normalizeLabel(raw?.role_id || raw?.roleId || '');
+  const roleId = roleIdRaw && roleIdRaw.startsWith('bedrock-rec-') ? roleIdRaw : `bedrock-rec-${slug}`;
+
+  const industry = _normalizeLabel(raw?.industry || '') || 'Technology';
+  const salaryRange = _normalizeLabel(raw?.salary_range || raw?.salaryRange || '') || '$120k–$180k';
+  const experienceRange = _normalizeLabel(raw?.experience_range || raw?.experienceRange || '') || '3–6 years';
+
+  const description = _normalizeLabel(raw?.description || '') || `Role aligned to ${normalizedPathType} constraints for this persona.`;
+
+  const keyResponsibilities = _safeArray(raw?.key_responsibilities || raw?.keyResponsibilities)
+    .map((s) => _normalizeLabel(typeof s === 'string' ? s : s?.text || s?.label || ''))
+    .filter(Boolean)
+    .slice(0, 3);
+
+  const requiredSkills = _safeArray(raw?.required_skills || raw?.requiredSkills || raw?.skills_required || raw?.skillsRequired)
+    .map((s) => _normalizeLabel(typeof s === 'string' ? s : s?.name || s?.skill || s?.label || ''))
+    .filter(Boolean);
+
+  // Enforce constraints: exactly 3 responsibilities, 6–8 required skills, unique skills.
+  const resp = keyResponsibilities.length === 3 ? keyResponsibilities : [...keyResponsibilities, 'Deliver measurable outcomes through cross-functional collaboration', 'Own end-to-end execution and quality across stakeholders', 'Use data to prioritize improvements and manage tradeoffs'].slice(0, 3);
+
+  const dedupSkills = [];
+  const seen = new Set();
+  for (const s of requiredSkills) {
+    const k = s.toLowerCase();
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    dedupSkills.push(s);
+  }
+  const skills = (dedupSkills.length >= 6 ? dedupSkills : [...dedupSkills, 'Communication', 'Problem Solving', 'Stakeholder Management', 'Collaboration', 'Ownership', 'Technical Writing'])
+    .slice(0, 8);
+
+  const why = _normalizeLabel(raw?.whyThisMatchesPathType || raw?.why || raw?.rationale || '') || `This role fits the ${normalizedPathType} constraints for a realistic next move.`;
+
+  const confRaw = Number(raw?.confidence);
+  const confidence = Number.isFinite(confRaw) ? Math.max(0, Math.min(100, Math.round(confRaw))) : Math.max(25, 65 - idx * 4);
+
+  return {
+    role_id: roleId,
+    role_title: title,
+    industry,
+    salary_range: salaryRange,
+    experience_range: experienceRange,
+    description,
+    key_responsibilities: resp,
+    required_skills: skills,
+    // Back-compat aliases used by some UIs
+    skills_required: skills,
+    pathType: normalizedPathType,
+    whyThisMatchesPathType: why,
+    confidence,
+  };
 }
 
 async function _generatePathTypeConstrainedRoleRecsSafe({
   pathType,
   currentRoleTitle,
   pathRoleTitles,
-  targetRoleTitle
+  targetRoleTitle,
+  finalPersonaObj,
 } = {}) {
   const deterministic = () => {
-    const titles =
-      pathType === 'vertical'
-        ? ['Senior Role (Progression)', 'Lead Role (Progression)', 'Manager (Progression)', 'Principal (Progression)', 'Head (Progression)']
-        : pathType === 'pivot'
-          ? ['Pivot Role 1', 'Pivot Role 2', 'Pivot Role 3', 'Pivot Role 4', 'Pivot Role 5']
-          : pathType === 'non_linear'
-            ? ['Hybrid Role 1', 'Hybrid Role 2', 'Hybrid Role 3', 'Hybrid Role 4', 'Hybrid Role 5']
-            : ['Lateral Role 1', 'Lateral Role 2', 'Lateral Role 3', 'Lateral Role 4', 'Lateral Role 5'];
+    const normalizedPathType = ['lateral', 'vertical', 'pivot', 'non_linear'].includes(String(pathType)) ? String(pathType) : 'lateral';
+    const base =
+      normalizedPathType === 'vertical'
+        ? ['Senior', 'Lead', 'Staff', 'Principal', 'Manager']
+        : normalizedPathType === 'pivot'
+          ? ['Associate', 'Specialist', 'Analyst', 'Strategist', 'Consultant']
+          : normalizedPathType === 'non_linear'
+            ? ['Hybrid', 'Cross-Functional', 'Portfolio', 'Generalist', 'Builder']
+            : ['Lateral', 'Adjacent', 'Peer', 'Parallel', 'Sideways'];
 
-    return titles.slice(0, 5).map((t, idx) => ({
-      role_title: t,
-      pathType: String(pathType || 'lateral'),
-      whyThisMatchesPathType: 'Fallback recommendation due to Bedrock unavailability.',
-      confidence: Math.max(10, 50 - idx * 3),
-      meta: { bedrockUsed: false, fallback: true }
-    }));
+    return base.slice(0, 5).map((t, idx) => {
+      const roleTitle = `${t} Role Option ${idx + 1}`;
+      return _normalizeMultiverseRecommendedRole(
+        {
+          role_id: `bedrock-rec-${normalizedPathType}-${idx + 1}`,
+          role_title: roleTitle,
+          industry: 'Technology',
+          salary_range: '$120k–$180k',
+          experience_range: '3–6 years',
+          description: 'Fallback recommendation due to Bedrock unavailability.',
+          key_responsibilities: [
+            'Deliver scoped outcomes aligned to business goals and constraints',
+            'Collaborate with stakeholders to define requirements and success metrics',
+            'Improve quality through iteration, measurement, and clear communication',
+          ],
+          required_skills: ['Communication', 'Problem Solving', 'Collaboration', 'Ownership', 'Technical Skills', 'Stakeholder Management'],
+          pathType: normalizedPathType,
+          whyThisMatchesPathType: 'Fallback recommendation due to Bedrock unavailability.',
+          confidence: Math.max(10, 55 - idx * 4),
+        },
+        { pathType: normalizedPathType, idx }
+      );
+    });
   };
 
   try {
     const modelId = _resolveBedrockModelId({
       override: null,
-      envKeys: ['BEDROCK_MULTIVERSE_MODEL_ID', 'BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID']
+      envKeys: ['BEDROCK_MULTIVERSE_MODEL_ID', 'BEDROCK_RECOMMENDATIONS_MODEL_ID', 'BEDROCK_ROLE_MODEL_ID', 'BEDROCK_MODEL_ID'],
     });
+
+    const personaContext = _extractPersonaContextForPrompt(finalPersonaObj);
 
     const prompt = _buildMultiversePathRolesPrompt({
       pathType,
       currentRoleTitle,
       pathRoleTitles,
-      targetRoleTitle
+      targetRoleTitle,
+      personaContext,
     });
 
     const body = {
       anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 900,
-      temperature: 0.2,
-      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
+      max_tokens: 1400,
+      temperature: 0.25,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     };
 
     const client = _getBedrockClient();
@@ -506,7 +763,7 @@ async function _generatePathTypeConstrainedRoleRecsSafe({
       modelId,
       contentType: 'application/json',
       accept: 'application/json',
-      body: Buffer.from(JSON.stringify(body))
+      body: Buffer.from(JSON.stringify(body)),
     });
 
     const resp = await client.send(cmd);
@@ -520,32 +777,22 @@ async function _generatePathTypeConstrainedRoleRecsSafe({
     const parsed = JSON.parse(arrText);
     if (!Array.isArray(parsed)) throw new Error('Parsed Bedrock output is not an array.');
 
-    // Normalize and enforce pathType on the server too (belt-and-suspenders).
-    const allowed = new Set(['lateral', 'vertical', 'pivot', 'non_linear']);
-    const normalizedPathType = allowed.has(String(pathType)) ? String(pathType) : 'lateral';
+    const normalizedPathType = ['lateral', 'vertical', 'pivot', 'non_linear'].includes(String(pathType)) ? String(pathType) : 'lateral';
 
     const out = [];
-    const seen = new Set();
-    for (const item of parsed) {
-      if (!item || typeof item !== 'object') continue;
+    const seenTitle = new Set();
 
-      const title = _normalizeLabel(item.role_title || item.title || item.roleTitle);
-      if (!title) continue;
+    for (let i = 0; i < parsed.length; i += 1) {
+      const norm = _normalizeMultiverseRecommendedRole(parsed[i], { pathType: normalizedPathType, idx: i });
+      if (!norm) continue;
 
-      const key = title.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const why = _normalizeLabel(item.whyThisMatchesPathType || item.why || item.rationale || '');
-      const confidenceRaw = Number(item.confidence);
-      const confidence = Number.isFinite(confidenceRaw) ? Math.max(0, Math.min(100, Math.round(confidenceRaw))) : 50;
+      const key = norm.role_title.toLowerCase();
+      if (seenTitle.has(key)) continue;
+      seenTitle.add(key);
 
       out.push({
-        role_title: title,
-        pathType: normalizedPathType,
-        whyThisMatchesPathType: why || `Recommended because it fits the ${normalizedPathType} path constraints.`,
-        confidence,
-        meta: { bedrockUsed: true, fallback: false }
+        ...norm,
+        meta: { bedrockUsed: true, fallback: false },
       });
 
       if (out.length >= 5) break;
@@ -553,101 +800,173 @@ async function _generatePathTypeConstrainedRoleRecsSafe({
 
     if (out.length === 5) return out;
 
-    // If Bedrock returned insufficient valid items, pad with deterministic (still constrained to pathType).
-    const padded = deterministic();
-    return [...out, ...padded].slice(0, 5).map((r) => ({ ...r, pathType: normalizedPathType }));
-  } catch (err) {
+    // pad deterministically
+    const pad = deterministic();
+    const combined = [...out];
+    for (const r of pad) {
+      if (combined.length >= 5) break;
+      if (!r) continue;
+      const key = String(r.role_title || '').toLowerCase();
+      if (seenTitle.has(key)) continue;
+      seenTitle.add(key);
+      combined.push({ ...r, pathType: normalizedPathType });
+    }
+
+    return combined.slice(0, 5);
+  } catch (_) {
     return deterministic();
   }
 }
 
-async function _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode, pathType = 'lateral' }) {
+function _scoreRecommendedRoles({ finalPersonaObj, roles }) {
   /**
-   * Bedrock enrichment:
-   * - Provide deterministic path details (gaps/resources/effort) ALWAYS.
-   * - Additionally generate pathType-specific role recommendations, strictly constrained by pathType.
-   *
-   * Safety:
-   * - If Bedrock fails, return deterministic envelope + deterministic recommendedRoles.
-   * - Never throw from this function.
+   * Compute compatibility scores + threeTwoReport for each recommended role card.
+   * If persona proficiencies are missing, we still return deterministic compatibilityScore=0.
    */
-  const pathRoleTitles = _safeArray(path?.nodeIds)
+  const skillsWithProf = _extractPersonaSkillProficiencies(finalPersonaObj);
+  const hasProfs = Array.isArray(skillsWithProf) && skillsWithProf.length > 0;
+
+  return (Array.isArray(roles) ? roles : []).map((r) => {
+    const requiredSkills = Array.isArray(r?.required_skills) ? r.required_skills : Array.isArray(r?.skills_required) ? r.skills_required : [];
+    if (!hasProfs) {
+      return {
+        ...r,
+        compatibilityScore: 0,
+        finalCompatibilityScore: 0,
+        threeTwoReport: { status: 'not_validated', masteryAreas: [], growthAreas: [], score: 0 },
+        masteryAreas: [],
+        growthAreas: [],
+        match_metadata: {
+          ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+          scoring: { hadUserProficiencies: false, requiredSkillsCount: requiredSkills.length },
+        },
+      };
+    }
+
+    const threeTwo = buildThreeTwoReport(skillsWithProf, requiredSkills);
+    const compat = scoreRoleCompatibility(skillsWithProf, requiredSkills);
+
+    const validationScore = threeTwo?.status === 'validated' ? 100 : 0;
+    const finalCompatibilityScore = Math.max(0, Math.min(100, Math.round(0.6 * (compat?.score || 0) + 0.4 * validationScore)));
+
+    return {
+      ...r,
+      compatibilityScore: compat?.score ?? 0,
+      finalCompatibilityScore,
+      threeTwoReport: threeTwo,
+      masteryAreas: compat?.masteryAreas ?? [],
+      growthAreas: compat?.growthAreas ?? [],
+      match_metadata: {
+        ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+        scoring: { hadUserProficiencies: true, requiredSkillsCount: requiredSkills.length, threeTwoStatus: threeTwo?.status || null },
+      },
+    };
+  });
+}
+
+function _resolveLegacyPathId(graph, pathId) {
+  /**
+   * Legacy hardening:
+   * Some clients mistakenly call /api/multiverse/paths/:id using a role title like
+   * "Backend Engineer (Node.js)" instead of the backend-defined path ids ("path_1").
+   *
+   * We try to resolve:
+   * 1) exact path.id match
+   * 2) exact path.title match (case-insensitive)
+   * 3) contains a node whose label/title matches pathId (case-insensitive)
+   */
+  const pid = _normalizeLabel(pathId);
+  if (!pid) return null;
+
+  const paths = _safeArray(graph?.paths);
+  const nodes = _safeArray(graph?.nodes);
+
+  const nodesById = new Map();
+  for (const n of nodes) nodesById.set(String(n?.id), n);
+
+  const byId = paths.find((p) => String(p?.id) === pid);
+  if (byId) return byId;
+
+  const lower = pid.toLowerCase();
+  const byTitle = paths.find((p) => _normalizeLabel(p?.title).toLowerCase() === lower);
+  if (byTitle) return byTitle;
+
+  for (const p of paths) {
+    const nodeIds = _safeArray(p?.nodeIds);
+    for (const nid of nodeIds) {
+      const n = nodesById.get(String(nid));
+      const label = _normalizeLabel(n?.data?.title || n?.label || '');
+      if (label && label.toLowerCase() === lower) return p;
+    }
+  }
+
+  return null;
+}
+
+async function _buildPathDetailsSafe({ personaId, graph, path, centerNode, pathType, finalPersonaObj }) {
+  const nodesById = {};
+  for (const n of graph.nodes) nodesById[n.id] = n;
+
+  const pathRoleTitlesAll = _safeArray(path?.nodeIds)
     .map((id) => nodesById[id]?.data?.title || nodesById[id]?.label)
     .filter(Boolean)
-    .slice(0, 6);
+    .slice(0, 8);
 
-  const targetTitle = pathRoleTitles[pathRoleTitles.length - 1] || 'Target Role';
+  const steps = pathRoleTitlesAll.slice(1); // exclude current node
+  const targetTitle = steps[steps.length - 1] || 'Target Role';
 
-  const deterministic = {
+  const recommendedRolesRaw = await _generatePathTypeConstrainedRoleRecsSafe({
+    pathType,
+    currentRoleTitle: centerNode?.label,
+    pathRoleTitles: steps,
+    targetRoleTitle: targetTitle,
+    finalPersonaObj,
+  });
+
+  const scoredRecommendedRoles = _scoreRecommendedRoles({ finalPersonaObj, roles: recommendedRolesRaw }).map((r) => ({
+    ...r,
+    match_metadata: {
+      ...(r.match_metadata && typeof r.match_metadata === 'object' ? r.match_metadata : {}),
+      source: 'multiverse_path_recs',
+      personaId: personaId || null,
+      pathType: String(pathType || 'lateral'),
+      bedrockUsed: Boolean(r?.meta?.bedrockUsed),
+      fallback: Boolean(r?.meta?.fallback),
+    },
+  }));
+
+  const deterministicEffort =
+    path?.meta?.horizon === 'Far' ? '18–36 months' : path?.meta?.horizon === 'Mid' ? '9–18 months' : '3–9 months';
+
+  const targetNodeId = path?.nodeIds?.[path.nodeIds.length - 1];
+  const gapSkills =
+    _detailsForNode(nodesById[targetNodeId] || {}, centerNode)?.skillGap?.missingSkills || [];
+
+  return {
     pathId: path.id,
     title: path.title || null,
+    steps,
     nodeIds: path.nodeIds,
     pathType: String(pathType || 'lateral'),
     targetRoleTitle: targetTitle,
     effortEstimate: {
       level: path?.meta?.horizon || 'Near',
-      timeline: path?.meta?.horizon === 'Far' ? '18–36 months' : path?.meta?.horizon === 'Mid' ? '9–18 months' : '3–9 months',
+      timeline: deterministicEffort,
     },
     gaps: {
-      missingSkills: _detailsForNode(nodesById[path.nodeIds[path.nodeIds.length - 1]] || {}, centerNode)?.skillGap?.missingSkills || [],
-      suggestedProjects: [
-        `Build a portfolio project aligned to ${targetTitle}`,
-        'Ship a measurable improvement in your current role',
-      ],
+      missingSkills: gapSkills,
+      suggestedProjects: [`Build a portfolio project aligned to ${targetTitle}`, 'Ship a measurable improvement in your current role'],
     },
     resources: {
       learning: ['Official documentation', 'Role-specific roadmap', 'Hands-on labs'],
       certification: ['Optional: role-relevant certification (if applicable)'],
     },
-    recommendedRoles: [],
-    meta: { bedrockUsed: false, fallback: true },
+    recommendedRoles: scoredRecommendedRoles,
+    meta: {
+      bedrockUsed: scoredRecommendedRoles.some((r) => r?.match_metadata?.bedrockUsed === true),
+      fallback: scoredRecommendedRoles.every((r) => r?.meta?.fallback === true),
+    },
   };
-
-  // Recommended roles (pathType constrained). If no personaId, still produce recs (prompt uses titles only).
-  const recommendedRoles = await _generatePathTypeConstrainedRoleRecsSafe({
-    pathType,
-    currentRoleTitle: centerNode?.label,
-    pathRoleTitles,
-    targetRoleTitle: targetTitle
-  });
-
-  // If no personaId, skip any additional Bedrock calls beyond recs (already done) and return.
-  if (!personaId) {
-    return {
-      ...deterministic,
-      recommendedRoles,
-      meta: { ...deterministic.meta, bedrockUsed: false, fallback: true }
-    };
-  }
-
-  // Keep prior "invoke Bedrock" behavior minimal: treat as an optional side-effect marker only.
-  try {
-    await bedrockService.generateTargetedRolesSafe(
-      {
-        query: `Generate JSON ONLY: Provide gaps/resources/effort for moving from "${centerNode.label}" to "${targetTitle}" via [${pathRoleTitles.join(' -> ')}].`,
-        requestType: 'searched',
-        finalPersonaObj: {},
-        skills: centerNode?.data?.requiredSkills || [],
-      },
-      { allowFallback: false }
-    );
-
-    return {
-      ...deterministic,
-      recommendedRoles,
-      meta: { bedrockUsed: true, fallback: false, note: 'Bedrock invoked (details deterministic; role recs pathType-enforced).' },
-    };
-  } catch (err) {
-    return {
-      ...deterministic,
-      recommendedRoles,
-      meta: {
-        bedrockUsed: false,
-        fallback: true,
-        bedrockError: { code: err?.code || err?.name || 'BEDROCK_FAILED', message: err?.message || String(err) },
-      },
-    };
-  }
 }
 
 // PUBLIC_INTERFACE
@@ -663,7 +982,7 @@ export async function buildMultiverseGraph({
    *
    * Inputs:
    * - personaId (required for personalized pool; if missing, graph is still returned using empty pool)
-   * - filters: { minSalaryLpa, maxSalaryLpa, minSkillSimilarity, timeHorizon }
+   * - filters: { minSalaryUsdK, maxSalaryUsdK, minSalaryLpa, maxSalaryLpa, minSkillSimilarity, timeHorizon }
    *
    * Output:
    * { meta, nodes, edges, detailsByNodeId, paths }
@@ -720,9 +1039,10 @@ export async function buildMultiverseGraph({
   const nodesAll = [centerNode, ...L1, ...L2, ...L3];
 
   // Build edges with optional horizon filter.
-  const timeHorizon = filters?.timeHorizon && ['Near', 'Mid', 'Far'].includes(String(filters.timeHorizon)) ? String(filters.timeHorizon) : null;
-  const edges = [];
+  const timeHorizon =
+    filters?.timeHorizon && ['Near', 'Mid', 'Far'].includes(String(filters.timeHorizon)) ? String(filters.timeHorizon) : null;
 
+  const edges = [];
   const includeH = (h) => !timeHorizon || timeHorizon === h;
 
   for (const n of L1) {
@@ -758,9 +1078,6 @@ export async function buildMultiverseGraph({
   for (const n of nodes) {
     detailsByNodeId[n.id] = _detailsForNode(n, centerNode);
   }
-
-  const nodesById = {};
-  for (const n of nodes) nodesById[n.id] = n;
 
   const paths = _buildDeterministicPathsFromNodes({ centerNode, nodes });
 
@@ -803,21 +1120,28 @@ export async function getPathDetails({
 } = {}) {
   /**
    * Return a "path details" object:
+   * - steps
    * - gaps (skills + projects)
    * - resources
    * - effortEstimate
-   * - recommendedRoles (pathType-constrained; generated via Bedrock when available)
+   * - recommendedRoles (persona-personalized AND pathType-constrained)
    */
   const graph = await buildMultiverseGraph({ personaId, currentRoleTitle, limit: 25, filters });
   const centerNode = graph.nodes.find((n) => n.type === 'current_role') || _defaultCenterNode({ currentRoleTitle });
 
-  const nodesById = {};
-  for (const n of graph.nodes) nodesById[n.id] = n;
+  const resolvedPath = _resolveLegacyPathId(graph, pathId);
+  if (!resolvedPath) return null;
 
-  const path = _safeArray(graph.paths).find((p) => String(p.id) === String(pathId));
-  if (!path) return null;
+  const finalPersonaObj = personaId ? await _loadFinalPersonaObjSafe(personaId) : {};
 
-  return _bedrockPathDetailsSafe({ personaId, path, nodesById, centerNode, pathType });
+  return _buildPathDetailsSafe({
+    personaId,
+    graph,
+    path: resolvedPath,
+    centerNode,
+    pathType,
+    finalPersonaObj,
+  });
 }
 
 export default { buildMultiverseGraph, getNodeDetails, getPathDetails };

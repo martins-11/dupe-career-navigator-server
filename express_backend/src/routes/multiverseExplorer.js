@@ -349,8 +349,14 @@ router.get('/paths/:id', async (req, res) => {
     const currentRoleTitle = req.query?.currentRoleTitle ? String(req.query.currentRoleTitle).trim() : 'Current Role';
 
     const filters = {
+      // Canonical: USD thousands (k). These are used by the multiverse graph + details filters.
+      minSalaryUsdK: req.query?.minSalaryUsdK != null ? Number(req.query.minSalaryUsdK) : undefined,
+      maxSalaryUsdK: req.query?.maxSalaryUsdK != null ? Number(req.query.maxSalaryUsdK) : undefined,
+
+      // Legacy aliases (still accepted)
       minSalaryLpa: req.query?.minSalaryLpa != null ? Number(req.query.minSalaryLpa) : undefined,
       maxSalaryLpa: req.query?.maxSalaryLpa != null ? Number(req.query.maxSalaryLpa) : undefined,
+
       minSkillSimilarity: req.query?.minSkillSimilarity != null ? Number(req.query.minSkillSimilarity) : undefined,
       timeHorizon: req.query?.timeHorizon ? String(req.query.timeHorizon) : undefined,
     };
