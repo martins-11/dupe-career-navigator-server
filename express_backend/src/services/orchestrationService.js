@@ -696,7 +696,22 @@ async function generatePersonaDraftForBuild(buildId, input) {
   });
 
   try {
-    const result = await personaService.generatePersonaDraft(sourceText, { context });
+    /**
+     * Minimal hardening for MVP ingestion:
+     * - personaService enforces a minimum text length (currently 100 chars) and throws INVALID_INPUT_LENGTH.
+     * - In ingestion flows, short uploads/extractions should not break the entire orchestration run-all.
+     * - Therefore, for this specific domain error we fall back to mock mode to still return a schema-valid draft.
+     */
+    let result;
+    try {
+      result = await personaService.generatePersonaDraft(sourceText, { context });
+    } catch (e) {
+      if (e?.code === 'INVALID_INPUT_LENGTH') {
+        result = await personaService.generatePersonaDraft(sourceText, { context, preferMock: true });
+      } else {
+        throw e;
+      }
+    }
 
     // personaService may return a structured fallback: { error: 'AI_GENERATION_FAILED', retryable: true }
     if (result && typeof result === 'object' && result.error === 'AI_GENERATION_FAILED') {
