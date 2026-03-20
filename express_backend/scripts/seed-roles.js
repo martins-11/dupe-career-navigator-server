@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
 import rolesRepo from '../src/repositories/rolesRepoAdapter.js';
+import { dbClose } from '../src/db/connection.js';
 
 /**
  * Seed the roles catalog table if it's empty.
@@ -13,6 +14,10 @@ import rolesRepo from '../src/repositories/rolesRepoAdapter.js';
  * Notes:
  * - Uses existing env-driven DB configuration. This script loads express_backend/.env explicitly.
  * - Safe to run multiple times: will only seed when roles table is empty.
+ *
+ * IMPORTANT:
+ * - This script MUST terminate deterministically in CI.
+ * - Because it touches the DB layer, it may create a MySQL pool; we must close it before exit.
  */
 
 const __filename = fileURLToPath(import.meta.url);
@@ -165,8 +170,19 @@ async function main() {
   console.log(`[seed-roles] inserted=${res.inserted} roles. total=${after}`);
 }
 
-main().catch((e) => {
-  // eslint-disable-next-line no-console
-  console.error('[seed-roles] failed:', e);
-  process.exitCode = 1;
-});
+main()
+  .then(async () => {
+    // Ensure DB handles do not keep the process open.
+    await dbClose();
+    process.exit(0);
+  })
+  .catch(async (e) => {
+    // eslint-disable-next-line no-console
+    console.error('[seed-roles] failed:', e);
+    try {
+      await dbClose();
+    } catch (_) {
+      // ignore close errors
+    }
+    process.exit(1);
+  });
