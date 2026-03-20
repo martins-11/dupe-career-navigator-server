@@ -907,70 +907,87 @@ function _updateWorkflowProgress(buildId, patch) {
    * - progress/message/currentStep patched monotonically
    * - terminal states set via succeedWorkflow/failWorkflow (state machine enforced)
    *
+   * CRITICAL:
+   * - Workflow updates must NEVER mask the real underlying orchestration error.
+   *   If workflowService rejects an update (e.g., queued -> failed), we swallow it.
+   *
    * @param {string} buildId
    * @param {{ status?: 'running'|'succeeded'|'failed'|'cancelled', progress?: number, message?: string|null, currentStep?: string|null, failure?: object }} patch
    */
-  const wf = workflowService.getWorkflowUnsafeRead
-    ? workflowService.getWorkflowUnsafeRead(buildId)
-    : workflowService.getWorkflow(buildId);
-
-  if (!wf) return null;
-
-  /**
-   * If caller is trying to set a terminal status, use the explicit APIs.
-   *
-   * IMPORTANT bugfix:
-   * workflowService enforces a strict state machine:
-   *   queued -> running|cancelled
-   *   running -> succeeded|failed|cancelled
-   *
-   * Orchestration can fail very quickly (e.g., missing extracted text) before the
-   * background workflow simulator ticks queued->running. In that case, calling
-   * failWorkflow() would attempt an invalid transition queued->failed and throw,
-   * masking the real underlying orchestration error with INVALID_WORKFLOW_TRANSITION.
-   *
-   * Therefore, when we need to set a terminal status while still queued, we first
-   * best-effort transition queued->running.
-   */
-  const ensureRunningIfQueued = () => {
-    const cur = workflowService.getWorkflowUnsafeRead
+  try {
+    const wf = workflowService.getWorkflowUnsafeRead
       ? workflowService.getWorkflowUnsafeRead(buildId)
       : workflowService.getWorkflow(buildId);
 
-    if (!cur) return;
+    if (!wf) return null;
 
-    if (cur.status === 'queued' && typeof workflowService.transitionWorkflow === 'function') {
+    /**
+     * If caller is trying to set a terminal status, use the explicit APIs.
+     *
+     * IMPORTANT bugfix:
+     * workflowService enforces a strict state machine:
+     *   queued -> running|cancelled
+     *   running -> succeeded|failed|cancelled
+     *
+     * Orchestration can fail very quickly (e.g., missing extracted text) before the
+     * background workflow simulator ticks queued->running. In that case, calling
+     * failWorkflow() would attempt an invalid transition queued->failed and throw,
+     * masking the real underlying orchestration error with INVALID_WORKFLOW_TRANSITION.
+     *
+     * Therefore, when we need to set a terminal status while still queued, we first
+     * best-effort transition queued->running.
+     */
+    const ensureRunningIfQueued = () => {
+      const cur = workflowService.getWorkflowUnsafeRead
+        ? workflowService.getWorkflowUnsafeRead(buildId)
+        : workflowService.getWorkflow(buildId);
+
+      if (!cur) return;
+
+      if (cur.status === 'queued' && typeof workflowService.transitionWorkflow === 'function') {
+        try {
+          workflowService.transitionWorkflow(buildId, 'running', {
+            progress: Math.max(Number(cur.progress || 0), 1),
+            currentStep: patch?.currentStep ?? cur.currentStep ?? 'validate_inputs',
+            message: patch?.message ?? cur.message ?? 'Orchestration running…'
+          });
+        } catch (_) {
+          // Best-effort only. If another tick already moved state, ignore.
+        }
+      }
+    };
+
+    if (patch && patch.status === 'failed') {
+      ensureRunningIfQueued();
       try {
-        workflowService.transitionWorkflow(buildId, 'running', {
-          progress: Math.max(Number(cur.progress || 0), 1),
-          currentStep: patch?.currentStep ?? cur.currentStep ?? 'validate_inputs',
-          message: patch?.message ?? cur.message ?? 'Orchestration running…'
-        });
+        return workflowService.failWorkflow(buildId, patch.message || 'Build failed.', patch.failure || null);
       } catch (_) {
-        // Best-effort only. If another tick already moved state, ignore.
+        return wf;
       }
     }
-  };
+    if (patch && patch.status === 'succeeded') {
+      ensureRunningIfQueued();
+      try {
+        return workflowService.succeedWorkflow(buildId, patch.message || 'Build complete.');
+      } catch (_) {
+        return wf;
+      }
+    }
 
-  if (patch && patch.status === 'failed') {
-    ensureRunningIfQueued();
-    return workflowService.failWorkflow(buildId, patch.message || 'Build failed.', patch.failure || null);
-  }
-  if (patch && patch.status === 'succeeded') {
-    ensureRunningIfQueued();
-    return workflowService.succeedWorkflow(buildId, patch.message || 'Build complete.');
-  }
+    // For non-terminal status updates, patch safe fields.
+    if (workflowService.patchWorkflow) {
+      return workflowService.patchWorkflow(buildId, {
+        progress: patch.progress,
+        message: patch.message,
+        currentStep: patch.currentStep
+      });
+    }
 
-  // For non-terminal status updates, patch safe fields.
-  if (workflowService.patchWorkflow) {
-    return workflowService.patchWorkflow(buildId, {
-      progress: patch.progress,
-      message: patch.message,
-      currentStep: patch.currentStep
-    });
+    return wf;
+  } catch (_) {
+    // Best-effort only; never mask orchestration result with workflow update failure.
+    return null;
   }
-
-  return wf;
 }
 
 // PUBLIC_INTERFACE
