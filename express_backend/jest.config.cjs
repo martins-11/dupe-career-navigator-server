@@ -24,8 +24,12 @@ module.exports = {
    * Some tests still use `require(...)` even though Jest runs them as ESM under
    * `type: module`. Provide a small shim so those tests can keep using `require`
    * without failing with "ReferenceError: require is not defined".
+   *
+   * IMPORTANT:
+   * Jest loads setupFilesAfterEnv in a CJS context in some configurations even
+   * when the repo is ESM-first. Therefore the shim MUST be CommonJS.
    */
-  setupFilesAfterEnv: ['<rootDir>/tests/jest.setup.esm-shim.js'],
+  setupFilesAfterEnv: ['<rootDir>/tests/jest.setup.esm-shim.cjs'],
 
   // Reduce accidental hangs in CI by enforcing a hard per-test timeout.
   testTimeout: 60_000,

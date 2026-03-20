@@ -37,8 +37,13 @@ router.post('/', async (req, res) => {
   // NOTE: PersonaCreateRequest is a lazy async Zod schema proxy; safeParse returns a Promise.
   const parsed = await PersonaCreateRequest.safeParse(req.body);
   if (!parsed.success) {
-    // Match OpenAPI ErrorResponse shape
-    return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
+    // Match OpenAPI ErrorResponse shape (and guard against unexpected ZodError shapes).
+    const details =
+      parsed && parsed.error && typeof parsed.error.flatten === 'function'
+        ? parsed.error.flatten()
+        : { issues: parsed?.error?.issues || parsed?.error || null };
+
+    return res.status(400).json({ error: 'validation_error', details });
   }
 
   try {

@@ -777,20 +777,21 @@ function _getBedrockClient() {
   /**
    * Bedrock client configuration.
    *
-   * Credentials:
-   * - Resolved by AWS SDK v3 default provider chain (env vars, shared config, SSO, instance/role, etc.)
-   *
-   * Region:
-   * - In some preview environments, AWS credentials are present but AWS_REGION is not injected into
-   *   the Node process. Support multiple standard env var names and an explicit BEDROCK_REGION override.
-   *
-   * Retries (IMPORTANT):
-   * - AWS SDK has its own retry strategy. For latency-sensitive endpoints we want to keep
-   *   internal retries small because they can stack with our own retry/attempt logic.
-   *
-   * Env (optional):
-   * - BEDROCK_MAX_ATTEMPTS: total attempts the AWS SDK may make (default: 2)
+   * TEST SAFETY:
+   * - In Jest/CI we must never attempt real AWS credential resolution (it can throw
+   *   CredentialsProviderError, or hang depending on the provider chain).
+   * - Therefore, when NODE_ENV === 'test' OR BEDROCK_DISABLE === 'true', we refuse to construct
+   *   the AWS client and force callers into their existing safe-fallback behavior.
    */
+  const disabled =
+    String(process.env.BEDROCK_DISABLE || '').toLowerCase() === 'true' || process.env.NODE_ENV === 'test';
+
+  if (disabled) {
+    const err = new Error('Bedrock is disabled in this environment (test safety).');
+    err.code = 'bedrock_disabled';
+    throw err;
+  }
+
   const region =
     process.env.BEDROCK_REGION ||
     process.env.AWS_REGION ||

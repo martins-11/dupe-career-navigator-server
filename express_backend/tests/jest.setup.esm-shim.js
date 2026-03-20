@@ -1,16 +1,27 @@
+'use strict';
+
 /**
- * Jest ESM shim
+ * Jest setup shim (CommonJS)
  *
- * Jest runs this repo's `.js` tests as ESM due to `"type": "module"`.
- * A few legacy tests still use `require(...)`. In ESM, `require` is not defined,
- * so those tests fail with `ReferenceError: require is not defined`.
+ * NOTE:
+ * - This file previously contained ESM `import` syntax, which can crash Jest when it loads setup
+ *   files in a CommonJS context.
+ * - Even though jest.config.cjs now points at jest.setup.esm-shim.cjs, this file may still be
+ *   referenced by stale configs/caches or other tooling. Keeping it CJS prevents hard failures.
  *
- * This shim provides a `global.require` implementation using Node's `createRequire`.
- *
- * It is intentionally a `.js` file (ESM in this repo), so we can use `import` here.
+ * Responsibilities:
+ * 1) Provide `globalThis.require` for ESM tests that still call `require(...)`.
+ * 2) Provide `globalThis.jest` for ESM tests that reference `jest` as a global.
  */
 
-import { createRequire } from 'node:module';
+const { createRequire } = require('node:module');
 
-// Provide a CommonJS-like `require` for tests that still call it.
-globalThis.require = createRequire(import.meta.url);
+globalThis.require = createRequire(__filename);
+
+try {
+  // eslint-disable-next-line global-require
+  const { jest } = require('@jest/globals');
+  globalThis.jest = jest;
+} catch (_) {
+  // no-op
+}

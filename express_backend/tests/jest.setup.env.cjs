@@ -35,10 +35,7 @@ delete process.env.MYSQL_USER;
 delete process.env.MYSQL_PASSWORD;
 
 // Prevent accidental real Bedrock usage in tests unless explicitly configured.
-//
-// IMPORTANT:
-// Some codepaths may still construct an AWS client even when we intend to use deterministic fallbacks.
-// Ensure a region is present to avoid hard-crashing with "missing_aws_region" during Jest runs.
+process.env.BEDROCK_DISABLE = process.env.BEDROCK_DISABLE || 'true';
 delete process.env.BEDROCK_MODEL_ID;
 delete process.env.BEDROCK_ROLE_MODEL_ID;
 
