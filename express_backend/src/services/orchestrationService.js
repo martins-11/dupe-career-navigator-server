@@ -786,8 +786,16 @@ async function generatePersonaDraftForBuild(buildId, input) {
     let savedDraft = null;
     let createdVersion = null;
 
+    /**
+     * Contract hardening:
+     * - `createVersion` only makes sense when we have a stable personaId (version history is per persona).
+     * - If personaId is not available yet, do NOT fail the request; treat createVersion as a no-op.
+     *   This prevents 422s in ingestion flows that rely on autoCreatePersona.
+     */
+    const canCreateVersion = Boolean(personaId);
+
     if (personaId && shouldSaveDraft) {
-      if (parsed.createVersion) {
+      if (parsed.createVersion && canCreateVersion) {
         const existingDraft = await personasRepo.getDraft(personaId);
         const existingDraftJson = existingDraft?.draftJson ?? null;
         if (existingDraftJson) {
@@ -952,7 +960,19 @@ async function runAllOrchestration(input) {
     userId: parsed.userId ?? null,
     personaId: parsed.personaId ?? null,
     context: parsed.context ?? null,
-    autoCreatePersona: parsed.autoCreatePersona ?? false,
+
+    /**
+     * Contract hardening (fix 422 during ingestion persona generation):
+     * - Orchestration run-all is used by the MVP ingestion flow, where the frontend often does not have
+     *   an existing personaId yet.
+     * - In that case, the backend must be able to create a persona container automatically so that
+     *   downstream steps like saveDraft/createVersion can behave deterministically.
+     *
+     * OpenAPI/PRD intent: "out of the box" run-all should work with minimal client inputs.
+     * Therefore, default autoCreatePersona to true for run-all unless explicitly disabled.
+     */
+    autoCreatePersona: parsed.autoCreatePersona ?? true,
+
     documentIds: parsed.documentIds
   });
 
