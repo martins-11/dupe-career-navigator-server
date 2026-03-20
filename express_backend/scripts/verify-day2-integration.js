@@ -47,11 +47,40 @@ function maybeSeedRolesIfDbOff() {
   return { attempted: true, seeded: false, exitCode: result.status };
 }
 
-async function httpGetJson(url) {
-  const res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
-  const text = await res.text();
-  let parsed = null;
+async function httpGetJson(url, { timeoutMs = 8_000 } = {}) {
+  /**
+   * Fetch JSON with an explicit timeout so this script cannot hang forever in CI.
+   *
+   * Node 18+ provides global fetch + AbortController.
+   */
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
 
+  let res;
+  let text = '';
+  try {
+    res = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    text = await res.text();
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      const err = new Error(`HTTP request timed out after ${timeoutMs}ms`);
+      err.code = 'HTTP_TIMEOUT';
+      err.details = { url, timeoutMs };
+      throw err;
+    }
+    const err = new Error(`HTTP request failed: ${e?.message || String(e)}`);
+    err.code = 'HTTP_REQUEST_FAILED';
+    err.details = { url };
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
+
+  let parsed = null;
   try {
     parsed = JSON.parse(text);
   } catch (_) {
@@ -142,6 +171,15 @@ export async function main() {
     ok: true,
   };
 
+  // Hard stop: guarantee termination even if a future code path accidentally hangs.
+  const HARD_TIMEOUT_MS = Number(process.env.VERIFY_HARD_TIMEOUT_MS || 60_000);
+  const hardTimeout = setTimeout(() => {
+    // eslint-disable-next-line no-console
+    console.error(`--- FAIL ---\nverify-day2-integration hard timeout after ${HARD_TIMEOUT_MS}ms`);
+    process.exit(1);
+  }, HARD_TIMEOUT_MS);
+  hardTimeout.unref?.();
+
   // eslint-disable-next-line no-console
   console.log(`API_BASE_URL: ${API_BASE_URL}`);
   // eslint-disable-next-line no-console
@@ -162,7 +200,7 @@ export async function main() {
     const seedInfo = maybeSeedRolesIfDbOff();
 
     const urlUnified = `${API_BASE_URL}/api/roles/search?${unifiedParams.toString()}`;
-    const unifiedRoles = await httpGetJson(urlUnified);
+    const unifiedRoles = await httpGetJson(urlUnified, { timeoutMs: 8_000 });
 
     assert(Array.isArray(unifiedRoles), 'Unified search response must be an array');
 
@@ -206,7 +244,7 @@ export async function main() {
     const urlDefaultLimit = `${API_BASE_URL}/api/roles/search?q=Manager&industry=Technology${
       VERIFY_USER_ID ? `&user_id=${encodeURIComponent(VERIFY_USER_ID)}` : ''
     }`;
-    const defaultLimitedRoles = await httpGetJson(urlDefaultLimit);
+    const defaultLimitedRoles = await httpGetJson(urlDefaultLimit, { timeoutMs: 8_000 });
     assert(Array.isArray(defaultLimitedRoles), 'Default limit response must be an array');
     assert(
       defaultLimitedRoles.length <= 10,
@@ -223,7 +261,7 @@ export async function main() {
     const urlOverrideLimit = `${API_BASE_URL}/api/roles/search?q=Manager&industry=Technology&limit=15${
       VERIFY_USER_ID ? `&user_id=${encodeURIComponent(VERIFY_USER_ID)}` : ''
     }`;
-    const overrideRoles = await httpGetJson(urlOverrideLimit);
+    const overrideRoles = await httpGetJson(urlOverrideLimit, { timeoutMs: 8_000 });
     assert(Array.isArray(overrideRoles), 'Override limit response must be an array');
     assert(
       overrideRoles.length <= 15,
@@ -258,6 +296,11 @@ export async function main() {
     console.error('--- FAIL ---');
 
     process.exitCode = 1;
+  } finally {
+    // Clear the hard timeout so a successful run doesn't keep the event loop alive.
+    // (Also helps avoid any chance of repeated/looping output in CI wrappers.)
+    // eslint-disable-next-line no-undef
+    clearTimeout(typeof hardTimeout !== 'undefined' ? hardTimeout : undefined);
   }
 }
 
