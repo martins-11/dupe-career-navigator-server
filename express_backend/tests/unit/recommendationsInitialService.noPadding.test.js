@@ -1,4 +1,4 @@
-'use strict';
+import { jest } from '@jest/globals';
 
 describe('recommendationsInitialService (Bedrock-first; padding only when explicitly enabled)', () => {
   test('when Bedrock returns fewer than 5 valid roles and padding is disabled, the service throws bedrock_insufficient_roles', async () => {
@@ -44,8 +44,9 @@ describe('recommendationsInitialService (Bedrock-first; padding only when explic
       getInitialRecommendations: mockGetInitial
     }));
 
-    // eslint-disable-next-line global-require
-    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = require('../../src/services/recommendationsInitialService');
+    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = await import(
+      '../../src/services/recommendationsInitialService.js'
+    );
 
     const finalPersona = {
       skills_with_proficiency: [

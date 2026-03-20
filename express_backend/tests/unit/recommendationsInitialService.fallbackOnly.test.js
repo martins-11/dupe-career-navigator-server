@@ -1,4 +1,4 @@
-'use strict';
+import { jest } from '@jest/globals';
 
 describe('recommendationsInitialService - fallback only (no Bedrock)', () => {
   test('returns exactly 5 roles and does not call bedrockService.getInitialRecommendations', async () => {
@@ -12,8 +12,9 @@ describe('recommendationsInitialService - fallback only (no Bedrock)', () => {
       getInitialRecommendations: mockGetInitial,
     }));
 
-    // eslint-disable-next-line global-require
-    const { generateInitialRecommendationsFallbackOnly } = require('../../src/services/recommendationsInitialService');
+    const { generateInitialRecommendationsFallbackOnly } = await import(
+      '../../src/services/recommendationsInitialService.js'
+    );
 
     const result = await generateInitialRecommendationsFallbackOnly({
       finalPersona: {
