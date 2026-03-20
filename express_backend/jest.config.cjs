@@ -6,6 +6,15 @@ module.exports = {
   verbose: true,
 
   /**
+   * ESM import path stability:
+   * Some suites import from "src/..." (instead of relative ../../src/...).
+   * Map that prefix to the real rootDir/src so resolution is consistent in Jest.
+   */
+  moduleNameMapper: {
+    '^src/(.*)$': '<rootDir>/src/$1',
+  },
+
+  /**
    * This repository is ESM-first (`package.json` has `"type": "module"`).
    *
    * Jest is invoked with `NODE_OPTIONS=--experimental-vm-modules` (see package.json scripts)

@@ -11,7 +11,7 @@
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "db:migrate": "node src/db/migrate.js",
-    "db:check": "node src/db/check.js",
+    "db:check": "node src/db/check.cjs",
     "db:verify": "node src/db/verifyTables.js",
     "validate:nonsense": "node scripts/validate-nonsense-input.js",
     "smoke:db": "node scripts/test-db.js",
