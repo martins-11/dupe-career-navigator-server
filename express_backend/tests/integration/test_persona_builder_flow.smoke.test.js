@@ -1,6 +1,6 @@
 'use strict';
 
-import request from 'supertest';
+const request = require('supertest');
 
 /**
  * MVP Smoke: core persona builder flow in DB-off (memory fallback) mode.
@@ -38,7 +38,7 @@ describe('MVP Smoke: persona builder flow (DB-off / memory fallback)', () => {
   });
 
   test('upload → run-all(draft+save) → finalize(save) → retrieve draft/final', async () => {
-    // Import app AFTER env setup.
+    // Import app AFTER env setup. Use dynamic import so we can load ESM server code from this CJS test.
     const { default: app } = await import('../../src/server.js');
 
     const userId = '11111111-1111-4111-8111-111111111111';
