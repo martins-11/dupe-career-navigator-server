@@ -39,6 +39,19 @@ try {
   const { jest } = require('@jest/globals');
 
   jest.mock('@aws-sdk/client-bedrock-runtime', () => {
+    /**
+     * Jest Bedrock SDK mock.
+     *
+     * IMPORTANT:
+     * - Jest validates ESM named exports against the mock object returned here.
+     * - Production code imports multiple symbols from '@aws-sdk/client-bedrock-runtime'
+     *   (e.g., InvokeModelCommand *and* ConverseCommand). If we omit any, Jest fails at
+     *   module-load time with "does not provide an export named X".
+     *
+     * This mock preserves "AWS disabled" behavior by failing fast if the client is constructed,
+     * while still providing the full named-export surface that our modules import.
+     */
+
     class BedrockRuntimeClient {
       constructor() {
         // If production code ever tries to instantiate this in tests, fail fast and loudly.
@@ -52,7 +65,24 @@ try {
       }
     }
 
-    return { BedrockRuntimeClient, InvokeModelCommand };
+    class ConverseCommand {
+      constructor(_args) {
+        // no-op placeholder
+      }
+    }
+
+    class ConverseStreamCommand {
+      constructor(_args) {
+        // no-op placeholder
+      }
+    }
+
+    return {
+      BedrockRuntimeClient,
+      InvokeModelCommand,
+      ConverseCommand,
+      ConverseStreamCommand,
+    };
   });
 } catch (_) {
   // no-op: do not break test initialization if jest globals are unavailable for some reason
