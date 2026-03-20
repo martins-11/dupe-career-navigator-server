@@ -698,6 +698,8 @@ async function _generatePathTypeConstrainedRoleRecsSafe({
   pathRoleTitles,
   targetRoleTitle,
   finalPersonaObj,
+  timeBudgetMs,
+  skipBedrock = false,
 } = {}) {
   const deterministic = () => {
     const normalizedPathType = ['lateral', 'vertical', 'pivot', 'non_linear'].includes(String(pathType)) ? String(pathType) : 'lateral';
@@ -735,6 +737,12 @@ async function _generatePathTypeConstrainedRoleRecsSafe({
     });
   };
 
+  // If we're explicitly asked to skip Bedrock (or we have essentially no time), return deterministic output immediately.
+  const budget = Number(timeBudgetMs);
+  if (skipBedrock === true || (Number.isFinite(budget) && budget > 0 && budget < 250)) {
+    return deterministic();
+  }
+
   try {
     const modelId = _resolveBedrockModelId({
       override: null,
@@ -766,7 +774,24 @@ async function _generatePathTypeConstrainedRoleRecsSafe({
       body: Buffer.from(JSON.stringify(body)),
     });
 
-    const resp = await client.send(cmd);
+    // Enforce a strict timeout so the endpoint doesn't exceed proxy budgets and cause empty UI.
+    const timeoutMsRaw = Number(process.env.MULTIVERSE_RECS_BEDROCK_TIMEOUT_MS || 1600);
+    const timeoutMs =
+      Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0
+        ? Math.max(350, Math.min(8000, timeoutMsRaw))
+        : 1600;
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+
+    let resp;
+    try {
+      // AWS SDK v3 supports abortSignal via request handler options.
+      resp = await client.send(cmd, { abortSignal: ac.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+
     const jsonStr = Buffer.from(resp.body).toString('utf-8');
     const bedrockJson = JSON.parse(jsonStr);
 
@@ -903,7 +928,7 @@ function _resolveLegacyPathId(graph, pathId) {
   return null;
 }
 
-async function _buildPathDetailsSafe({ personaId, graph, path, centerNode, pathType, finalPersonaObj }) {
+async function _buildPathDetailsSafe({ personaId, graph, path, centerNode, pathType, finalPersonaObj, timeBudgetMs, skipBedrock }) {
   const nodesById = {};
   for (const n of graph.nodes) nodesById[n.id] = n;
 
@@ -921,6 +946,8 @@ async function _buildPathDetailsSafe({ personaId, graph, path, centerNode, pathT
     pathRoleTitles: steps,
     targetRoleTitle: targetTitle,
     finalPersonaObj,
+    timeBudgetMs,
+    skipBedrock,
   });
 
   const scoredRecommendedRoles = _scoreRecommendedRoles({ finalPersonaObj, roles: recommendedRolesRaw }).map((r) => ({
@@ -989,13 +1016,17 @@ export async function buildMultiverseGraph({
    */
   const centerNode = _defaultCenterNode({ currentRoleTitle });
 
-  const pool = personaId
-    ? await exploreRecommendationsPoolService.getOrCreateExploreRecommendationsPool({
-        personaId: String(personaId).trim(),
-        finalPersonaOverride: null,
-        options: { storeCount: 12, timeBudgetMs },
-      })
-    : { roles: [], meta: { cacheHit: false, personaId: null } };
+  // If we're operating under an extremely tight time budget, skip pool generation entirely.
+  // This is used by safe-fallback flows to guarantee a fast response.
+  const tb = Number(timeBudgetMs);
+  const pool =
+    personaId && !(Number.isFinite(tb) && tb > 0 && tb < 250)
+      ? await exploreRecommendationsPoolService.getOrCreateExploreRecommendationsPool({
+          personaId: String(personaId).trim(),
+          finalPersonaOverride: null,
+          options: { storeCount: 12, timeBudgetMs },
+        })
+      : { roles: [], meta: { cacheHit: false, personaId: personaId || null, fallback: true, reason: 'time_budget_too_small_or_missing' } };
 
   const roles = _safeArray(pool?.roles);
 
@@ -1117,6 +1148,8 @@ export async function getPathDetails({
   currentRoleTitle = 'Current Role',
   filters = {},
   pathType = 'lateral',
+  timeBudgetMs = undefined,
+  skipBedrock = false,
 } = {}) {
   /**
    * Return a "path details" object:
@@ -1125,8 +1158,12 @@ export async function getPathDetails({
    * - resources
    * - effortEstimate
    * - recommendedRoles (persona-personalized AND pathType-constrained)
+   *
+   * Reliability:
+   * - `timeBudgetMs` is forwarded to upstream pool generation.
+   * - `skipBedrock=true` forces deterministic recommendedRoles (used for safe fallback on timeouts).
    */
-  const graph = await buildMultiverseGraph({ personaId, currentRoleTitle, limit: 25, filters });
+  const graph = await buildMultiverseGraph({ personaId, currentRoleTitle, limit: 25, filters, timeBudgetMs });
   const centerNode = graph.nodes.find((n) => n.type === 'current_role') || _defaultCenterNode({ currentRoleTitle });
 
   const resolvedPath = _resolveLegacyPathId(graph, pathId);
@@ -1141,6 +1178,8 @@ export async function getPathDetails({
     centerNode,
     pathType,
     finalPersonaObj,
+    timeBudgetMs,
+    skipBedrock,
   });
 }
 

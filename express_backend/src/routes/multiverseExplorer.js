@@ -365,19 +365,54 @@ router.get('/paths/:id', async (req, res) => {
     // Allowed: lateral | vertical | pivot | non_linear
     const pathType = req.query?.pathType ? String(req.query.pathType).trim() : 'lateral';
 
-    const details = await multiverseExplorerService.getPathDetails({
+    /**
+     * Strict time budget for path details to avoid proxy timeouts that result in the UI
+     * silently showing 0 recommended roles.
+     *
+     * If the budget is exceeded, we retry once with skipBedrock=true so the endpoint
+     * still returns deterministic role cards quickly.
+     */
+    const timeBudgetMsRaw = Number(process.env.MULTIVERSE_PATH_DETAILS_TIME_BUDGET_MS || 2200);
+    const timeBudgetMs =
+      Number.isFinite(timeBudgetMsRaw) && timeBudgetMsRaw > 0 ? Math.max(300, Math.min(8000, timeBudgetMsRaw)) : 2200;
+
+    const buildPromise = multiverseExplorerService.getPathDetails({
       personaId,
       pathId,
       currentRoleTitle,
       filters,
       pathType,
+      timeBudgetMs,
+      skipBedrock: false,
     });
 
+    const details = await Promise.race([
+      buildPromise,
+      new Promise((resolve) => setTimeout(() => resolve(null), timeBudgetMs)),
+    ]);
+
     if (!details) {
-      const err = new Error('Path not found.');
-      err.code = 'NOT_FOUND';
-      err.httpStatus = 404;
-      throw err;
+      const fastFallback = await multiverseExplorerService.getPathDetails({
+        personaId,
+        pathId,
+        currentRoleTitle,
+        filters,
+        pathType,
+        timeBudgetMs: 150,
+        skipBedrock: true,
+      });
+
+      if (!fastFallback) {
+        const err = new Error('Path not found.');
+        err.code = 'NOT_FOUND';
+        err.httpStatus = 404;
+        throw err;
+      }
+
+      return res.json({
+        ...fastFallback,
+        meta: { ...(fastFallback.meta || {}), fallback: true, reason: 'time_budget_exceeded' },
+      });
     }
 
     return res.json(details);
