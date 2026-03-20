@@ -1,12 +1,10 @@
-'use strict';
-
 /**
- * Day 2 Integration Verification Script
+ * Day 2 Integration Verification Script (ESM)
  *
- * Verifies the backend integration requirements for Search + Filter:
+ * Verifies backend integration requirements for Search + Filter:
  * 1) Unified Query handling on GET /api/roles/search using keyword + industry (+ optional skills).
  * 2) Result objects are "integration-ready" for Role Comparison Matrix:
- *    - contains title, salary, and skills fields
+ *    - contains role_title, salary_range, and skills_required fields
  * 3) Default limit behavior:
  *    - default should return <= 10 results
  *    - limit query param can override
@@ -19,12 +17,10 @@
  *   VERIFY_USER_ID (optional): if set, the script also asserts is_targetable is present (boolean).
  */
 
-require('dotenv').config();
+import 'dotenv/config';
 
 const API_BASE_URL =
-  process.env.API_BASE_URL ||
-  process.env.KAVIA_BACKEND_URL ||
-  'http://localhost:3001';
+  process.env.API_BASE_URL || process.env.KAVIA_BACKEND_URL || 'http://localhost:3001';
 
 const VERIFY_USER_ID = process.env.VERIFY_USER_ID ? String(process.env.VERIFY_USER_ID).trim() : '';
 
@@ -74,19 +70,29 @@ function validateRoleComparisonReady(role) {
   assert(role && typeof role === 'object', 'Role must be an object');
 
   assert(hasString(role.role_title), 'Role must include role_title (non-empty string)');
-  assert(hasString(role.salary_range) || role.salary_range == null, 'Role should include salary_range (string or null)');
+  assert(
+    hasString(role.salary_range) || role.salary_range == null,
+    'Role should include salary_range (string or null)'
+  );
   assert(hasArray(role.skills_required), 'Role must include skills_required (array)');
 
   // Optional integration field:
   if (VERIFY_USER_ID) {
-    assert(typeof role.is_targetable === 'boolean', 'Role must include is_targetable boolean when VERIFY_USER_ID is set');
+    assert(
+      typeof role.is_targetable === 'boolean',
+      'Role must include is_targetable boolean when VERIFY_USER_ID is set'
+    );
   }
 }
 
 function roleMatchesUnifiedCriteria(role, { q, industry }) {
   // We validate industry strictness (case-insensitive) and keyword in title OR skills.
-  const qNorm = String(q || '').trim().toLowerCase();
-  const indNorm = String(industry || '').trim().toLowerCase();
+  const qNorm = String(q || '')
+    .trim()
+    .toLowerCase();
+  const indNorm = String(industry || '')
+    .trim()
+    .toLowerCase();
 
   if (indNorm) {
     if (String(role.industry || '').trim().toLowerCase() !== indNorm) return false;
@@ -104,16 +110,18 @@ function roleMatchesUnifiedCriteria(role, { q, industry }) {
 }
 
 // PUBLIC_INTERFACE
-async function main() {
+export async function main() {
   /** Entrypoint: runs Day 2 integration verification and prints a structured report. */
   const report = {
     apiBaseUrl: API_BASE_URL,
     userIdProvided: Boolean(VERIFY_USER_ID),
     steps: [],
-    ok: true
+    ok: true,
   };
 
+  // eslint-disable-next-line no-console
   console.log(`API_BASE_URL: ${API_BASE_URL}`);
+  // eslint-disable-next-line no-console
   if (VERIFY_USER_ID) console.log(`VERIFY_USER_ID: ${VERIFY_USER_ID}`);
 
   try {
@@ -123,7 +131,7 @@ async function main() {
     const unified = { q: 'Manager', industry: 'Technology' };
     const unifiedParams = new URLSearchParams({
       q: unified.q,
-      industry: unified.industry
+      industry: unified.industry,
     });
     if (VERIFY_USER_ID) unifiedParams.set('user_id', VERIFY_USER_ID);
 
@@ -135,7 +143,10 @@ async function main() {
 
     // Step 2: Validate that returned roles match criteria and are matrix-ready.
     const mismatches = unifiedRoles.filter((r) => !roleMatchesUnifiedCriteria(r, unified));
-    assert(mismatches.length === 0, `Unified search returned roles that do not match criteria (count=${mismatches.length})`);
+    assert(
+      mismatches.length === 0,
+      `Unified search returned roles that do not match criteria (count=${mismatches.length})`
+    );
 
     for (const r of unifiedRoles) validateRoleComparisonReady(r);
 
@@ -148,53 +159,82 @@ async function main() {
         industry: r.industry,
         salary_range: r.salary_range,
         skills_required_count: Array.isArray(r.skills_required) ? r.skills_required.length : null,
-        is_targetable: r.is_targetable
-      }))
+        is_targetable: r.is_targetable,
+      })),
     });
 
     // Step 3: Default limit behavior (no limit param should return <= 10).
-    const urlDefaultLimit = `${API_BASE_URL}/api/roles/search?q=Manager&industry=Technology${VERIFY_USER_ID ? `&user_id=${encodeURIComponent(VERIFY_USER_ID)}` : ''}`;
+    const urlDefaultLimit = `${API_BASE_URL}/api/roles/search?q=Manager&industry=Technology${
+      VERIFY_USER_ID ? `&user_id=${encodeURIComponent(VERIFY_USER_ID)}` : ''
+    }`;
     const defaultLimitedRoles = await httpGetJson(urlDefaultLimit);
     assert(Array.isArray(defaultLimitedRoles), 'Default limit response must be an array');
-    assert(defaultLimitedRoles.length <= 10, `Default limit must return <= 10 results (got ${defaultLimitedRoles.length})`);
+    assert(
+      defaultLimitedRoles.length <= 10,
+      `Default limit must return <= 10 results (got ${defaultLimitedRoles.length})`
+    );
 
     report.steps.push({
       name: 'Default limit (<=10) is enforced',
       request: urlDefaultLimit,
-      resultCount: defaultLimitedRoles.length
+      resultCount: defaultLimitedRoles.length,
     });
 
     // Step 4: Override limit (limit=15 should allow > 10 if available).
-    const urlOverrideLimit = `${API_BASE_URL}/api/roles/search?q=Manager&industry=Technology&limit=15${VERIFY_USER_ID ? `&user_id=${encodeURIComponent(VERIFY_USER_ID)}` : ''}`;
+    const urlOverrideLimit = `${API_BASE_URL}/api/roles/search?q=Manager&industry=Technology&limit=15${
+      VERIFY_USER_ID ? `&user_id=${encodeURIComponent(VERIFY_USER_ID)}` : ''
+    }`;
     const overrideRoles = await httpGetJson(urlOverrideLimit);
     assert(Array.isArray(overrideRoles), 'Override limit response must be an array');
-    assert(overrideRoles.length <= 15, `Override limit must respect limit=15 (got ${overrideRoles.length})`);
+    assert(
+      overrideRoles.length <= 15,
+      `Override limit must respect limit=15 (got ${overrideRoles.length})`
+    );
 
     report.steps.push({
       name: 'Limit override is respected (<=15)',
       request: urlOverrideLimit,
-      resultCount: overrideRoles.length
+      resultCount: overrideRoles.length,
     });
 
+    // eslint-disable-next-line no-console
     console.log('\n--- verify-day2-integration report ---');
+    // eslint-disable-next-line no-console
     console.log(JSON.stringify(report, null, 2));
+    // eslint-disable-next-line no-console
     console.log('--- PASS ---');
   } catch (err) {
     report.ok = false;
     report.error = {
       message: err?.message || String(err),
       code: err?.code || null,
-      details: err?.details || null
+      details: err?.details || null,
     };
 
+    // eslint-disable-next-line no-console
     console.error('\n--- verify-day2-integration report ---');
+    // eslint-disable-next-line no-console
     console.error(JSON.stringify(report, null, 2));
+    // eslint-disable-next-line no-console
     console.error('--- FAIL ---');
 
     process.exitCode = 1;
   }
 }
 
-if (require.main === module) {
-  main();
+/**
+ * ESM-compatible "is main module" check.
+ * Node sets process.argv[1] to the executed script path.
+ */
+const isDirectRun = (() => {
+  try {
+    const executed = process.argv[1] ? new URL(`file://${process.argv[1]}`).href : '';
+    return import.meta.url === executed;
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  await main();
 }
