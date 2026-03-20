@@ -17,5 +17,6 @@ module.exports = {
    */
 
   // Ensure .env is loaded for tests (Jest doesn't execute src/server.js).
-  setupFiles: ['<rootDir>/tests/jest.setup.env.js'],
+  // Keep this setup file as CJS so Jest can load it without ESM vm-modules flags.
+  setupFiles: ['<rootDir>/tests/jest.setup.env.cjs'],
 };
