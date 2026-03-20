@@ -10,7 +10,7 @@ import { uuidV4 } from '../../utils/uuid.js';
  */
 
 const _documents = new Map(); // documentId -> document
-const _extractedTextRows = new Map(); // documentId -> rows[] (append-only)
+const _extractedTextRows = new Map(); // documentId -> row (exactly one per document)
 
 // PUBLIC_INTERFACE
 export async function createDocument(input) {
@@ -73,11 +73,14 @@ export async function getDocumentById(documentId) {
 // PUBLIC_INTERFACE
 export async function upsertExtractedText(documentId, input) {
   /**
-   * Persist extracted text history for a document in memory.
-   * We keep INSERT-only semantics (append-only) to match the DB scaffold behavior.
+   * Upsert extracted text for a document in memory.
+   *
+   * MVP requirement: exactly one extracted-text record per document.
+   * Therefore, we overwrite the previous record (if any) for this documentId.
    */
-  const id = uuidV4();
-  const now = new Date().toISOString();
+  const existing = _extractedTextRows.get(documentId) || null;
+  const id = existing?.id || uuidV4();
+  const createdAt = existing?.createdAt || new Date().toISOString();
 
   const row = {
     id,
@@ -87,22 +90,17 @@ export async function upsertExtractedText(documentId, input) {
     language: input.language ?? null,
     textContent: input.textContent,
     metadataJson: input.metadataJson ?? {},
-    createdAt: now
+    createdAt
   };
 
-  const arr = _extractedTextRows.get(documentId) || [];
-  arr.push(row);
-  _extractedTextRows.set(documentId, arr);
-
+  _extractedTextRows.set(documentId, row);
   return row;
 }
 
 // PUBLIC_INTERFACE
 export async function getLatestExtractedText(documentId) {
-  /** Retrieve the latest extracted text blob for a given document. */
-  const arr = _extractedTextRows.get(documentId) || [];
-  if (arr.length === 0) return null;
-  return arr[arr.length - 1];
+  /** Retrieve the extracted text blob for a given document (single-row semantics). */
+  return _extractedTextRows.get(documentId) || null;
 }
 
 /**

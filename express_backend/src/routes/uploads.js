@@ -38,6 +38,11 @@ const router = express.Router();
  * IMPORTANT CONSTRAINT (per product requirement):
  * - We MUST NOT infer categories from filename or upload index.
  * - If classification fails (can't determine required set), return a graceful 400 explaining what went wrong.
+ *
+ * MVP PIPELINE REQUIREMENT (step 03.01):
+ * - Create document metadata row for each upload.
+ * - Run extraction + normalization best-effort.
+ * - Persist exactly ONE extracted-text record per document (MySQL mode and in-memory fallback).
  */
 
 // Conservative defaults; can be tuned via env.
@@ -290,7 +295,7 @@ function writeUploadToLocalDisk({ originalname, buffer }) {
 }
 
 /**
- * Persist a single uploaded file (metadata + extraction + extracted_text).
+ * Persist a single uploaded file (metadata + extraction + normalization + extracted_text).
  * Expects a "memory storage" file object with `.buffer`.
  *
  * Returns { doc, extraction, normalizedText, extractedEmployeeName }.
@@ -323,8 +328,8 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
     buffer: fileBytes
   });
 
-  // Always persist an extracted_text row when we recognize the type (extraction != null),
-  // even if the extracted text is empty. This guarantees "one extracted_text row per upload".
+  // Persist extracted_text best-effort when we recognize the type (extraction != null).
+  // Guarantee: exactly ONE extracted-text record per document (repo layer is upsert).
   let normalizedText = '';
   let extractedEmployeeName = '';
 
@@ -339,7 +344,7 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
 
     normalizedText = hasMeaningfulText ? normalized.text : '';
 
-    // Best-effort name extraction for performance reviews
+    // Best-effort name extraction for perf reviews (heuristic hint; Bedrock may override)
     if (category === 'performance_review' && normalizedText.trim()) {
       try {
         const extracted = extractNameAndCurrentRole(normalizedText);
@@ -351,23 +356,18 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
 
     const warnings = Array.isArray(extraction.warnings) ? extraction.warnings : [];
 
-    await documentsRepo.upsertExtractedText(doc.id, {
-      extractor: extraction.extractor,
-      extractorVersion: extraction.extractorVersion,
-      language: extraction.language ?? null,
-      textContent: normalizedText,
-      metadataJson: {
-        ...extraction.metadata,
-        warnings,
-        normalization: normalized.stats,
-        extractedTextEmpty: !hasMeaningfulText,
-        extractedEmployeeName: extractedEmployeeName || null,
-        localFile: {
-          storageProvider: 'local',
-          storagePath: absPath
-        }
+    // Build a single metadataJson object; we will do exactly ONE extracted-text upsert per document.
+    const extractedTextMetadata = {
+      ...extraction.metadata,
+      warnings,
+      normalization: normalized.stats,
+      extractedTextEmpty: !hasMeaningfulText,
+      extractedEmployeeName: extractedEmployeeName || null,
+      localFile: {
+        storageProvider: 'local',
+        storagePath: absPath
       }
-    });
+    };
 
     /**
      * Authoritative name + current role extraction/persistence (best-effort, non-blocking):
@@ -375,12 +375,10 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
      * Requirements:
      * - On resume/performance_review uploads, Bedrock is authoritative for BOTH name and current role.
      * - Always overwrite stored values from Bedrock (do not keep previous heuristic values).
-     * - Ensure persona draft/final generation can use these fields so frontend headers show them.
      *
      * Implementation notes:
-     * - We persist role to user_targets (existing storage for "current role").
-     * - We persist BOTH name+role into extracted_text.metadataJson so orchestration can read them even
-     *   when userId is absent (anonymous flows) or when persona generation runs later.
+     * - We persist role to user_targets (existing storage for "current role") when userId exists.
+     * - We persist BOTH name+role into extracted_text.metadataJson so orchestration can read them later.
      */
     if (normalizedText.trim() && (category === 'resume' || category === 'performance_review')) {
       try {
@@ -430,8 +428,7 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
               ? String(heuristic.role).trim()
               : '') || '';
 
-        // 3) Always overwrite stored *role* when we have a userId AND Bedrock produced a role.
-        // (If Bedrock had no role, we fall back to heuristic and store that instead.)
+        // 3) Persist current role for the user (best-effort).
         if (userId && resolvedRole) {
           await userTargetsRepo.upsertUserCurrentRole({
             userId: String(userId),
@@ -440,38 +437,16 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
           });
         }
 
-        // 4) Patch extracted_text metadata with authoritative fields.
-        // We update via an additional extracted_text row so we don't need DB schema changes.
-        // This keeps "one extracted_text row per upload" but allows us to add richer metadata.
-        await documentsRepo.upsertExtractedText(doc.id, {
-          extractor: extraction.extractor,
-          extractorVersion: extraction.extractorVersion,
-          language: extraction.language ?? null,
-          textContent: normalizedText,
-          metadataJson: {
-            ...extraction.metadata,
-            warnings: Array.isArray(extraction.warnings) ? extraction.warnings : [],
-            normalization: normalizeText(extraction.text || '', {
-              removeExtraWhitespace: true,
-              normalizeLineBreaks: true
-            }).stats,
-            extractedTextEmpty: false,
-            extractedEmployeeName: extractedEmployeeName || null,
-            extractedPersonFullName: resolvedName || null,
-            extractedCurrentRoleTitle: resolvedRole || null,
-            extractedNameRole: {
-              source: typeof bedrockFullName === 'string' || typeof bedrockRole === 'string' ? 'bedrock' : 'heuristic',
-              bedrock: bedrockMeta
-            },
-            localFile: {
-              storageProvider: 'local',
-              storagePath: absPath
-            }
-          }
-        });
+        // 4) Enrich extracted_text metadata (same single-row record).
+        extractedTextMetadata.extractedPersonFullName = resolvedName || null;
+        extractedTextMetadata.extractedCurrentRoleTitle = resolvedRole || null;
+        extractedTextMetadata.extractedNameRole = {
+          source: typeof bedrockFullName === 'string' || typeof bedrockRole === 'string' ? 'bedrock' : 'heuristic',
+          bedrock: bedrockMeta
+        };
       } catch (e) {
         // eslint-disable-next-line no-console
-        console.warn('[uploads] name/role persistence failed (best-effort)', {
+        console.warn('[uploads] name/role enrichment failed (best-effort)', {
           userId,
           category,
           message: e?.message,
@@ -479,6 +454,14 @@ async function persistOneMemoryFile({ file, userId, source, category }) {
         });
       }
     }
+
+    await documentsRepo.upsertExtractedText(doc.id, {
+      extractor: extraction.extractor,
+      extractorVersion: extraction.extractorVersion,
+      language: extraction.language ?? null,
+      textContent: normalizedText,
+      metadataJson: extractedTextMetadata
+    });
   }
 
   return { doc, extraction, normalizedText, extractedEmployeeName };
