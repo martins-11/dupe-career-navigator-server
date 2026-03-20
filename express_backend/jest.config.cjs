@@ -7,11 +7,14 @@ module.exports = {
 
   /**
    * This repository is ESM-first (`package.json` has `"type": "module"`).
-   * Jest defaults to CommonJS, so we explicitly enable ESM semantics so tests can:
-   * - import the Express app from src/server.js
-   * - import ESM services directly for isolated assertions when needed
+   *
+   * Important: In Jest v30+, `.js` is automatically treated as ESM when the nearest
+   * package.json is `type: "module"`. Including `.js` in `extensionsToTreatAsEsm`
+   * triggers a config validation error:
+   *   "Option extensionsToTreatAsEsm: ['.js'] includes '.js' which is always inferred..."
+   *
+   * So we intentionally do NOT set `extensionsToTreatAsEsm` here.
    */
-  extensionsToTreatAsEsm: ['.js'],
 
   // Ensure .env is loaded for tests (Jest doesn't execute src/server.js).
   setupFiles: ['<rootDir>/tests/jest.setup.env.js'],
