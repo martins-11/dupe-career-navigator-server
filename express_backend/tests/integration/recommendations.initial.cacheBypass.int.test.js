@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { jest } from '@jest/globals';
 
 describe('GET /api/recommendations/initial bypasses fallback-only cache and uses Bedrock when available', () => {
   test('when cache contains fallback-only roles, endpoint regenerates via Bedrock and then serves cached Bedrock roles (stored pool >5)', async () => {
