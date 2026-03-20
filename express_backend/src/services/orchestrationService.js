@@ -1114,7 +1114,19 @@ async function runAllOrchestration(input) {
     });
     assertNotCancelled();
 
-    const genResp = await generatePersonaDraftForBuild(build.id, parsed.generate || {});
+    // Contract hardening:
+    // - Persona version history is keyed by personaId.
+    // - During ingestion flows, the client often does not have a personaId yet, even if autoCreatePersona=true.
+    // - If a client sends generate.createVersion=true without a personaId, treat it as a no-op to avoid 422s.
+    const safeGenerateInput =
+      parsed.generate && typeof parsed.generate === 'object'
+        ? {
+            ...parsed.generate,
+            createVersion: parsed.personaId ? parsed.generate.createVersion : false
+          }
+        : {};
+
+    const genResp = await generatePersonaDraftForBuild(build.id, safeGenerateInput);
     orch = genResp.orchestration;
 
     // 5) Optional finalize
