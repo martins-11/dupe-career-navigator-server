@@ -1,6 +1,4 @@
-'use strict';
-
-const request = require('supertest');
+import request from 'supertest';
 
 describe('GET /api/recommendations/initial bypasses fallback-only cache and uses Bedrock when available', () => {
   test('when cache contains fallback-only roles, endpoint regenerates via Bedrock and then serves cached Bedrock roles (stored pool >5)', async () => {
@@ -33,10 +31,10 @@ describe('GET /api/recommendations/initial bypasses fallback-only cache and uses
       getInitialRecommendations: mockGetInitial,
     }));
 
-    // eslint-disable-next-line global-require
-    const app = require('../../src/server');
-    // eslint-disable-next-line global-require
-    const holisticPersonaRepo = require('../../src/repositories/holisticPersonaRepoAdapter');
+    const [{ default: app }, { default: holisticPersonaRepo }] = await Promise.all([
+      import('../../src/server.js'),
+      import('../../src/repositories/holisticPersonaRepoAdapter.js'),
+    ]);
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
 

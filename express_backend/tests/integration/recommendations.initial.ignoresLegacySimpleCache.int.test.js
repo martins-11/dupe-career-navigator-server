@@ -1,6 +1,4 @@
-'use strict';
-
-const request = require('supertest');
+import request from 'supertest';
 
 describe('GET /api/recommendations/initial ignores legacy/simple cached roles and uses Bedrock when available', () => {
   test('when cache contains legacy /api/recommendations/roles-shaped entries, endpoint regenerates via Bedrock', async () => {
@@ -31,10 +29,10 @@ describe('GET /api/recommendations/initial ignores legacy/simple cached roles an
       getInitialRecommendations: mockGetInitial,
     }));
 
-    // eslint-disable-next-line global-require
-    const app = require('../../src/server');
-    // eslint-disable-next-line global-require
-    const holisticPersonaRepo = require('../../src/repositories/holisticPersonaRepoAdapter');
+    const [{ default: app }, { default: holisticPersonaRepo }] = await Promise.all([
+      import('../../src/server.js'),
+      import('../../src/repositories/holisticPersonaRepoAdapter.js'),
+    ]);
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
 
