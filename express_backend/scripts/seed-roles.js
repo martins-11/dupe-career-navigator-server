@@ -1,4 +1,8 @@
-'use strict';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+import rolesRepo from '../src/repositories/rolesRepoAdapter.js';
 
 /**
  * Seed the roles catalog table if it's empty.
@@ -7,15 +11,14 @@
  *   node scripts/seed-roles.js
  *
  * Notes:
- * - Uses existing env-driven DB configuration (express_backend/.env loaded by src/server.js;
- *   this script loads it explicitly as well).
+ * - Uses existing env-driven DB configuration. This script loads express_backend/.env explicitly.
  * - Safe to run multiple times: will only seed when roles table is empty.
  */
 
-const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const rolesRepo = require('../src/repositories/rolesRepoAdapter');
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 async function main() {
   const cnt = await rolesRepo.countRoles();
@@ -25,7 +28,7 @@ async function main() {
     return;
   }
 
-  // Keep this seed list aligned with recommendationsService._ensureSeededIfEmpty()
+  // Keep this seed list aligned with recommendationsService.DEFAULT_ROLES_CATALOG
   const seed = [
     {
       roleTitle: 'Software Engineer',

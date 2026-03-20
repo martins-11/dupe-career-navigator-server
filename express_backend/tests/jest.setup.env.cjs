@@ -35,9 +35,25 @@ delete process.env.MYSQL_USER;
 delete process.env.MYSQL_PASSWORD;
 
 // Prevent accidental real Bedrock usage in tests unless explicitly configured.
+//
+// IMPORTANT:
+// Some codepaths may still construct an AWS client even when we intend to use deterministic fallbacks.
+// Ensure a region is present to avoid hard-crashing with "missing_aws_region" during Jest runs.
 delete process.env.BEDROCK_MODEL_ID;
 delete process.env.BEDROCK_ROLE_MODEL_ID;
-delete process.env.AWS_REGION;
+
+// Safe region defaults for test runs (avoids AWS SDK "missing region" crash).
+process.env.AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+process.env.AWS_DEFAULT_REGION = process.env.AWS_DEFAULT_REGION || process.env.AWS_REGION;
+
+// Force deterministic behavior: prefer local fallbacks and avoid Bedrock invocations during tests.
+process.env.RECOMMENDATIONS_INITIAL_ALLOW_PADDING = 'true';
+process.env.EXPLORE_RECOMMENDATIONS_BEDROCK_COOLDOWN_MS = process.env.EXPLORE_RECOMMENDATIONS_BEDROCK_COOLDOWN_MS || '600000';
+process.env.BEDROCK_MAX_ATTEMPTS = process.env.BEDROCK_MAX_ATTEMPTS || '1';
+process.env.BEDROCK_TIMEOUT_MS = process.env.BEDROCK_TIMEOUT_MS || '250';
+process.env.BEDROCK_TIMEOUT_CAP_MS = process.env.BEDROCK_TIMEOUT_CAP_MS || '250';
+
+// Do not provide credentials in test env by default.
 delete process.env.AWS_ACCESS_KEY_ID;
 delete process.env.AWS_SECRET_ACCESS_KEY;
 delete process.env.AWS_SESSION_TOKEN;

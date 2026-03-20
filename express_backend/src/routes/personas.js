@@ -34,7 +34,8 @@ const router = express.Router();
  */
 
 router.post('/', async (req, res) => {
-  const parsed = PersonaCreateRequest.safeParse(req.body);
+  // NOTE: PersonaCreateRequest is a lazy async Zod schema proxy; safeParse returns a Promise.
+  const parsed = await PersonaCreateRequest.safeParse(req.body);
   if (!parsed.success) {
     // Match OpenAPI ErrorResponse shape
     return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
@@ -165,7 +166,8 @@ router.get('/:id/final/latest', async (req, res) => {
 });
 
 router.put('/:id', async (req, res) => {
-  const parsed = PersonaUpdateRequest.safeParse(req.body);
+  // NOTE: PersonaUpdateRequest is a lazy async Zod schema proxy; safeParse returns a Promise.
+  const parsed = await PersonaUpdateRequest.safeParse(req.body);
   if (!parsed.success) {
     // eslint-disable-next-line no-console
     console.warn('[personas][PUT] validation_error', {
@@ -218,7 +220,8 @@ router.put('/:id', async (req, res) => {
 });
 
 router.post('/:id/versions', async (req, res) => {
-  const parsed = PersonaVersionCreateRequest.safeParse(req.body);
+  // NOTE: PersonaVersionCreateRequest is a lazy async Zod schema proxy; safeParse returns a Promise.
+  const parsed = await PersonaVersionCreateRequest.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
   }
