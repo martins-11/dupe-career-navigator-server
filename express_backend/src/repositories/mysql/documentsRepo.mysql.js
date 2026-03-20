@@ -141,28 +141,37 @@ export async function getDocumentById(documentId) {
 // PUBLIC_INTERFACE
 export async function upsertExtractedText(documentId, input) {
   /**
-   * Persist extracted text for a document.
+   * Upsert extracted text for a document (exactly one row per document).
    *
-   * This uses INSERT (keeps history).
+   * Implementation note:
+   * - Uses the canonical MySQL table `extracted_text` created by migration 002.
+   * - Enforces single-row semantics by using the document_id as the primary key.
    */
-  const id = uuidV4();
+  const now = new Date();
 
   await dbQuery(
     `
-    INSERT INTO document_extracted_text (
+    INSERT INTO extracted_text (
       id, document_id, extractor, extractor_version, language, text_content, metadata_json, created_at
     )
     VALUES (?,?,?,?,?,?,?,?)
+    ON DUPLICATE KEY UPDATE
+      extractor = VALUES(extractor),
+      extractor_version = VALUES(extractor_version),
+      language = VALUES(language),
+      text_content = VALUES(text_content),
+      metadata_json = VALUES(metadata_json),
+      created_at = VALUES(created_at)
     `,
     [
-      id,
+      documentId, // id == document_id (single-row per document)
       documentId,
       input.extractor ?? null,
       input.extractorVersion ?? null,
       input.language ?? null,
       input.textContent,
       JSON.stringify(input.metadataJson ?? {}),
-      new Date()
+      now
     ]
   );
 
@@ -177,10 +186,11 @@ export async function upsertExtractedText(documentId, input) {
       text_content as textContent,
       metadata_json as metadataJson,
       created_at as createdAt
-    FROM document_extracted_text
-    WHERE id = ?
+    FROM extracted_text
+    WHERE document_id = ?
+    LIMIT 1
     `,
-    [id]
+    [documentId]
   );
 
   return res.rows[0] || null;
@@ -188,7 +198,7 @@ export async function upsertExtractedText(documentId, input) {
 
 // PUBLIC_INTERFACE
 export async function getLatestExtractedText(documentId) {
-  /** Retrieve the latest extracted text blob for a given document. */
+  /** Retrieve the extracted text blob for a given document (single-row semantics). */
   const res = await dbQuery(
     `
     SELECT
@@ -200,9 +210,8 @@ export async function getLatestExtractedText(documentId) {
       text_content as textContent,
       metadata_json as metadataJson,
       created_at as createdAt
-    FROM document_extracted_text
+    FROM extracted_text
     WHERE document_id = ?
-    ORDER BY created_at DESC
     LIMIT 1
     `,
     [documentId]

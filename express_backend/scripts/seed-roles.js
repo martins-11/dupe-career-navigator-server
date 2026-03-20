@@ -1,4 +1,9 @@
-'use strict';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+import rolesRepo from '../src/repositories/rolesRepoAdapter.js';
+import { dbClose } from '../src/db/connection.js';
 
 /**
  * Seed the roles catalog table if it's empty.
@@ -7,15 +12,18 @@
  *   node scripts/seed-roles.js
  *
  * Notes:
- * - Uses existing env-driven DB configuration (express_backend/.env loaded by src/server.js;
- *   this script loads it explicitly as well).
+ * - Uses existing env-driven DB configuration. This script loads express_backend/.env explicitly.
  * - Safe to run multiple times: will only seed when roles table is empty.
+ *
+ * IMPORTANT:
+ * - This script MUST terminate deterministically in CI.
+ * - Because it touches the DB layer, it may create a MySQL pool; we must close it before exit.
  */
 
-const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const rolesRepo = require('../src/repositories/rolesRepoAdapter');
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 async function main() {
   const cnt = await rolesRepo.countRoles();
@@ -25,7 +33,7 @@ async function main() {
     return;
   }
 
-  // Keep this seed list aligned with recommendationsService._ensureSeededIfEmpty()
+  // Keep this seed list aligned with recommendationsService.DEFAULT_ROLES_CATALOG
   const seed = [
     {
       roleTitle: 'Software Engineer',
@@ -162,8 +170,19 @@ async function main() {
   console.log(`[seed-roles] inserted=${res.inserted} roles. total=${after}`);
 }
 
-main().catch((e) => {
-  // eslint-disable-next-line no-console
-  console.error('[seed-roles] failed:', e);
-  process.exitCode = 1;
-});
+main()
+  .then(async () => {
+    // Ensure DB handles do not keep the process open.
+    await dbClose();
+    process.exit(0);
+  })
+  .catch(async (e) => {
+    // eslint-disable-next-line no-console
+    console.error('[seed-roles] failed:', e);
+    try {
+      await dbClose();
+    } catch (_) {
+      // ignore close errors
+    }
+    process.exit(1);
+  });

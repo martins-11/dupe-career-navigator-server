@@ -1,4 +1,4 @@
-'use strict';
+import { jest } from '@jest/globals';
 
 describe('recommendationsInitialService - 3/2 rerank + ring fields', () => {
   test('reranks validated 3/2 roles above non-validated and emits mastery/growth ring fields', async () => {
@@ -35,8 +35,9 @@ describe('recommendationsInitialService - 3/2 rerank + ring fields', () => {
       }))
     }));
 
-    // eslint-disable-next-line global-require
-    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = require('../../src/services/recommendationsInitialService');
+    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = await import(
+      '../../src/services/recommendationsInitialService.js'
+    );
 
     const finalPersona = {
       skills_with_proficiency: [

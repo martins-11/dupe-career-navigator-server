@@ -777,20 +777,48 @@ function _getBedrockClient() {
   /**
    * Bedrock client configuration.
    *
-   * Credentials:
-   * - Resolved by AWS SDK v3 default provider chain (env vars, shared config, SSO, instance/role, etc.)
+   * TEST SAFETY:
+   * - In Jest/CI we must never attempt real AWS credential resolution (it can throw
+   *   CredentialsProviderError, or hang depending on the provider chain).
    *
-   * Region:
-   * - In some preview environments, AWS credentials are present but AWS_REGION is not injected into
-   *   the Node process. Support multiple standard env var names and an explicit BEDROCK_REGION override.
-   *
-   * Retries (IMPORTANT):
-   * - AWS SDK has its own retry strategy. For latency-sensitive endpoints we want to keep
-   *   internal retries small because they can stack with our own retry/attempt logic.
-   *
-   * Env (optional):
-   * - BEDROCK_MAX_ATTEMPTS: total attempts the AWS SDK may make (default: 2)
+   * Behavior normalization for tests:
+   * - Default: when NODE_ENV==='test' OR BEDROCK_DISABLE==='true', we throw `bedrock_disabled`
+   *   (existing behavior).
+   * - Opt-in: when BEDROCK_MOCK_MODE==='true', we return a deterministic in-process mock client
+   *   that implements { send() } and returns predictable JSON. This supports suites that need
+   *   Bedrock-like flows without hitting AWS or rewriting expectations.
    */
+  const isDisabledByEnv = String(process.env.BEDROCK_DISABLE || '').toLowerCase() === 'true';
+  const isTestEnv = process.env.NODE_ENV === 'test';
+  const mockMode = String(process.env.BEDROCK_MOCK_MODE || '').toLowerCase() === 'true';
+
+  if ((isDisabledByEnv || isTestEnv) && mockMode) {
+    /**
+     * Deterministic mock payload:
+     * - If caller asked for role generation (array), return a 5-role array.
+     * - If caller asked for extraction (object), return a JSON object.
+     *
+     * We keep the shape aligned with what `_extractClaudeText` expects:
+     * { content: [{ type: 'text', text: '...json...' }] }
+     */
+    const mock = {
+      send: async () => {
+        const roles = _fallbackBedrockJsonRoles();
+        const bedrockJson = { content: [{ type: 'text', text: JSON.stringify(roles) }] };
+        return { body: Buffer.from(JSON.stringify(bedrockJson), 'utf-8') };
+      },
+    };
+    return mock;
+  }
+
+  const disabled = isDisabledByEnv || isTestEnv;
+
+  if (disabled) {
+    const err = new Error('Bedrock is disabled in this environment (test safety).');
+    err.code = 'bedrock_disabled';
+    throw err;
+  }
+
   const region =
     process.env.BEDROCK_REGION ||
     process.env.AWS_REGION ||

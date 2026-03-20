@@ -25,6 +25,18 @@ function _get(id) {
 }
 
 /**
+ * Clamp progress to an integer in [0, 100] to keep polling stable.
+ */
+function _clampProgress(p) {
+  const n = Number(p);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.round(n);
+  if (i < 0) return 0;
+  if (i > 100) return 100;
+  return i;
+}
+
+/**
  * Allowed status values for workflows/builds.
  * Keeping the strings consistent with existing API contract.
  */
@@ -244,9 +256,66 @@ function succeedWorkflow(id, message) {
   });
 }
 
+/**
+ * PUBLIC_INTERFACE
+ * Patch a workflow's non-status fields in a safe/monotonic way.
+ *
+ * Why:
+ * - Orchestration needs deterministic progress + step messages (not just the simulator).
+ * - We must avoid invalid transitions (e.g., running->running is not a transition).
+ * - We must not regress progress (avoid UI flicker).
+ *
+ * Rules:
+ * - If workflow is terminal (succeeded/failed/cancelled), no changes are applied.
+ * - progress is clamped to [0,100] and cannot decrease.
+ * - message/currentStep may be updated when provided.
+ *
+ * @param {string} id
+ * @param {{ progress?: number, message?: string|null, currentStep?: string|null }} patch
+ * @returns {object|null} Updated workflow, or null if workflow not found
+ */
+function patchWorkflow(id, patch = {}) {
+  const wf = _get(id);
+  if (!wf) return null;
+
+  // Terminal workflows are immutable.
+  if (['cancelled', 'failed', 'succeeded'].includes(wf.status)) return wf;
+
+  const next = { ...wf };
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'progress')) {
+    const clamped = _clampProgress(patch.progress);
+    if (clamped !== null) next.progress = Math.max(Number(wf.progress || 0), clamped);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'message')) {
+    next.message = patch.message ?? null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'currentStep')) {
+    next.currentStep = patch.currentStep ?? null;
+  }
+
+  next.updatedAt = _nowIso();
+  _set(next);
+  return next;
+}
+
 // PUBLIC_INTERFACE
 function getWorkflow(id) {
   /** Get workflow record by id. */
+  return _get(id);
+}
+
+/**
+ * PUBLIC_INTERFACE
+ * Internal-ish accessor for callers that need the full workflow record without mutation.
+ * (Kept public to support service-level composition without reaching into module internals.)
+ *
+ * @param {string} id
+ * @returns {object|null}
+ */
+function getWorkflowUnsafeRead(id) {
   return _get(id);
 }
 
@@ -272,7 +341,9 @@ export {
   cancelWorkflow,
   failWorkflow,
   succeedWorkflow,
+  patchWorkflow,
   getWorkflow,
+  getWorkflowUnsafeRead,
   getWorkflowStatus
 };
 
@@ -283,6 +354,8 @@ export default {
   cancelWorkflow,
   failWorkflow,
   succeedWorkflow,
+  patchWorkflow,
   getWorkflow,
+  getWorkflowUnsafeRead,
   getWorkflowStatus
 };

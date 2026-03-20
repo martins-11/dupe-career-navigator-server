@@ -1,6 +1,4 @@
-'use strict';
-
-const request = require('supertest');
+import request from 'supertest';
 
 describe('GET /api/recommendations/initial reuses cached Bedrock pool even when smaller than storeCount', () => {
   test('cached 5-role pool is returned as cacheHit=true even when storeCount desires >5 (no Bedrock re-invocation)', async () => {
@@ -33,10 +31,10 @@ describe('GET /api/recommendations/initial reuses cached Bedrock pool even when 
       getInitialRecommendations: mockGetInitial,
     }));
 
-    // eslint-disable-next-line global-require
-    const app = require('../../src/server');
-    // eslint-disable-next-line global-require
-    const holisticPersonaRepo = require('../../src/repositories/holisticPersonaRepoAdapter');
+    const [{ default: app }, { default: holisticPersonaRepo }] = await Promise.all([
+      import('../../src/server.js'),
+      import('../../src/repositories/holisticPersonaRepoAdapter.js'),
+    ]);
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
 

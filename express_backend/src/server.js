@@ -279,8 +279,17 @@ const host = process.env.HOST || '0.0.0.0';
  */
 export default app;
 
-// Only start listening when executed as the entrypoint (not when imported by Jest/supertest).
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * Only start listening when executed as the entrypoint (not when imported by Jest/supertest).
+ *
+ * NOTE:
+ * In some Node execution modes (e.g. `node -e` or certain Jest ESM contexts),
+ * `process.argv[1]` can be undefined. `pathToFileURL(undefined)` throws, which would
+ * crash *module import* and prevent integration tests from loading the Express app.
+ */
+const _argvEntry = typeof process.argv?.[1] === 'string' && process.argv[1].trim() ? process.argv[1] : null;
+
+if (_argvEntry && import.meta.url === pathToFileURL(_argvEntry).href) {
   app.listen(port, host, () => {
     // eslint-disable-next-line no-console
     console.log(`Express backend listening on http://${host}:${port}`);

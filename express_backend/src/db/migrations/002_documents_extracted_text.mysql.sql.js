@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS extracted_text (
   text_content LONGTEXT NOT NULL,
   metadata_json JSON NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_extracted_text_document_id (document_id),
   INDEX idx_extracted_text_document_id (document_id),
   CONSTRAINT fk_extracted_text_document_id
     FOREIGN KEY (document_id) REFERENCES documents(id)

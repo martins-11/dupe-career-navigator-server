@@ -47,9 +47,37 @@ export async function updateBuild(buildId, patch) {
 }
 
 // PUBLIC_INTERFACE
+export async function linkDocumentToBuild(buildId, documentId) {
+  /** Link a single document to a build if supported by the active repo; otherwise no-op. */
+  const repo = _repo();
+  if (typeof repo.linkDocumentToBuild !== 'function') return { linked: false };
+  return repo.linkDocumentToBuild(buildId, documentId);
+}
+
+// PUBLIC_INTERFACE
+export async function linkDocumentsToBuild(buildId, documentIds) {
+  /** Link multiple documents to a build if supported by the active repo; otherwise no-op. */
+  const repo = _repo();
+  if (typeof repo.linkDocumentsToBuild === 'function') return repo.linkDocumentsToBuild(buildId, documentIds);
+  if (typeof repo.linkDocumentToBuild !== 'function') return { linked: false, count: 0 };
+
+  const ids = Array.isArray(documentIds) ? documentIds.filter(Boolean) : [];
+  let linkedCount = 0;
+
+  // eslint-disable-next-line no-await-in-loop
+  for (const documentId of ids) {
+    const res = await repo.linkDocumentToBuild(buildId, documentId);
+    if (res && res.linked) linkedCount += 1;
+  }
+  return { linked: linkedCount > 0, count: linkedCount };
+}
+
+// PUBLIC_INTERFACE
 export default {
   isDbConfigured: isDbConfiguredPublic,
   createBuild,
   getBuildById,
-  updateBuild
+  updateBuild,
+  linkDocumentToBuild,
+  linkDocumentsToBuild
 };

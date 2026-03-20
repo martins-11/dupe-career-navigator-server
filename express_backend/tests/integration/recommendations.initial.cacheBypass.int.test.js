@@ -1,6 +1,5 @@
-'use strict';
-
-const request = require('supertest');
+import request from 'supertest';
+import { jest } from '@jest/globals';
 
 describe('GET /api/recommendations/initial bypasses fallback-only cache and uses Bedrock when available', () => {
   test('when cache contains fallback-only roles, endpoint regenerates via Bedrock and then serves cached Bedrock roles (stored pool >5)', async () => {
@@ -33,10 +32,11 @@ describe('GET /api/recommendations/initial bypasses fallback-only cache and uses
       getInitialRecommendations: mockGetInitial,
     }));
 
-    // eslint-disable-next-line global-require
-    const app = require('../../src/server');
-    // eslint-disable-next-line global-require
-    const holisticPersonaRepo = require('../../src/repositories/holisticPersonaRepoAdapter');
+    // IMPORTANT (Jest ESM linking stability):
+    // Parallel ESM linking via Promise.all can trigger "request for 'pg' is not yet fulfilled"
+    // in Jest's runtime. Import serially to avoid the linking hazard.
+    const { default: app } = await import('../../src/server.js');
+    const { default: holisticPersonaRepo } = await import('../../src/repositories/holisticPersonaRepoAdapter.js');
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
 

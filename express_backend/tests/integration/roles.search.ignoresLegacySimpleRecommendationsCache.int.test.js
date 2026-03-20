@@ -1,6 +1,4 @@
-'use strict';
-
-const request = require('supertest');
+import request from 'supertest';
 
 describe('GET /api/roles/search ignores legacy/simple cached recommendations roles and uses Bedrock', () => {
   test('when cached pool is legacy /api/recommendations/roles-shaped, /api/roles/search calls Bedrock and returns those roles', async () => {
@@ -29,10 +27,10 @@ describe('GET /api/roles/search ignores legacy/simple cached recommendations rol
       generateTargetedRolesSafe: mockGenerateTargetedRolesSafe,
     }));
 
-    // eslint-disable-next-line global-require
-    const app = require('../../src/server');
-    // eslint-disable-next-line global-require
-    const holisticPersonaRepo = require('../../src/repositories/holisticPersonaRepoAdapter');
+    const [{ default: app }, { default: holisticPersonaRepo }] = await Promise.all([
+      import('../../src/server.js'),
+      import('../../src/repositories/holisticPersonaRepoAdapter.js'),
+    ]);
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
 
@@ -53,9 +51,7 @@ describe('GET /api/roles/search ignores legacy/simple cached recommendations rol
       roles: legacySimple,
     });
 
-    const res = await request(app)
-      .get('/api/roles/search')
-      .query({ q: 'engineer', personaId, limit: 10 });
+    const res = await request(app).get('/api/roles/search').query({ q: 'engineer', personaId, limit: 10 });
 
     expect([200]).toContain(res.status);
     expect(Array.isArray(res.body)).toBe(true);

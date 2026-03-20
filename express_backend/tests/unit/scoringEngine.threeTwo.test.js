@@ -1,6 +1,4 @@
-'use strict';
-
-const { validateThreeTwoBalance, buildThreeTwoReport } = require('../../src/services/scoringEngine');
+import { validateThreeTwoBalance, buildThreeTwoReport } from '../../src/services/scoringEngine.js';
 
 describe('Day 3 scoringEngine - 3/2 validation', () => {
   test('Mock verification: Full Stack role validates exactly 3 mastery + 2 growth areas', () => {
@@ -10,7 +8,7 @@ describe('Day 3 scoringEngine - 3/2 validation', () => {
       { name: 'CSS', proficiency: 85 },
       { name: 'HTML', proficiency: 80 },
       { name: 'Python', proficiency: 30 },
-      { name: 'SQL', proficiency: 40 }
+      { name: 'SQL', proficiency: 40 },
     ];
 
     // "Full Stack" role requirements; include all 5 for unambiguous matching
@@ -29,7 +27,7 @@ describe('Day 3 scoringEngine - 3/2 validation', () => {
       status: 'validated',
       masteryAreas: ['React', 'CSS', 'HTML'],
       growthAreas: ['SQL', 'Python'],
-      score: 100
+      score: 100,
     });
   });
 });

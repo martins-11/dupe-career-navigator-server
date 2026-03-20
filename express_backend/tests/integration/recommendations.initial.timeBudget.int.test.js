@@ -1,6 +1,4 @@
-'use strict';
-
-const request = require('supertest');
+import request from 'supertest';
 
 describe('GET /api/recommendations/initial uses a sufficient Bedrock time budget', () => {
   test('passes a >20s Bedrock timeBudgetMs even when INITIAL_RECOMMENDATIONS_MAX_MS is set low', async () => {
@@ -40,8 +38,7 @@ describe('GET /api/recommendations/initial uses a sufficient Bedrock time budget
       getInitialRecommendations: mockGetInitial,
     }));
 
-    // eslint-disable-next-line global-require
-    const app = require('../../src/server');
+    const { default: app } = await import('../../src/server.js');
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
     const res = await request(app).get('/api/recommendations/initial').query({ personaId });

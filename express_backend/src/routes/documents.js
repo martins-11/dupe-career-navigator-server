@@ -1,17 +1,17 @@
 import express from 'express';
 import { DocumentCreateRequest, ExtractedTextUpsertRequest } from '../models/documents.js';
 import documentsRepo from '../repositories/documentsRepoAdapter.js';
+import { sendError } from '../utils/errors.js';
 
 const router = express.Router();
 
 /**
- * Document APIs (scaffold).
+ * Document APIs (MVP).
  *
- * This intentionally focuses on:
- * - document metadata storage
- * - extracted text persistence/retrieval (required for AI persona generation)
- *
- * Uploading raw file bytes (PDF parsing, etc.) is out of scope for this step.
+ * Supports DB-backed storage when configured, and in-memory fallback when DB is not configured.
+ * Route handlers should:
+ * - validate request inputs
+ * - return OpenAPI-aligned ErrorResponse shapes on errors
  */
 
 router.get('/', async (req, res) => {
@@ -31,9 +31,9 @@ router.get('/', async (req, res) => {
     }
 
     const docs = await documentsRepo.listDocuments({ limit, offset });
-    return res.json(docs);
+    return res.json(Array.isArray(docs) ? docs : []);
   } catch (err) {
-    return res.status(503).json({ error: 'db_unavailable', message: err.message });
+    return sendError(res, err);
   }
 });
 
@@ -47,18 +47,17 @@ router.post('/', async (req, res) => {
     const doc = await documentsRepo.createDocument(parsed.data);
     return res.status(201).json(doc);
   } catch (err) {
-    // Usually DB not configured yet
-    return res.status(503).json({ error: 'db_unavailable', message: err.message });
+    return sendError(res, err);
   }
 });
 
 router.get('/:id', async (req, res) => {
   try {
     const doc = await documentsRepo.getDocumentById(req.params.id);
-    if (!doc) return res.status(404).json({ error: 'not_found' });
+    if (!doc) return res.status(404).json({ error: 'not_found', message: 'Document not found.' });
     return res.json(doc);
   } catch (err) {
-    return res.status(503).json({ error: 'db_unavailable', message: err.message });
+    return sendError(res, err);
   }
 });
 
@@ -71,12 +70,12 @@ router.post('/:id/extracted-text', async (req, res) => {
   try {
     // Ensure document exists first (nicer error)
     const doc = await documentsRepo.getDocumentById(req.params.id);
-    if (!doc) return res.status(404).json({ error: 'document_not_found' });
+    if (!doc) return res.status(404).json({ error: 'not_found', message: 'Document not found.' });
 
     const row = await documentsRepo.upsertExtractedText(req.params.id, parsed.data);
     return res.status(201).json(row);
   } catch (err) {
-    return res.status(503).json({ error: 'db_unavailable', message: err.message });
+    return sendError(res, err);
   }
 });
 
@@ -87,14 +86,14 @@ router.post('/:id/extracted-text', async (req, res) => {
 async function _getLatestExtractedTextHandler(req, res) {
   try {
     const doc = await documentsRepo.getDocumentById(req.params.id);
-    if (!doc) return res.status(404).json({ error: 'document_not_found' });
+    if (!doc) return res.status(404).json({ error: 'not_found', message: 'Document not found.' });
 
     const row = await documentsRepo.getLatestExtractedText(req.params.id);
-    if (!row) return res.status(404).json({ error: 'extracted_text_not_found' });
+    if (!row) return res.status(404).json({ error: 'not_found', message: 'Extracted text not found.' });
 
     return res.json(row);
   } catch (err) {
-    return res.status(503).json({ error: 'db_unavailable', message: err.message });
+    return sendError(res, err);
   }
 }
 

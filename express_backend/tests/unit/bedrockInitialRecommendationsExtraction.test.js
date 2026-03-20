@@ -1,6 +1,4 @@
-'use strict';
-
-const bedrockService = require('../../src/services/bedrockService');
+import { jest } from '@jest/globals';
 
 describe('bedrock initial recommendations extraction (unit)', () => {
   test('extracts top-level array of role objects (not nested key_responsibilities array) and validates schema', async () => {
@@ -130,8 +128,7 @@ describe('bedrock initial recommendations extraction (unit)', () => {
       };
     });
 
-    // eslint-disable-next-line global-require
-    const svc = require('../../src/services/bedrockService');
+    const svc = await import('../../src/services/bedrockService.js');
 
     const finalPersona = { skills_with_proficiency: [{ name: 'Python', proficiency: 80 }] };
 
@@ -240,8 +237,7 @@ describe('bedrock initial recommendations extraction (unit)', () => {
       };
     });
 
-    // eslint-disable-next-line global-require
-    const svc = require('../../src/services/bedrockService');
+    const svc = await import('../../src/services/bedrockService.js');
 
     const finalPersona = { skills_with_proficiency: [{ name: 'Python', proficiency: 80 }] };
 

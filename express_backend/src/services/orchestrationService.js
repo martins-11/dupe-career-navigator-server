@@ -696,7 +696,22 @@ async function generatePersonaDraftForBuild(buildId, input) {
   });
 
   try {
-    const result = await personaService.generatePersonaDraft(sourceText, { context });
+    /**
+     * Minimal hardening for MVP ingestion:
+     * - personaService enforces a minimum text length (currently 100 chars) and throws INVALID_INPUT_LENGTH.
+     * - In ingestion flows, short uploads/extractions should not break the entire orchestration run-all.
+     * - Therefore, for this specific domain error we fall back to mock mode to still return a schema-valid draft.
+     */
+    let result;
+    try {
+      result = await personaService.generatePersonaDraft(sourceText, { context });
+    } catch (e) {
+      if (e?.code === 'INVALID_INPUT_LENGTH') {
+        result = await personaService.generatePersonaDraft(sourceText, { context, preferMock: true });
+      } else {
+        throw e;
+      }
+    }
 
     // personaService may return a structured fallback: { error: 'AI_GENERATION_FAILED', retryable: true }
     if (result && typeof result === 'object' && result.error === 'AI_GENERATION_FAILED') {
@@ -786,8 +801,16 @@ async function generatePersonaDraftForBuild(buildId, input) {
     let savedDraft = null;
     let createdVersion = null;
 
+    /**
+     * Contract hardening:
+     * - `createVersion` only makes sense when we have a stable personaId (version history is per persona).
+     * - If personaId is not available yet, do NOT fail the request; treat createVersion as a no-op.
+     *   This prevents 422s in ingestion flows that rely on autoCreatePersona.
+     */
+    const canCreateVersion = Boolean(personaId);
+
     if (personaId && shouldSaveDraft) {
-      if (parsed.createVersion) {
+      if (parsed.createVersion && canCreateVersion) {
         const existingDraft = await personasRepo.getDraft(personaId);
         const existingDraftJson = existingDraft?.draftJson ?? null;
         if (existingDraftJson) {
@@ -893,24 +916,93 @@ async function finalizePersonaForBuild(buildId, input) {
 
 function _updateWorkflowProgress(buildId, patch) {
   /**
-   * Best-effort workflow progress updater.
+   * Best-effort workflow progress updater (hardening).
    *
-   * The system already exposes /builds/{id}/status which reads from workflowService.
-   * Existing workflowService.startWorkflow simulates progress; for the "run all" endpoint
-   * we additionally update status to reflect real orchestration completion.
+   * /builds/{id}/status reads from workflowService, so orchestration should update it deterministically:
+   * - progress/message/currentStep patched monotonically
+   * - terminal states set via succeedWorkflow/failWorkflow (state machine enforced)
    *
-   * Note: workflowService does not currently expose a public "setStatus" method; we
-   * carefully fall back to no-op if workflow is missing. For now, we rely on the
-   * orchestration record + build polling as a combined picture, and keep updates minimal.
+   * CRITICAL:
+   * - Workflow updates must NEVER mask the real underlying orchestration error.
+   *   If workflowService rejects an update (e.g., queued -> failed), we swallow it.
+   *
+   * @param {string} buildId
+   * @param {{ status?: 'running'|'succeeded'|'failed'|'cancelled', progress?: number, message?: string|null, currentStep?: string|null, failure?: object }} patch
    */
-  const wf = workflowService.getWorkflow(buildId);
-  if (!wf) return null;
+  try {
+    const wf = workflowService.getWorkflowUnsafeRead
+      ? workflowService.getWorkflowUnsafeRead(buildId)
+      : workflowService.getWorkflow(buildId);
 
-  // Mutate-by-replace: workflowService stores objects; we can replace by re-creating through internal map
-  // only if service provides a setter. It doesn't, so we approximate by updating orchestration only.
-  // To still improve polling, we set "message/progress/currentStep" in orchestration and let the simulated
-  // build progress keep moving. This preserves existing contracts and avoids introducing a new workflow API.
-  return { ...wf, ...patch };
+    if (!wf) return null;
+
+    /**
+     * If caller is trying to set a terminal status, use the explicit APIs.
+     *
+     * IMPORTANT bugfix:
+     * workflowService enforces a strict state machine:
+     *   queued -> running|cancelled
+     *   running -> succeeded|failed|cancelled
+     *
+     * Orchestration can fail very quickly (e.g., missing extracted text) before the
+     * background workflow simulator ticks queued->running. In that case, calling
+     * failWorkflow() would attempt an invalid transition queued->failed and throw,
+     * masking the real underlying orchestration error with INVALID_WORKFLOW_TRANSITION.
+     *
+     * Therefore, when we need to set a terminal status while still queued, we first
+     * best-effort transition queued->running.
+     */
+    const ensureRunningIfQueued = () => {
+      const cur = workflowService.getWorkflowUnsafeRead
+        ? workflowService.getWorkflowUnsafeRead(buildId)
+        : workflowService.getWorkflow(buildId);
+
+      if (!cur) return;
+
+      if (cur.status === 'queued' && typeof workflowService.transitionWorkflow === 'function') {
+        try {
+          workflowService.transitionWorkflow(buildId, 'running', {
+            progress: Math.max(Number(cur.progress || 0), 1),
+            currentStep: patch?.currentStep ?? cur.currentStep ?? 'validate_inputs',
+            message: patch?.message ?? cur.message ?? 'Orchestration running…'
+          });
+        } catch (_) {
+          // Best-effort only. If another tick already moved state, ignore.
+        }
+      }
+    };
+
+    if (patch && patch.status === 'failed') {
+      ensureRunningIfQueued();
+      try {
+        return workflowService.failWorkflow(buildId, patch.message || 'Build failed.', patch.failure || null);
+      } catch (_) {
+        return wf;
+      }
+    }
+    if (patch && patch.status === 'succeeded') {
+      ensureRunningIfQueued();
+      try {
+        return workflowService.succeedWorkflow(buildId, patch.message || 'Build complete.');
+      } catch (_) {
+        return wf;
+      }
+    }
+
+    // For non-terminal status updates, patch safe fields.
+    if (workflowService.patchWorkflow) {
+      return workflowService.patchWorkflow(buildId, {
+        progress: patch.progress,
+        message: patch.message,
+        currentStep: patch.currentStep
+      });
+    }
+
+    return wf;
+  } catch (_) {
+    // Best-effort only; never mask orchestration result with workflow update failure.
+    return null;
+  }
 }
 
 // PUBLIC_INTERFACE
@@ -937,7 +1029,19 @@ async function runAllOrchestration(input) {
     userId: parsed.userId ?? null,
     personaId: parsed.personaId ?? null,
     context: parsed.context ?? null,
-    autoCreatePersona: parsed.autoCreatePersona ?? false,
+
+    /**
+     * Contract hardening (fix 422 during ingestion persona generation):
+     * - Orchestration run-all is used by the MVP ingestion flow, where the frontend often does not have
+     *   an existing personaId yet.
+     * - In that case, the backend must be able to create a persona container automatically so that
+     *   downstream steps like saveDraft/createVersion can behave deterministically.
+     *
+     * OpenAPI/PRD intent: "out of the box" run-all should work with minimal client inputs.
+     * Therefore, default autoCreatePersona to true for run-all unless explicitly disabled.
+     */
+    autoCreatePersona: parsed.autoCreatePersona ?? true,
+
     documentIds: parsed.documentIds
   });
 
@@ -955,9 +1059,34 @@ async function runAllOrchestration(input) {
 
   // 2) Link upload/document IDs OR auto-select
   try {
+    // Ensure workflow shows "running" immediately (queued -> running transition is enforced by simulator,
+    // but we patch message/progress deterministically).
+    _updateWorkflowProgress(build.id, {
+      status: 'running',
+      progress: 10,
+      currentStep: 'validate_inputs',
+      message: 'Orchestration running…'
+    });
+
+    const assertNotCancelled = () => {
+      const wf = workflowService.getWorkflowStatus(build.id);
+      if (wf?.status === 'cancelled') {
+        const e = new Error('Build was cancelled.');
+        e.code = 'BUILD_CANCELLED';
+        e.httpStatus = 422;
+        throw e;
+      }
+    };
+
     orch = _touch(orch, {
       runAll: { ...orch.runAll, progress: 15, step: 'link', message: 'Linking documents…' }
     });
+    _updateWorkflowProgress(build.id, {
+      progress: 15,
+      currentStep: 'validate_inputs',
+      message: 'Linking documents…'
+    });
+    assertNotCancelled();
 
     const useLatestCategoryDocs = parsed.useLatestCategoryDocs ?? true;
 
@@ -967,19 +1096,18 @@ async function runAllOrchestration(input) {
       orch = _touch(orch, { documentIds: parsed.documentIds });
       await _bestEffortPersistBuildDocumentsLink(build.id, parsed.documentIds);
     } else if (useLatestCategoryDocs) {
-      // Additive MVP path: auto-select the latest docs by category.
-      //
-      // IMPORTANT:
-      // - The system supports anonymous usage (userId omitted/null) in memory mode.
-      // - The documents repository adapter supports `userId=null` to mean "anonymous".
-      // - Therefore, do NOT hard-require userId here; fall back to null.
       const effectiveUserId = parsed.userId ?? null;
 
       orch = _touch(orch, {
         runAll: { ...orch.runAll, progress: 20, step: 'auto_select', message: 'Selecting latest uploaded docs…' }
       });
+      _updateWorkflowProgress(build.id, {
+        progress: 20,
+        currentStep: 'validate_inputs',
+        message: 'Selecting latest uploaded docs…'
+      });
+      assertNotCancelled();
 
-      // Fetch latest docs for each category.
       const latestResume = await documentsRepo.getLatestDocumentForUserByCategory(
         effectiveUserId,
         DOCUMENT_CATEGORIES.RESUME
@@ -993,9 +1121,6 @@ async function runAllOrchestration(input) {
         DOCUMENT_CATEGORIES.PERFORMANCE_REVIEW
       );
 
-      // CHANGE (per requirements):
-      // Categories are OPTIONAL. We proceed with whatever categorized docs exist.
-      // We only fail if we can't find ANY documents at all.
       const missing = [];
       if (!latestResume) missing.push(DOCUMENT_CATEGORIES.RESUME);
       if (!latestJd) missing.push(DOCUMENT_CATEGORIES.JOB_DESCRIPTION);
@@ -1029,6 +1154,7 @@ async function runAllOrchestration(input) {
     } else {
       const err = new Error('Either uploadLink or documentIds must be provided (or enable useLatestCategoryDocs).');
       err.code = 'MISSING_INPUTS';
+      err.httpStatus = 422;
       throw err;
     }
 
@@ -1036,6 +1162,12 @@ async function runAllOrchestration(input) {
     orch = _touch(orch, {
       runAll: { ...orch.runAll, progress: 40, step: 'extract_normalize', message: 'Extracting and normalizing…' }
     });
+    _updateWorkflowProgress(build.id, {
+      progress: 40,
+      currentStep: 'extract_text',
+      message: 'Extracting and normalizing…'
+    });
+    assertNotCancelled();
 
     const extractResp = await extractAndNormalizeForBuild(build.id, parsed.extract || {});
     orch = extractResp.orchestration;
@@ -1044,8 +1176,26 @@ async function runAllOrchestration(input) {
     orch = _touch(orch, {
       runAll: { ...orch.runAll, progress: 75, step: 'generate_draft', message: 'Generating draft persona…' }
     });
+    _updateWorkflowProgress(build.id, {
+      progress: 75,
+      currentStep: 'generate_persona_draft',
+      message: 'Generating draft persona…'
+    });
+    assertNotCancelled();
 
-    const genResp = await generatePersonaDraftForBuild(build.id, parsed.generate || {});
+    // Contract hardening:
+    // - Persona version history is keyed by personaId.
+    // - During ingestion flows, the client often does not have a personaId yet, even if autoCreatePersona=true.
+    // - If a client sends generate.createVersion=true without a personaId, treat it as a no-op to avoid 422s.
+    const safeGenerateInput =
+      parsed.generate && typeof parsed.generate === 'object'
+        ? {
+            ...parsed.generate,
+            createVersion: parsed.personaId ? parsed.generate.createVersion : false
+          }
+        : {};
+
+    const genResp = await generatePersonaDraftForBuild(build.id, safeGenerateInput);
     orch = genResp.orchestration;
 
     // 5) Optional finalize
@@ -1054,6 +1204,12 @@ async function runAllOrchestration(input) {
       orch = _touch(orch, {
         runAll: { ...orch.runAll, progress: 90, step: 'finalize', message: 'Finalizing persona…' }
       });
+      _updateWorkflowProgress(build.id, {
+        progress: 90,
+        currentStep: 'finalize',
+        message: 'Finalizing persona…'
+      });
+      assertNotCancelled();
 
       finalizeResp = await finalizePersonaForBuild(build.id, parsed.finalize || {});
       orch = finalizeResp.orchestration;
@@ -1071,17 +1227,11 @@ async function runAllOrchestration(input) {
       }
     });
 
-    // Best-effort: touch workflow (does not change store; see comment).
     _updateWorkflowProgress(build.id, { status: 'succeeded', progress: 100, message: 'Build complete.' });
 
     return {
-      // Keep the existing contract: build object is returned and includes build.id.
       build,
-
-      // Add a stable top-level buildId for clients/scripts that only want the identifier.
-      // This keeps contracts consistent across endpoints and helps smoke scripts poll status.
       buildId: build.id,
-
       orchestration: orch,
       results: {
         extract: {
@@ -1091,9 +1241,7 @@ async function runAllOrchestration(input) {
         generate: {
           personaId: genResp.personaId
         },
-        finalize: finalizeResp
-          ? { personaId: finalizeResp.personaId }
-          : null
+        finalize: finalizeResp ? { personaId: finalizeResp.personaId } : null
       }
     };
   } catch (err) {
@@ -1108,7 +1256,11 @@ async function runAllOrchestration(input) {
       }
     });
 
-    _updateWorkflowProgress(build.id, { status: 'failed', message: 'Build failed.' });
+    _updateWorkflowProgress(build.id, {
+      status: 'failed',
+      message: err?.message || 'Build failed.',
+      failure: err?.details || { code: err?.code || 'ORCHESTRATION_FAILED' }
+    });
     throw err;
   }
 }

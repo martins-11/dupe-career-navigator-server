@@ -1,6 +1,4 @@
-'use strict';
-
-const request = require('supertest');
+import request from 'supertest';
 
 describe('GET /api/recommendations/pool prefers Bedrock pool and is cacheable for reuse', () => {
   test('generates via Bedrock then serves cached Bedrock roles on subsequent call (no guest_* fallback)', async () => {
@@ -32,8 +30,7 @@ describe('GET /api/recommendations/pool prefers Bedrock pool and is cacheable fo
       getInitialRecommendations: mockGetInitial,
     }));
 
-    // eslint-disable-next-line global-require
-    const app = require('../../src/server');
+    const { default: app } = await import('../../src/server.js');
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
 
@@ -99,8 +96,7 @@ describe('GET /api/recommendations/pool prefers Bedrock pool and is cacheable fo
       getInitialRecommendations: mockGetInitial,
     }));
 
-    // eslint-disable-next-line global-require
-    const app = require('../../src/server');
+    const { default: app } = await import('../../src/server.js');
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
 

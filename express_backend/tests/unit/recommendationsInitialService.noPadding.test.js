@@ -1,4 +1,4 @@
-'use strict';
+import { jest } from '@jest/globals';
 
 describe('recommendationsInitialService (Bedrock-first; padding only when explicitly enabled)', () => {
   test('when Bedrock returns fewer than 5 valid roles and padding is disabled, the service throws bedrock_insufficient_roles', async () => {
@@ -44,8 +44,9 @@ describe('recommendationsInitialService (Bedrock-first; padding only when explic
       getInitialRecommendations: mockGetInitial
     }));
 
-    // eslint-disable-next-line global-require
-    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = require('../../src/services/recommendationsInitialService');
+    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = await import(
+      '../../src/services/recommendationsInitialService.js'
+    );
 
     const finalPersona = {
       skills_with_proficiency: [
@@ -113,8 +114,9 @@ describe('recommendationsInitialService (Bedrock-first; padding only when explic
       }))
     }));
 
-    // eslint-disable-next-line global-require
-    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = require('../../src/services/recommendationsInitialService');
+    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = await import(
+      '../../src/services/recommendationsInitialService.js'
+    );
 
     const finalPersona = {
       skills_with_proficiency: [
@@ -122,14 +124,14 @@ describe('recommendationsInitialService (Bedrock-first; padding only when explic
         { name: 'Node.js', proficiency: 85 },
         { name: 'React', proficiency: 50 },
         { name: 'Communication', proficiency: 55 },
-        { name: 'Git', proficiency: 88 }
-      ]
+        { name: 'Git', proficiency: 88 },
+      ],
     };
 
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: 'p1',
-      options: { allowPadding: true, maxAttempts: 1, requestedCount: 7, minCount: 5 }
+      options: { allowPadding: true, maxAttempts: 1, requestedCount: 7, minCount: 5 },
     });
 
     expect(result).toBeTruthy();
@@ -208,18 +210,19 @@ describe('recommendationsInitialService (Bedrock-first; padding only when explic
       }))
     }));
 
-    // eslint-disable-next-line global-require
-    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = require('../../src/services/recommendationsInitialService');
+    const { generateInitialRecommendationsPersonaDrivenBedrockOnly } = await import(
+      '../../src/services/recommendationsInitialService.js'
+    );
 
     const finalPersona = {
       // only strings -> no numeric proficiencies
-      skills: ['SQL', 'Excel', 'Communication']
+      skills: ['SQL', 'Excel', 'Communication'],
     };
 
     const result = await generateInitialRecommendationsPersonaDrivenBedrockOnly({
       finalPersona,
       personaId: 'p2',
-      options: { allowPadding: false, maxAttempts: 1, requestedCount: 7, minCount: 5 }
+      options: { allowPadding: false, maxAttempts: 1, requestedCount: 7, minCount: 5 },
     });
 
     expect(Array.isArray(result.roles)).toBe(true);
