@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * Jest setup: load environment variables from the backend's .env file.
  *
@@ -10,8 +8,12 @@
  * This keeps env loading consistent between runtime and tests.
  */
 
-const path = require('path');
-const dotenv = require('dotenv');
+import path from 'path';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load env from express_backend/.env regardless of Jest's working directory.
 dotenv.config({ path: path.resolve(__dirname, '../.env') });

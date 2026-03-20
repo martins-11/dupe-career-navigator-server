@@ -1,6 +1,6 @@
-'use strict';
+import request from 'supertest';
 
-const request = require('supertest');
+import app from '../../src/server.js';
 
 /**
  * MVP Smoke: core persona builder flow in DB-off (memory fallback) mode.
@@ -20,7 +20,10 @@ describe('MVP Smoke: persona builder flow (DB-off / memory fallback)', () => {
   jest.setTimeout(60_000);
 
   function uuidLike(v) {
-    return typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+    return (
+      typeof v === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+    );
   }
 
   beforeEach(() => {
@@ -38,9 +41,6 @@ describe('MVP Smoke: persona builder flow (DB-off / memory fallback)', () => {
   });
 
   test('upload → run-all(draft+save) → finalize(save) → retrieve draft/final', async () => {
-    // Import app AFTER env setup. Use dynamic import so we can load ESM server code from this CJS test.
-    const { default: app } = await import('../../src/server.js');
-
     const userId = '11111111-1111-4111-8111-111111111111';
 
     const resumeText = [
@@ -76,9 +76,15 @@ describe('MVP Smoke: persona builder flow (DB-off / memory fallback)', () => {
       .field('userId', userId)
       .field('requireCategories', 'true')
       .field('categoriesJson', JSON.stringify(['resume', 'job_description', 'performance_review']))
-      .attach('files', Buffer.from(resumeText, 'utf8'), { filename: 'resume.txt', contentType: 'text/plain' })
+      .attach('files', Buffer.from(resumeText, 'utf8'), {
+        filename: 'resume.txt',
+        contentType: 'text/plain'
+      })
       .attach('files', Buffer.from(jdText, 'utf8'), { filename: 'jd.txt', contentType: 'text/plain' })
-      .attach('files', Buffer.from(perfText, 'utf8'), { filename: 'review.txt', contentType: 'text/plain' });
+      .attach('files', Buffer.from(perfText, 'utf8'), {
+        filename: 'review.txt',
+        contentType: 'text/plain'
+      });
 
     expect(uploadResp.status).toBe(200);
     expect(uploadResp.body).toBeTruthy();
