@@ -237,8 +237,7 @@ describe('bedrock initial recommendations extraction (unit)', () => {
       };
     });
 
-    // eslint-disable-next-line global-require
-    const svc = require('../../src/services/bedrockService');
+    const svc = await import('../../src/services/bedrockService.js');
 
     const finalPersona = { skills_with_proficiency: [{ name: 'Python', proficiency: 80 }] };
 

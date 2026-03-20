@@ -32,10 +32,11 @@ describe('GET /api/recommendations/initial bypasses fallback-only cache and uses
       getInitialRecommendations: mockGetInitial,
     }));
 
-    const [{ default: app }, { default: holisticPersonaRepo }] = await Promise.all([
-      import('../../src/server.js'),
-      import('../../src/repositories/holisticPersonaRepoAdapter.js'),
-    ]);
+    // IMPORTANT (Jest ESM linking stability):
+    // Parallel ESM linking via Promise.all can trigger "request for 'pg' is not yet fulfilled"
+    // in Jest's runtime. Import serially to avoid the linking hazard.
+    const { default: app } = await import('../../src/server.js');
+    const { default: holisticPersonaRepo } = await import('../../src/repositories/holisticPersonaRepoAdapter.js');
 
     const personaId = 'aef4a4b9-707e-4946-88de-5cc0dc31c099';
 

@@ -1,6 +1,7 @@
-'use strict';
-
-const { extractNameAndCurrentRole, extractBestNameAndRoleFromDocuments } = require('../../src/utils/nameRoleExtraction');
+import {
+  extractNameAndCurrentRole,
+  extractBestNameAndRoleFromDocuments,
+} from '../../src/utils/nameRoleExtraction.js';
 
 describe('nameRoleExtraction (unit)', () => {
   test('single-doc performance review: extracts employee name and does not return generic label', () => {
@@ -10,7 +11,7 @@ describe('nameRoleExtraction (unit)', () => {
       'Reviewer: John Manager',
       '',
       'Summary:',
-      'Jane consistently delivered high quality work and improved team velocity.'
+      'Jane consistently delivered high quality work and improved team velocity.',
     ].join('\n');
 
     const out = extractNameAndCurrentRole(perfReviewText);
@@ -26,7 +27,7 @@ describe('nameRoleExtraction (unit)', () => {
       'Position Title: Senior Backend Engineer',
       '',
       'Responsibilities:',
-      '- Build APIs'
+      '- Build APIs',
     ].join('\n');
 
     const out = extractNameAndCurrentRole(jdText);
@@ -38,12 +39,12 @@ describe('nameRoleExtraction (unit)', () => {
     const docs = [
       {
         category: 'job_description',
-        textContent: ['Job Description', 'Position Title: Data Analyst', '...'].join('\n')
+        textContent: ['Job Description', 'Position Title: Data Analyst', '...'].join('\n'),
       },
       {
         category: 'performance_review',
-        textContent: ['Performance Review', 'Employee Name: Taylor Chen', '...'].join('\n')
-      }
+        textContent: ['Performance Review', 'Employee Name: Taylor Chen', '...'].join('\n'),
+      },
     ];
 
     const out = extractBestNameAndRoleFromDocuments(docs);
@@ -56,12 +57,12 @@ describe('nameRoleExtraction (unit)', () => {
     const docs = [
       {
         category: 'resume',
-        textContent: ['Alex Rivera', 'alex@example.com', '', 'SUMMARY', '...'].join('\n')
+        textContent: ['Alex Rivera', 'alex@example.com', '', 'SUMMARY', '...'].join('\n'),
       },
       {
         category: 'job_description',
-        textContent: ['Job Description', 'Job Title: Staff Software Engineer', '...'].join('\n')
-      }
+        textContent: ['Job Description', 'Job Title: Staff Software Engineer', '...'].join('\n'),
+      },
     ];
 
     const out = extractBestNameAndRoleFromDocuments(docs);
