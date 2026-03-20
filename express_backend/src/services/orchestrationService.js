@@ -916,11 +916,48 @@ function _updateWorkflowProgress(buildId, patch) {
 
   if (!wf) return null;
 
-  // If caller is trying to set a terminal status, use the explicit APIs.
+  /**
+   * If caller is trying to set a terminal status, use the explicit APIs.
+   *
+   * IMPORTANT bugfix:
+   * workflowService enforces a strict state machine:
+   *   queued -> running|cancelled
+   *   running -> succeeded|failed|cancelled
+   *
+   * Orchestration can fail very quickly (e.g., missing extracted text) before the
+   * background workflow simulator ticks queued->running. In that case, calling
+   * failWorkflow() would attempt an invalid transition queued->failed and throw,
+   * masking the real underlying orchestration error with INVALID_WORKFLOW_TRANSITION.
+   *
+   * Therefore, when we need to set a terminal status while still queued, we first
+   * best-effort transition queued->running.
+   */
+  const ensureRunningIfQueued = () => {
+    const cur = workflowService.getWorkflowUnsafeRead
+      ? workflowService.getWorkflowUnsafeRead(buildId)
+      : workflowService.getWorkflow(buildId);
+
+    if (!cur) return;
+
+    if (cur.status === 'queued' && typeof workflowService.transitionWorkflow === 'function') {
+      try {
+        workflowService.transitionWorkflow(buildId, 'running', {
+          progress: Math.max(Number(cur.progress || 0), 1),
+          currentStep: patch?.currentStep ?? cur.currentStep ?? 'validate_inputs',
+          message: patch?.message ?? cur.message ?? 'Orchestration running…'
+        });
+      } catch (_) {
+        // Best-effort only. If another tick already moved state, ignore.
+      }
+    }
+  };
+
   if (patch && patch.status === 'failed') {
+    ensureRunningIfQueued();
     return workflowService.failWorkflow(buildId, patch.message || 'Build failed.', patch.failure || null);
   }
   if (patch && patch.status === 'succeeded') {
+    ensureRunningIfQueued();
     return workflowService.succeedWorkflow(buildId, patch.message || 'Build complete.');
   }
 
