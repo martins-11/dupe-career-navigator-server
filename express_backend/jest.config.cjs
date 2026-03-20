@@ -11,6 +11,19 @@ module.exports = {
    * Map that prefix to the real rootDir/src so resolution is consistent in Jest.
    */
   moduleNameMapper: {
+    /**
+     * Normalize Bedrock service imports for stable mocking.
+     *
+     * In ESM, Jest can treat specifiers with and without `.js` as distinct module IDs.
+     * Some tests do `jest.doMock('../../src/services/bedrockService', ...)` (no extension),
+     * while production code imports `./bedrockService.js` (with extension).
+     *
+     * Mapping BOTH forms to the same physical file ensures `jest.doMock()` intercepts
+     * the import consistently across suites.
+     */
+    '^(.*?/src/services/bedrockService)\\.js$': '$1.js',
+    '^(.*?/src/services/bedrockService)$': '$1.js',
+
     '^src/(.*)$': '<rootDir>/src/$1',
   },
 
