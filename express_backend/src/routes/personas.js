@@ -285,9 +285,17 @@ router.post('/target-role', async (req, res) => {
    * Persistence:
    * - Writes to user_targets table (DB-optional; if DB not configured, returns 503).
    */
-  const parsed = PersonaTargetRoleSelectRequest.safeParse(req.body);
+  // NOTE: PersonaTargetRoleSelectRequest is a lazy async Zod schema proxy; safeParse returns a Promise.
+  const parsed = await PersonaTargetRoleSelectRequest.safeParse(req.body);
+
   if (!parsed.success) {
-    return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
+    // Guard against unexpected shapes (e.g., if parsed.error is missing).
+    const details =
+      parsed && parsed.error && typeof parsed.error.flatten === 'function'
+        ? parsed.error.flatten()
+        : { issues: parsed?.error?.issues || parsed?.error || null };
+
+    return res.status(400).json({ error: 'validation_error', details });
   }
 
   try {
