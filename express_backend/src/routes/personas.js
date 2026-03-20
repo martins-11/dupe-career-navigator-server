@@ -13,6 +13,7 @@ import { PersonaTargetRoleSelectRequest } from '../models/targets.js';
 
 import { getDbEngine, isDbConfigured, isMysqlConfigured } from '../db/connection.js';
 import { DEFAULT_ROLES_CATALOG } from '../services/recommendationsService.js';
+import { sendError } from '../utils/errors.js';
 
 const router = express.Router();
 
@@ -27,22 +28,15 @@ const router = express.Router();
  * - list persona versions
  * - get latest persona version
  *
- * Until DB env vars are configured, endpoints return 503 with db_unavailable.
+ * DB mode + in-memory fallback is implemented in repository adapters. Route handlers should:
+ * - validate input consistently
+ * - return OpenAPI ErrorResponse shapes (via sendError)
  */
-
-function handleRepoError(res, err) {
-  // In adapter mode, DB-not-configured should never be fatal (memory fallback).
-  // Only treat connection/runtime DB errors as 503.
-  const msg = String(err && err.message ? err.message : err);
-  if (/database/i.test(msg) || /postgres/i.test(msg) || /connection/i.test(msg) || /mysql/i.test(msg)) {
-    return res.status(503).json({ error: 'db_unavailable', message: msg });
-  }
-  return res.status(500).json({ error: 'internal_server_error', message: msg });
-}
 
 router.post('/', async (req, res) => {
   const parsed = PersonaCreateRequest.safeParse(req.body);
   if (!parsed.success) {
+    // Match OpenAPI ErrorResponse shape
     return res.status(400).json({ error: 'validation_error', details: parsed.error.flatten() });
   }
 
@@ -50,17 +44,17 @@ router.post('/', async (req, res) => {
     const persona = await personasRepo.createPersona(parsed.data);
     return res.status(201).json(persona);
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
 router.get('/:id', async (req, res) => {
   try {
     const persona = await personasRepo.getPersonaById(req.params.id);
-    if (!persona) return res.status(404).json({ error: 'not_found' });
+    if (!persona) return res.status(404).json({ error: 'not_found', message: 'Persona not found.' });
     return res.json(persona);
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
@@ -82,16 +76,16 @@ router.get('/:id/draft/latest', async (req, res) => {
 
     // Ensure persona exists (consistent with other persona routes).
     const existing = await personasRepo.getPersonaById(personaId);
-    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+    if (!existing) return res.status(404).json({ error: 'not_found', message: 'Persona not found.' });
 
     const draft = await personasRepo.getDraft(personaId);
     if (!draft || !draft.draftJson) {
-      return res.status(404).json({ error: 'draft_not_found', message: 'No saved draft exists for this persona yet.' });
+      return res.status(404).json({ error: 'not_found', message: 'No saved draft exists for this persona yet.' });
     }
 
     return res.json(draft);
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
@@ -116,7 +110,7 @@ router.put('/:id/draft/latest', async (req, res) => {
 
     // Ensure persona exists (consistent with other persona routes).
     const existing = await personasRepo.getPersonaById(personaId);
-    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+    if (!existing) return res.status(404).json({ error: 'not_found', message: 'Persona not found.' });
 
     const body = req.body ?? {};
     const draftJson =
@@ -136,7 +130,7 @@ router.put('/:id/draft/latest', async (req, res) => {
 
     return res.status(200).json(saved);
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
@@ -154,19 +148,19 @@ router.get('/:id/final/latest', async (req, res) => {
 
     // Ensure persona exists (consistent with other persona routes).
     const existing = await personasRepo.getPersonaById(personaId);
-    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+    if (!existing) return res.status(404).json({ error: 'not_found', message: 'Persona not found.' });
 
     const finalBlob = await personasRepo.getFinal(personaId);
     if (!finalBlob || !finalBlob.finalJson) {
       return res.status(404).json({
-        error: 'final_not_found',
+        error: 'not_found',
         message: 'No finalized persona exists for this persona yet.'
       });
     }
 
     return res.json(finalBlob);
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
@@ -219,7 +213,7 @@ router.put('/:id', async (req, res) => {
 
     return res.json({ persona: updated, createdVersion });
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
@@ -231,38 +225,38 @@ router.post('/:id/versions', async (req, res) => {
 
   try {
     const existing = await personasRepo.getPersonaById(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+    if (!existing) return res.status(404).json({ error: 'not_found', message: 'Persona not found.' });
 
     const version = await personasRepo.createPersonaVersion(req.params.id, parsed.data);
     return res.status(201).json(version);
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
 router.get('/:id/versions', async (req, res) => {
   try {
     const existing = await personasRepo.getPersonaById(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+    if (!existing) return res.status(404).json({ error: 'not_found', message: 'Persona not found.' });
 
     const versions = await personasRepo.listPersonaVersions(req.params.id);
     return res.json({ personaId: req.params.id, versions });
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
 router.get('/:id/versions/latest', async (req, res) => {
   try {
     const existing = await personasRepo.getPersonaById(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'persona_not_found' });
+    if (!existing) return res.status(404).json({ error: 'not_found', message: 'Persona not found.' });
 
     const latest = await personasRepo.getLatestPersonaVersion(req.params.id);
-    if (!latest) return res.status(404).json({ error: 'persona_version_not_found' });
+    if (!latest) return res.status(404).json({ error: 'not_found', message: 'Persona version not found.' });
 
     return res.json(latest);
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
@@ -342,13 +336,19 @@ router.post('/target-role', async (req, res) => {
       timeHorizon: parsed.data.time_horizon
     });
 
+    // OpenAPI contract: PersonaTargetRoleSelectResponse is { status, target } (no extra top-level keys).
+    // If we want to expose persistence hints, attach them inside `target` (additionalProperties:true).
+    const target =
+      saved && typeof saved === 'object'
+        ? { ...saved, persistence: { type: dbAvailable ? 'mysql' : 'memory' } }
+        : { value: saved, persistence: { type: dbAvailable ? 'mysql' : 'memory' } };
+
     return res.status(201).json({
       status: 'ok',
-      target: saved,
-      persistence: { type: dbAvailable ? 'mysql' : 'memory' }
+      target
     });
   } catch (err) {
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
@@ -385,15 +385,19 @@ router.get('/target-role', async (req, res) => {
     if (!latest) {
       return res.json({
         status: 'ok',
-        target: null,
-        persistence: { available: false }
+        target: null
       });
     }
 
+    // As with POST, if we want persistence hints, attach them inside target (additionalProperties:true).
+    const target =
+      latest && typeof latest === 'object'
+        ? { ...latest, persistence: { available: true } }
+        : { value: latest, persistence: { available: true } };
+
     return res.json({
       status: 'ok',
-      target: latest,
-      persistence: { available: true }
+      target
     });
   } catch (err) {
     // If this looks like a DB connectivity/config issue, degrade gracefully (same as no record).
@@ -401,11 +405,10 @@ router.get('/target-role', async (req, res) => {
     if (/db_unavailable/i.test(msg) || /database/i.test(msg) || /mysql/i.test(msg) || /connection/i.test(msg)) {
       return res.json({
         status: 'ok',
-        target: null,
-        persistence: { available: false }
+        target: null
       });
     }
-    return handleRepoError(res, err);
+    return sendError(res, err);
   }
 });
 
